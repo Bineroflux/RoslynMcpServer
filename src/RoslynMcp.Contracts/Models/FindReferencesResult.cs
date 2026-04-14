@@ -29,4 +29,18 @@ public sealed class FindReferencesResult
     /// Whether the result was truncated due to maxResults.
     /// </summary>
     public bool Truncated { get; init; }
+
+    /// <summary>
+    /// True when the symbol was resolved from Roslyn's error-tolerant candidate list
+    /// rather than as a definitive match. This occurs when the source file contains
+    /// compile errors and the semantic model is incomplete. References are best-effort.
+    /// </summary>
+    public bool SymbolIsCandidate { get; init; }
+
+    /// <summary>
+    /// Fully qualified names of all candidate symbols that were searched when
+    /// <see cref="SymbolIsCandidate"/> is true. References are the union of all candidates.
+    /// Empty when the symbol was resolved definitively.
+    /// </summary>
+    public IReadOnlyList<string> CandidateFullyQualifiedNames { get; init; } = [];
 }

@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -144,6 +145,22 @@ public sealed class SymbolResolver
                     };
                 }
             }
+            else if (symbolInfo.CandidateSymbols.Length > 0)
+            {
+                var candidates = expectedName == null
+                    ? symbolInfo.CandidateSymbols
+                    : symbolInfo.CandidateSymbols.Where(s => s.Name == expectedName).ToImmutableArray();
+                if (candidates.Length > 0)
+                {
+                    return new GeneralSymbolResolutionResult
+                    {
+                        Symbol = candidates[0],
+                        Document = document,
+                        IsCandidate = true,
+                        AllCandidates = candidates
+                    };
+                }
+            }
 
             node = node.Parent;
         }
@@ -269,4 +286,17 @@ public sealed class GeneralSymbolResolutionResult
     /// The document containing the symbol.
     /// </summary>
     public required Document Document { get; init; }
+
+    /// <summary>
+    /// True when the symbol was resolved from Roslyn's candidate list rather than as a definitive match.
+    /// This happens when the source file contains compile errors and the semantic model is incomplete.
+    /// Results are still useful but should be treated as best-effort.
+    /// </summary>
+    public bool IsCandidate { get; init; }
+
+    /// <summary>
+    /// All candidate symbols Roslyn suggested when <see cref="IsCandidate"/> is true.
+    /// <see cref="Symbol"/> is always the first entry. Empty when resolution was definitive.
+    /// </summary>
+    public IReadOnlyList<ISymbol> AllCandidates { get; init; } = [];
 }

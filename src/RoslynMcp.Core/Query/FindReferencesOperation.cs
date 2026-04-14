@@ -60,60 +60,75 @@ public sealed class FindReferencesOperation : QueryOperationBase<FindReferencesP
 
         var symbol = resolved.Symbol;
 
-        // Find all references via Roslyn
-        var referencedSymbols = await SymbolFinder.FindReferencesAsync(
-            symbol, Context.Solution, cancellationToken);
+        // When resolved as candidates, search all of them; otherwise just the one symbol.
+        var symbolsToSearch = resolved.IsCandidate
+            ? resolved.AllCandidates
+            : [symbol];
 
         var locations = new List<ReferenceLocationInfo>();
+        var seen = new HashSet<(string file, int line, int col)>();
         var totalCount = 0;
         var maxResults = @params.MaxResults ?? int.MaxValue;
 
-        foreach (var referencedSymbol in referencedSymbols)
+        foreach (var searchSymbol in symbolsToSearch)
         {
-            // Add the definition itself
-            foreach (var defLocation in referencedSymbol.Definition.Locations.Where(l => l.IsInSource))
+            var referencedSymbols = await SymbolFinder.FindReferencesAsync(
+                searchSymbol, Context.Solution, cancellationToken);
+
+            foreach (var referencedSymbol in referencedSymbols)
             {
-                totalCount++;
-                if (locations.Count < maxResults)
+                // Add the definition itself
+                foreach (var defLocation in referencedSymbol.Definition.Locations.Where(l => l.IsInSource))
                 {
                     var lineSpan = defLocation.GetLineSpan();
-                    var snippet = await GetContextSnippetAsync(defLocation, cancellationToken);
-
-                    locations.Add(new ReferenceLocationInfo
+                    var key = (lineSpan.Path, lineSpan.StartLinePosition.Line, lineSpan.StartLinePosition.Character);
+                    if (!seen.Add(key)) continue;
+                    totalCount++;
+                    if (locations.Count < maxResults)
                     {
-                        File = lineSpan.Path,
-                        Line = lineSpan.StartLinePosition.Line + 1,
-                        Column = lineSpan.StartLinePosition.Character + 1,
-                        ContextSnippet = snippet,
-                        IsWriteAccess = false,
-                        IsDefinition = true
-                    });
+                        var snippet = await GetContextSnippetAsync(defLocation, cancellationToken);
+                        locations.Add(new ReferenceLocationInfo
+                        {
+                            File = lineSpan.Path,
+                            Line = lineSpan.StartLinePosition.Line + 1,
+                            Column = lineSpan.StartLinePosition.Character + 1,
+                            ContextSnippet = snippet,
+                            IsWriteAccess = false,
+                            IsDefinition = true
+                        });
+                    }
                 }
-            }
 
-            // Add each reference
-            foreach (var refLocation in referencedSymbol.Locations)
-            {
-                if (refLocation.Document == null) continue;
-                totalCount++;
-
-                if (locations.Count < maxResults)
+                // Add each reference
+                foreach (var refLocation in referencedSymbol.Locations)
                 {
+                    if (refLocation.Document == null) continue;
                     var span = refLocation.Location.GetLineSpan();
-                    var snippet = await GetContextSnippetAsync(refLocation.Location, cancellationToken);
+                    var file = refLocation.Document.FilePath ?? span.Path;
+                    var key = (file, span.StartLinePosition.Line, span.StartLinePosition.Character);
+                    if (!seen.Add(key)) continue;
+                    totalCount++;
 
-                    locations.Add(new ReferenceLocationInfo
+                    if (locations.Count < maxResults)
                     {
-                        File = refLocation.Document.FilePath ?? span.Path,
-                        Line = span.StartLinePosition.Line + 1,
-                        Column = span.StartLinePosition.Character + 1,
-                        ContextSnippet = snippet,
-                        IsWriteAccess = false,
-                        IsDefinition = false
-                    });
+                        var snippet = await GetContextSnippetAsync(refLocation.Location, cancellationToken);
+                        locations.Add(new ReferenceLocationInfo
+                        {
+                            File = file,
+                            Line = span.StartLinePosition.Line + 1,
+                            Column = span.StartLinePosition.Character + 1,
+                            ContextSnippet = snippet,
+                            IsWriteAccess = false,
+                            IsDefinition = false
+                        });
+                    }
                 }
             }
         }
+
+        var candidateFqns = resolved.IsCandidate
+            ? resolved.AllCandidates.Select(s => s.ToDisplayString()).ToList()
+            : [];
 
         var result = new FindReferencesResult
         {
@@ -121,7 +136,9 @@ public sealed class FindReferencesOperation : QueryOperationBase<FindReferencesP
             FullyQualifiedName = symbol.ToDisplayString(),
             References = locations,
             TotalCount = totalCount,
-            Truncated = totalCount > locations.Count
+            Truncated = totalCount > locations.Count,
+            SymbolIsCandidate = resolved.IsCandidate,
+            CandidateFullyQualifiedNames = candidateFqns
         };
 
         return QueryResult<FindReferencesResult>.Succeeded(operationId, result);

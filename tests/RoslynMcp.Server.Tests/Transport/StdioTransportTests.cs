@@ -17,7 +17,7 @@ public class StdioTransportTests
         using var transport = new StdioTransport(input, output);
 
         // Act
-        var request = await transport.ReadMessageAsync();
+        var request = await transport.ReadMessageAsync(TestContext.Current.CancellationToken);
 
         // Assert
         Assert.NotNull(request);
@@ -35,7 +35,7 @@ public class StdioTransportTests
         using var transport = new StdioTransport(input, output);
 
         // Act
-        var request = await transport.ReadMessageAsync();
+        var request = await transport.ReadMessageAsync(TestContext.Current.CancellationToken);
 
         // Assert
         Assert.Null(request);
@@ -50,7 +50,7 @@ public class StdioTransportTests
         using var transport = new StdioTransport(input, output);
 
         // Act
-        var request = await transport.ReadMessageAsync();
+        var request = await transport.ReadMessageAsync(TestContext.Current.CancellationToken);
 
         // Assert
         Assert.Null(request);
@@ -67,7 +67,7 @@ public class StdioTransportTests
 
         // Act & Assert
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(
-            () => transport.ReadMessageAsync());
+            () => transport.ReadMessageAsync(TestContext.Current.CancellationToken));
         Assert.StartsWith("Failed to parse MCP message", ex.Message);
     }
 
@@ -81,9 +81,9 @@ public class StdioTransportTests
         var response = McpResponse.Success(1, new { test = "value" });
 
         // Act
-        await transport.WriteMessageAsync(response);
+        await transport.WriteMessageAsync(response, TestContext.Current.CancellationToken);
         output.Position = 0;
-        var written = await new StreamReader(output).ReadToEndAsync();
+        var written = await new StreamReader(output).ReadToEndAsync(TestContext.Current.CancellationToken);
 
         // Assert
         Assert.Contains("\"jsonrpc\":\"2.0\"", written);
@@ -101,9 +101,9 @@ public class StdioTransportTests
         var response = McpResponse.Failure(null, -32700, "Parse error");
 
         // Act
-        await transport.WriteMessageAsync(response);
+        await transport.WriteMessageAsync(response, TestContext.Current.CancellationToken);
         output.Position = 0;
-        var written = await new StreamReader(output).ReadToEndAsync();
+        var written = await new StreamReader(output).ReadToEndAsync(TestContext.Current.CancellationToken);
 
         // Assert
         Assert.Contains("\"jsonrpc\":\"2.0\"", written);

@@ -126,7 +126,7 @@ public class ExtractMethodToolTests
     [Fact]
     public async Task ExecuteAsync_NullArguments_ReturnsError()
     {
-        var result = await _tool.ExecuteAsync(null);
+        var result = await _tool.ExecuteAsync(null, TestContext.Current.CancellationToken);
 
         Assert.True(result.IsError);
         Assert.Contains("Arguments required", GetResultText(result));
@@ -137,7 +137,7 @@ public class ExtractMethodToolTests
     {
         var args = JsonDocument.Parse("{}").RootElement;
 
-        var result = await _tool.ExecuteAsync(args);
+        var result = await _tool.ExecuteAsync(args, TestContext.Current.CancellationToken);
 
         Assert.True(result.IsError);
     }
@@ -155,7 +155,7 @@ public class ExtractMethodToolTests
             ""endColumn"": 1
         }").RootElement;
 
-        var result = await _tool.ExecuteAsync(args);
+        var result = await _tool.ExecuteAsync(args, TestContext.Current.CancellationToken);
 
         Assert.True(result.IsError);
     }

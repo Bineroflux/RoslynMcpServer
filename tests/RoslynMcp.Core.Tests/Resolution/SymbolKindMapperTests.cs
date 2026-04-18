@@ -102,9 +102,9 @@ public class SymbolKindMapperTests
     public void Map_Field_ReturnsField()
     {
         var (_, model, tree) = CreateCompilation("public class C { public int _field; }");
-        var root = tree.GetCompilationUnitRoot();
+        var root = tree.GetCompilationUnitRoot(TestContext.Current.CancellationToken);
         var fieldDecl = root.DescendantNodes().OfType<VariableDeclaratorSyntax>().First();
-        var symbol = model.GetDeclaredSymbol(fieldDecl)!;
+        var symbol = model.GetDeclaredSymbol(fieldDecl, TestContext.Current.CancellationToken)!;
         Assert.Equal(ContractSymbolKind.Field, SymbolKindMapper.Map(symbol));
     }
 
@@ -112,9 +112,9 @@ public class SymbolKindMapperTests
     public void Map_ConstField_ReturnsConstant()
     {
         var (_, model, tree) = CreateCompilation("public class C { public const int MAX = 100; }");
-        var root = tree.GetCompilationUnitRoot();
+        var root = tree.GetCompilationUnitRoot(TestContext.Current.CancellationToken);
         var fieldDecl = root.DescendantNodes().OfType<VariableDeclaratorSyntax>().First();
-        var symbol = model.GetDeclaredSymbol(fieldDecl)!;
+        var symbol = model.GetDeclaredSymbol(fieldDecl, TestContext.Current.CancellationToken)!;
         Assert.Equal(ContractSymbolKind.Constant, SymbolKindMapper.Map(symbol));
     }
 
@@ -123,9 +123,9 @@ public class SymbolKindMapperTests
     {
         var source = "using System; public class C { public event EventHandler MyEvent; }";
         var (_, model, tree) = CreateCompilation(source);
-        var root = tree.GetCompilationUnitRoot();
+        var root = tree.GetCompilationUnitRoot(TestContext.Current.CancellationToken);
         var eventDecl = root.DescendantNodes().OfType<VariableDeclaratorSyntax>().First();
-        var symbol = model.GetDeclaredSymbol(eventDecl)!;
+        var symbol = model.GetDeclaredSymbol(eventDecl, TestContext.Current.CancellationToken)!;
         Assert.Equal(ContractSymbolKind.Event, SymbolKindMapper.Map(symbol));
     }
 

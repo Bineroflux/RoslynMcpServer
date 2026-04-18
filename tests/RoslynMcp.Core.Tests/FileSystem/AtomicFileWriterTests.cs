@@ -23,11 +23,11 @@ public class AtomicFileWriterTests : IDisposable
         var content = "public class Test { }";
 
         // Act
-        await _writer.WriteAsync(filePath, content);
+        await _writer.WriteAsync(filePath, content, TestContext.Current.CancellationToken);
 
         // Assert
         Assert.True(File.Exists(filePath));
-        Assert.Equal(content, await File.ReadAllTextAsync(filePath));
+        Assert.Equal(content, await File.ReadAllTextAsync(filePath, TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -35,14 +35,14 @@ public class AtomicFileWriterTests : IDisposable
     {
         // Arrange
         var filePath = Path.Combine(_tempDir, "existing.cs");
-        await File.WriteAllTextAsync(filePath, "old content");
+        await File.WriteAllTextAsync(filePath, "old content", TestContext.Current.CancellationToken);
         var newContent = "new content";
 
         // Act
-        await _writer.WriteAsync(filePath, newContent);
+        await _writer.WriteAsync(filePath, newContent, TestContext.Current.CancellationToken);
 
         // Assert
-        Assert.Equal(newContent, await File.ReadAllTextAsync(filePath));
+        Assert.Equal(newContent, await File.ReadAllTextAsync(filePath, TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -53,7 +53,7 @@ public class AtomicFileWriterTests : IDisposable
         var content = "test content";
 
         // Act
-        await _writer.WriteAsync(filePath, content);
+        await _writer.WriteAsync(filePath, content, TestContext.Current.CancellationToken);
 
         // Assert
         Assert.True(File.Exists(filePath));

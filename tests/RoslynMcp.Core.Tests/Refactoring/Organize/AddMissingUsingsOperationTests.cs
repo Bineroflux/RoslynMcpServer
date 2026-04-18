@@ -169,8 +169,8 @@ public class AddMissingUsingsOperationTests
     {
         // Arrange
         var source = "List<int> items;";
-        var tree = CSharpSyntaxTree.ParseText($"class Test {{ {source} }}");
-        var genericName = tree.GetRoot()
+        var tree = CSharpSyntaxTree.ParseText($"class Test {{ {source} }}", cancellationToken: TestContext.Current.CancellationToken);
+        var genericName = tree.GetRoot(TestContext.Current.CancellationToken)
             .DescendantNodes()
             .OfType<GenericNameSyntax>()
             .First();
@@ -206,8 +206,8 @@ public class AddMissingUsingsOperationTests
     {
         // Arrange
         var source = "System.Collections.Generic.List<int> items;";
-        var tree = CSharpSyntaxTree.ParseText($"class Test {{ {source} }}");
-        var qualifiedName = tree.GetRoot()
+        var tree = CSharpSyntaxTree.ParseText($"class Test {{ {source} }}", cancellationToken: TestContext.Current.CancellationToken);
+        var qualifiedName = tree.GetRoot(TestContext.Current.CancellationToken)
             .DescendantNodes()
             .OfType<QualifiedNameSyntax>()
             .FirstOrDefault();

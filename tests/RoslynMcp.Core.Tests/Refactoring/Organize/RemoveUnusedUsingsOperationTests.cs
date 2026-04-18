@@ -178,8 +178,8 @@ public class RemoveUnusedUsingsOperationTests
     {
         // Arrange
         var source = "using static System.Math;";
-        var tree = CSharpSyntaxTree.ParseText(source);
-        var usingDirective = tree.GetRoot()
+        var tree = CSharpSyntaxTree.ParseText(source, cancellationToken: TestContext.Current.CancellationToken);
+        var usingDirective = tree.GetRoot(TestContext.Current.CancellationToken)
             .DescendantNodes()
             .OfType<UsingDirectiveSyntax>()
             .First();
@@ -196,8 +196,8 @@ public class RemoveUnusedUsingsOperationTests
     {
         // Arrange
         var source = "using System;";
-        var tree = CSharpSyntaxTree.ParseText(source);
-        var usingDirective = tree.GetRoot()
+        var tree = CSharpSyntaxTree.ParseText(source, cancellationToken: TestContext.Current.CancellationToken);
+        var usingDirective = tree.GetRoot(TestContext.Current.CancellationToken)
             .DescendantNodes()
             .OfType<UsingDirectiveSyntax>()
             .First();
@@ -232,8 +232,8 @@ public class RemoveUnusedUsingsOperationTests
     {
         // Arrange
         var source = "using MyList = System.Collections.Generic.List<int>;";
-        var tree = CSharpSyntaxTree.ParseText(source);
-        var usingDirective = tree.GetRoot()
+        var tree = CSharpSyntaxTree.ParseText(source, cancellationToken: TestContext.Current.CancellationToken);
+        var usingDirective = tree.GetRoot(TestContext.Current.CancellationToken)
             .DescendantNodes()
             .OfType<UsingDirectiveSyntax>()
             .First();
@@ -278,8 +278,8 @@ public class RemoveUnusedUsingsOperationTests
     {
         // Arrange
         var source = "using MyAlias = System.String;";
-        var tree = CSharpSyntaxTree.ParseText(source);
-        var usingDirective = tree.GetRoot()
+        var tree = CSharpSyntaxTree.ParseText(source, cancellationToken: TestContext.Current.CancellationToken);
+        var usingDirective = tree.GetRoot(TestContext.Current.CancellationToken)
             .DescendantNodes()
             .OfType<UsingDirectiveSyntax>()
             .First();

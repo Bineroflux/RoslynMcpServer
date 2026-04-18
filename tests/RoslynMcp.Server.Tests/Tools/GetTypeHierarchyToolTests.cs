@@ -61,7 +61,7 @@ public class GetTypeHierarchyToolTests
     [Fact]
     public async Task ExecuteAsync_NullArguments_ReturnsError()
     {
-        var result = await _tool.ExecuteAsync(null);
+        var result = await _tool.ExecuteAsync(null, TestContext.Current.CancellationToken);
         Assert.True(result.IsError);
         Assert.Contains("Arguments required", result.Content.FirstOrDefault()?.Text ?? "");
     }
@@ -70,7 +70,7 @@ public class GetTypeHierarchyToolTests
     public async Task ExecuteAsync_EmptyArguments_ReturnsError()
     {
         var args = JsonDocument.Parse("{}").RootElement;
-        var result = await _tool.ExecuteAsync(args);
+        var result = await _tool.ExecuteAsync(args, TestContext.Current.CancellationToken);
         Assert.True(result.IsError);
     }
 }

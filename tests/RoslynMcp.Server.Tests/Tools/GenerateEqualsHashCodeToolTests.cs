@@ -80,7 +80,7 @@ public class GenerateEqualsHashCodeToolTests
     public async Task ExecuteAsync_NullArguments_ReturnsError()
     {
         // Act
-        var result = await _tool.ExecuteAsync(null);
+        var result = await _tool.ExecuteAsync(null, TestContext.Current.CancellationToken);
 
         // Assert
         Assert.True(result.IsError);
@@ -94,7 +94,7 @@ public class GenerateEqualsHashCodeToolTests
         var args = JsonDocument.Parse("{}").RootElement;
 
         // Act
-        var result = await _tool.ExecuteAsync(args);
+        var result = await _tool.ExecuteAsync(args, TestContext.Current.CancellationToken);
 
         // Assert
         // The tool will try to deserialize and proceed, but fail when accessing workspace

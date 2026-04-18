@@ -299,8 +299,8 @@ class Test {
         var x = 1;
     }
 }";
-        var tree = CSharpSyntaxTree.ParseText(source);
-        var statement = tree.GetRoot()
+        var tree = CSharpSyntaxTree.ParseText(source, cancellationToken: TestContext.Current.CancellationToken);
+        var statement = tree.GetRoot(TestContext.Current.CancellationToken)
             .DescendantNodes()
             .OfType<LocalDeclarationStatementSyntax>()
             .First();
@@ -323,8 +323,8 @@ class Test {
         var x = 1;
     }
 }";
-        var tree = CSharpSyntaxTree.ParseText(source);
-        var statement = tree.GetRoot()
+        var tree = CSharpSyntaxTree.ParseText(source, cancellationToken: TestContext.Current.CancellationToken);
+        var statement = tree.GetRoot(TestContext.Current.CancellationToken)
             .DescendantNodes()
             .OfType<LocalDeclarationStatementSyntax>()
             .First();

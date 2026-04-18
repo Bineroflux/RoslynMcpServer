@@ -93,7 +93,7 @@ public class RemoveUnusedUsingsToolTests
     [Fact]
     public async Task ExecuteAsync_NullArguments_ReturnsError()
     {
-        var result = await _tool.ExecuteAsync(null);
+        var result = await _tool.ExecuteAsync(null, TestContext.Current.CancellationToken);
 
         Assert.True(result.IsError);
         Assert.Contains("Arguments required", GetResultText(result));
@@ -104,7 +104,7 @@ public class RemoveUnusedUsingsToolTests
     {
         var args = JsonDocument.Parse("{}").RootElement;
 
-        var result = await _tool.ExecuteAsync(args);
+        var result = await _tool.ExecuteAsync(args, TestContext.Current.CancellationToken);
 
         Assert.True(result.IsError);
     }
@@ -117,7 +117,7 @@ public class RemoveUnusedUsingsToolTests
             ""solutionPath"": ""C:/test/test.sln""
         }").RootElement;
 
-        var result = await _tool.ExecuteAsync(args);
+        var result = await _tool.ExecuteAsync(args, TestContext.Current.CancellationToken);
 
         Assert.True(result.IsError);
     }
@@ -130,7 +130,7 @@ public class RemoveUnusedUsingsToolTests
             ""sourceFile"": ""C:/test/Test.cs""
         }").RootElement;
 
-        var result = await _tool.ExecuteAsync(args);
+        var result = await _tool.ExecuteAsync(args, TestContext.Current.CancellationToken);
 
         Assert.True(result.IsError);
     }

@@ -284,8 +284,8 @@ public class UsingDirectiveSorterTests
 // This is a comment
 using System.Collections.Generic;
 using System;";
-        var tree = CSharpSyntaxTree.ParseText(source);
-        var root = tree.GetCompilationUnitRoot();
+        var tree = CSharpSyntaxTree.ParseText(source, cancellationToken: TestContext.Current.CancellationToken);
+        var root = tree.GetCompilationUnitRoot(TestContext.Current.CancellationToken);
         var usings = root.Usings.ToList();
 
         // Act

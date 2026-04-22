@@ -45,6 +45,7 @@ public abstract class RefactoringOperationBase<TParams> : IRefactoringOperation<
     public async Task<RefactoringResult> ExecuteAsync(TParams @params, CancellationToken cancellationToken = default)
     {
         var operationId = Guid.NewGuid();
+        var workspaceLoadMs = WorkspaceTimingContext.LastLoadMs;
         var stopwatch = Stopwatch.StartNew();
 
         try
@@ -52,7 +53,7 @@ public abstract class RefactoringOperationBase<TParams> : IRefactoringOperation<
             ValidateParams(@params);
             var result = await ExecuteCoreAsync(operationId, @params, cancellationToken);
             stopwatch.Stop();
-            return WithTiming(result, stopwatch.ElapsedMilliseconds);
+            return WithTiming(result, stopwatch.ElapsedMilliseconds, workspaceLoadMs);
         }
         catch (RefactoringException)
         {
@@ -124,12 +125,13 @@ public abstract class RefactoringOperationBase<TParams> : IRefactoringOperation<
         return doc;
     }
 
-    private static RefactoringResult WithTiming(RefactoringResult result, long elapsedMs)
+    private static RefactoringResult WithTiming(RefactoringResult result, long elapsedMs, long workspaceLoadMs)
     {
-        // If already has timing, return as-is (preview results don't need timing)
-        if (result.ExecutionTimeMs > 0 || result.Preview)
+        // Preview results intentionally don't carry timing.
+        if (result.Preview)
             return result;
 
+        var opMs = result.ExecutionTimeMs > 0 ? result.ExecutionTimeMs : elapsedMs;
         return new RefactoringResult
         {
             Success = result.Success,
@@ -140,7 +142,9 @@ public abstract class RefactoringOperationBase<TParams> : IRefactoringOperation<
             ReferencesUpdated = result.ReferencesUpdated,
             UsingDirectivesAdded = result.UsingDirectivesAdded,
             UsingDirectivesRemoved = result.UsingDirectivesRemoved,
-            ExecutionTimeMs = elapsedMs,
+            ExecutionTimeMs = opMs,
+            WorkspaceLoadMs = workspaceLoadMs,
+            TotalExecutionTimeMs = opMs + workspaceLoadMs,
             Error = result.Error,
             PendingChanges = result.PendingChanges
         };

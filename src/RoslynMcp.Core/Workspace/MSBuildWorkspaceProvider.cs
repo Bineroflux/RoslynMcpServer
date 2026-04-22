@@ -9,9 +9,10 @@ using RoslynMcp.Core.Refactoring;
 namespace RoslynMcp.Core.Workspace;
 
 /// <summary>
-/// Creates MSBuildWorkspace instances with proper configuration.
+/// Creates MSBuildWorkspace instances with proper configuration and caches them
+/// across requests via <see cref="WorkspaceCache"/>.
 /// </summary>
-public sealed class MSBuildWorkspaceProvider : IWorkspaceProvider
+public sealed class MSBuildWorkspaceProvider : IWorkspaceProvider, IDisposable
 {
     private static bool _msBuildRegistered;
     private static readonly object _registrationLock = new();
@@ -36,6 +37,7 @@ public sealed class MSBuildWorkspaceProvider : IWorkspaceProvider
 
     private readonly IFileWriter _fileWriter;
     private readonly TimeSpan _workspaceLoadTimeout;
+    private readonly WorkspaceCache _cache;
 
     /// <summary>
     /// Creates a new workspace provider.
@@ -45,16 +47,37 @@ public sealed class MSBuildWorkspaceProvider : IWorkspaceProvider
     /// Optional timeout for workspace loading operations.
     /// Defaults to <see cref="DefaultWorkspaceLoadTimeout"/> (5 minutes).
     /// </param>
-    public MSBuildWorkspaceProvider(IFileWriter? fileWriter = null, TimeSpan? workspaceLoadTimeout = null)
+    /// <param name="cache">Optional workspace cache; a default one is created if null.</param>
+    public MSBuildWorkspaceProvider(
+        IFileWriter? fileWriter = null,
+        TimeSpan? workspaceLoadTimeout = null,
+        WorkspaceCache? cache = null)
     {
         _fileWriter = fileWriter ?? new AtomicFileWriter();
         _workspaceLoadTimeout = workspaceLoadTimeout ?? DefaultWorkspaceLoadTimeout;
+        _cache = cache ?? new WorkspaceCache();
+        _cache.LogCallback ??= msg => LogCallback?.Invoke(msg);
+        _cache.LogErrorCallback ??= (msg, ex) => LogErrorCallback?.Invoke(msg, ex);
     }
 
     /// <inheritdoc />
     public async Task<WorkspaceContext> CreateContextAsync(
         string projectOrSolutionPath,
         CancellationToken cancellationToken = default)
+    {
+        ValidateRequest(projectOrSolutionPath);
+        EnsureMsBuildRegistered();
+
+        var (context, loadMs) = await _cache.GetOrCreateAsync(
+            projectOrSolutionPath,
+            ct => LoadWorkspaceAsync(projectOrSolutionPath, ct),
+            cancellationToken);
+
+        WorkspaceTimingContext.LastLoadMs = loadMs;
+        return context;
+    }
+
+    private static void ValidateRequest(string projectOrSolutionPath)
     {
         if (string.IsNullOrWhiteSpace(projectOrSolutionPath))
         {
@@ -76,9 +99,12 @@ public sealed class MSBuildWorkspaceProvider : IWorkspaceProvider
                 ErrorCodes.SourceFileNotFound,
                 $"File not found: {projectOrSolutionPath}");
         }
+    }
 
-        EnsureMsBuildRegistered();
-
+    private async Task<WorkspaceContext> LoadWorkspaceAsync(
+        string projectOrSolutionPath,
+        CancellationToken cancellationToken)
+    {
         LogCallback?.Invoke($"Creating workspace for: {projectOrSolutionPath}");
 
         var properties = new Dictionary<string, string>
@@ -153,6 +179,12 @@ public sealed class MSBuildWorkspaceProvider : IWorkspaceProvider
         }
 
         return new WorkspaceContext(workspace, solution, normalizedPath, _fileWriter);
+    }
+
+    /// <inheritdoc />
+    public void Dispose()
+    {
+        _cache.Dispose();
     }
 
     /// <inheritdoc />

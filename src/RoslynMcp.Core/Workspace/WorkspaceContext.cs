@@ -1,5 +1,6 @@
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.MSBuild;
+using Microsoft.CodeAnalysis.Text;
 using RoslynMcp.Contracts.Enums;
 using RoslynMcp.Core.FileSystem;
 using RoslynMcp.Core.Resolution;
@@ -8,12 +9,13 @@ namespace RoslynMcp.Core.Workspace;
 
 /// <summary>
 /// Scoped workspace session. Encapsulates MSBuildWorkspace lifecycle.
-/// Must be disposed after refactoring operation completes.
 /// </summary>
 /// <remarks>
-/// This class is not thread-safe for concurrent commit operations.
-/// Use separate WorkspaceContext instances for parallel operations,
-/// or ensure commits are serialized externally.
+/// When created directly (non-cached), callers must <see cref="Dispose"/> when done.
+/// When obtained from <see cref="WorkspaceCache"/>, <see cref="Dispose"/> releases a
+/// lease (ref count) and the cache owns the actual workspace lifetime. Concurrent
+/// read access to <see cref="Solution"/> is safe; mutations (commits, external text
+/// updates) are serialized via an internal lock.
 /// </remarks>
 public sealed class WorkspaceContext : IDisposable
 {
@@ -22,6 +24,8 @@ public sealed class WorkspaceContext : IDisposable
     private readonly SemaphoreSlim _commitLock = new(1, 1);
     private Solution _solution;
     private bool _disposed;
+    private Action? _onLeaseReleased;
+    private bool _cacheOwned;
 
     /// <summary>
     /// Current solution snapshot.
@@ -91,6 +95,86 @@ public sealed class WorkspaceContext : IDisposable
     public void UpdateSolution(Solution newSolution)
     {
         _solution = newSolution;
+    }
+
+    /// <summary>
+    /// Marks this context as owned by a cache. After this call, <see cref="Dispose"/>
+    /// only signals the lease-release callback; actual disposal is performed by the
+    /// cache via <see cref="DisposeOwned"/>.
+    /// </summary>
+    internal void MarkCacheOwned(Action onLeaseReleased)
+    {
+        _cacheOwned = true;
+        _onLeaseReleased = onLeaseReleased;
+    }
+
+    /// <summary>
+    /// Applies an external text change to the in-memory solution snapshot.
+    /// Called by the cache in response to filesystem change events.
+    /// </summary>
+    /// <remarks>
+    /// Serialized with commits via the internal commit lock so that
+    /// <see cref="CommitChangesAsync"/> never computes a diff against a
+    /// concurrently mutated baseline. If no document in the solution matches
+    /// <paramref name="filePath"/>, the call is a no-op.
+    /// </remarks>
+    internal async Task ApplyExternalTextChangeAsync(
+        string filePath,
+        string newText,
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+
+        await _commitLock.WaitAsync(cancellationToken);
+        try
+        {
+            if (_disposed) return;
+            var normalized = PathResolver.NormalizePath(filePath);
+            var sol = _solution;
+            var sourceText = SourceText.From(newText);
+            var updated = false;
+            foreach (var project in sol.Projects)
+            {
+                foreach (var doc in project.Documents)
+                {
+                    if (doc.FilePath == null) continue;
+                    if (!string.Equals(
+                            PathResolver.NormalizePath(doc.FilePath),
+                            normalized,
+                            StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    sol = sol.WithDocumentText(doc.Id, sourceText, PreservationMode.PreserveIdentity);
+                    updated = true;
+                }
+            }
+            if (updated)
+                _solution = sol;
+        }
+        finally
+        {
+            _commitLock.Release();
+        }
+    }
+
+    /// <summary>
+    /// Returns the distinct absolute directories of every project in the solution,
+    /// plus the solution file's directory. Used to scope filesystem watchers.
+    /// </summary>
+    internal IReadOnlyCollection<string> GetWatchDirectories()
+    {
+        var dirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var solutionDir = Path.GetDirectoryName(LoadedPath);
+        if (!string.IsNullOrEmpty(solutionDir))
+            dirs.Add(PathResolver.NormalizePath(solutionDir));
+
+        foreach (var project in _solution.Projects)
+        {
+            var projectDir = Path.GetDirectoryName(project.FilePath ?? "");
+            if (!string.IsNullOrEmpty(projectDir))
+                dirs.Add(PathResolver.NormalizePath(projectDir));
+        }
+        return dirs;
     }
 
     /// <summary>
@@ -216,6 +300,24 @@ public sealed class WorkspaceContext : IDisposable
 
     /// <inheritdoc />
     public void Dispose()
+    {
+        if (_cacheOwned)
+        {
+            // Lease release: cache owns lifetime; signal it so it can update
+            // the last-access timestamp and ref count.
+            _onLeaseReleased?.Invoke();
+            return;
+        }
+
+        DisposeOwned();
+    }
+
+    /// <summary>
+    /// Performs the actual workspace disposal. For cache-owned contexts, this is
+    /// called by the cache on eviction; otherwise it's invoked directly from
+    /// <see cref="Dispose"/>.
+    /// </summary>
+    internal void DisposeOwned()
     {
         if (_disposed) return;
         _disposed = true;

@@ -49,6 +49,7 @@ public abstract class QueryOperationBase<TParams, TResult> : IQueryOperation<TPa
     public async Task<QueryResult<TResult>> ExecuteAsync(TParams @params, CancellationToken cancellationToken = default)
     {
         var operationId = Guid.NewGuid();
+        var workspaceLoadMs = WorkspaceTimingContext.LastLoadMs;
         var stopwatch = Stopwatch.StartNew();
 
         try
@@ -56,7 +57,7 @@ public abstract class QueryOperationBase<TParams, TResult> : IQueryOperation<TPa
             ValidateParams(@params);
             var result = await ExecuteCoreAsync(operationId, @params, cancellationToken);
             stopwatch.Stop();
-            return WithTiming(result, stopwatch.ElapsedMilliseconds);
+            return WithTiming(result, stopwatch.ElapsedMilliseconds, workspaceLoadMs);
         }
         catch (RefactoringException)
         {
@@ -103,17 +104,18 @@ public abstract class QueryOperationBase<TParams, TResult> : IQueryOperation<TPa
         return doc;
     }
 
-    private static QueryResult<TResult> WithTiming(QueryResult<TResult> result, long elapsedMs)
+    private static QueryResult<TResult> WithTiming(
+        QueryResult<TResult> result, long elapsedMs, long workspaceLoadMs)
     {
-        if (result.ExecutionTimeMs > 0)
-            return result;
-
+        var queryMs = result.ExecutionTimeMs > 0 ? result.ExecutionTimeMs : elapsedMs;
         return new QueryResult<TResult>
         {
             Success = result.Success,
             OperationId = result.OperationId,
             Data = result.Data,
-            ExecutionTimeMs = elapsedMs,
+            ExecutionTimeMs = queryMs,
+            WorkspaceLoadMs = workspaceLoadMs,
+            TotalExecutionTimeMs = queryMs + workspaceLoadMs,
             Error = result.Error
         };
     }

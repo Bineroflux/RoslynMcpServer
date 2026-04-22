@@ -48,9 +48,20 @@ public sealed class RefactoringResult
     public int UsingDirectivesRemoved { get; init; }
 
     /// <summary>
-    /// Operation duration in milliseconds.
+    /// Operation-only duration in milliseconds (excludes workspace load time).
     /// </summary>
     public long ExecutionTimeMs { get; init; }
+
+    /// <summary>
+    /// Time spent loading or waiting for the MSBuildWorkspace for this request, in milliseconds.
+    /// Zero on a cache hit.
+    /// </summary>
+    public long WorkspaceLoadMs { get; init; }
+
+    /// <summary>
+    /// End-to-end operation duration in milliseconds (workspace load + operation).
+    /// </summary>
+    public long TotalExecutionTimeMs { get; init; }
 
     /// <summary>
     /// Error information (null if succeeded).

@@ -24,9 +24,20 @@ public sealed class QueryResult<TData>
     public TData? Data { get; init; }
 
     /// <summary>
-    /// Operation duration in milliseconds.
+    /// Query-only duration in milliseconds (excludes workspace load time).
     /// </summary>
     public long ExecutionTimeMs { get; init; }
+
+    /// <summary>
+    /// Time spent loading or waiting for the MSBuildWorkspace for this request, in milliseconds.
+    /// Zero on a cache hit.
+    /// </summary>
+    public long WorkspaceLoadMs { get; init; }
+
+    /// <summary>
+    /// End-to-end operation duration in milliseconds (workspace load + query).
+    /// </summary>
+    public long TotalExecutionTimeMs { get; init; }
 
     /// <summary>
     /// Error information (null if succeeded).

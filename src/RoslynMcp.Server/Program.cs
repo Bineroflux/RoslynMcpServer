@@ -23,7 +23,7 @@ Console.CancelKeyPress += (_, e) =>
 
 // Create workspace provider
 FileLogger.Log("Creating MSBuildWorkspaceProvider...");
-var workspaceProvider = new MSBuildWorkspaceProvider();
+using var workspaceProvider = new MSBuildWorkspaceProvider();
 FileLogger.Log("MSBuildWorkspaceProvider created successfully.");
 
 // Create and run server

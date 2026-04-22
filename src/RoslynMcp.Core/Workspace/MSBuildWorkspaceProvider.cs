@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using Microsoft.Build.Locator;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.MSBuild;
@@ -178,7 +179,57 @@ public sealed class MSBuildWorkspaceProvider : IWorkspaceProvider, IDisposable
                 $"Failed to load solution: {string.Join("; ", errors.Select(e => e.Message))}");
         }
 
+        // Eagerly materialize compilations so the first symbol query doesn't silently pay
+        // a multi-minute lazy-compilation cost. Including this in LoadWorkspaceAsync folds
+        // the real cold-load cost into WorkspaceLoadMs and keeps subsequent queries cheap.
+        await MaterializeCompilationsAsync(workspace, solution, timeoutCts, linkedCts.Token, cancellationToken);
+
         return new WorkspaceContext(workspace, solution, normalizedPath, _fileWriter);
+    }
+
+    private async Task MaterializeCompilationsAsync(
+        MSBuildWorkspace workspace,
+        Solution solution,
+        CancellationTokenSource timeoutCts,
+        CancellationToken linkedToken,
+        CancellationToken callerToken)
+    {
+        var projectCount = solution.ProjectIds.Count;
+        LogCallback?.Invoke($"Materializing compilations for {projectCount} project(s)...");
+        var sw = Stopwatch.StartNew();
+        try
+        {
+            await Task.WhenAll(solution.Projects.Select(async project =>
+            {
+                try
+                {
+                    await project.GetCompilationAsync(linkedToken);
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    // A single broken project shouldn't fail the whole load; the
+                    // workspace diagnostics channel already surfaces these.
+                    LogCallback?.Invoke(
+                        $"Compilation for '{project.Name}' did not materialize cleanly: {ex.Message}");
+                }
+            }));
+        }
+        catch (OperationCanceledException)
+            when (timeoutCts.IsCancellationRequested && !callerToken.IsCancellationRequested)
+        {
+            var errorMsg =
+                $"Compilation materialization timed out after {_workspaceLoadTimeout.TotalMinutes:F0} minutes.";
+            LogErrorCallback?.Invoke(errorMsg, null);
+            workspace.Dispose();
+            throw new RefactoringException(ErrorCodes.SolutionLoadFailed, errorMsg);
+        }
+        sw.Stop();
+        LogCallback?.Invoke(
+            $"Compilations materialized in {sw.ElapsedMilliseconds} ms ({projectCount} project(s)).");
     }
 
     /// <inheritdoc />

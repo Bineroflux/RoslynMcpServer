@@ -158,12 +158,20 @@ public sealed class WorkspaceContext : IDisposable
     }
 
     /// <summary>
-    /// Returns the distinct absolute directories of every project in the solution,
-    /// plus the solution file's directory. Used to scope filesystem watchers.
+    /// Returns a minimal set of absolute directories that recursively cover every
+    /// document in the solution, plus each project file's directory and the
+    /// solution file's directory. Used to scope filesystem watchers.
     /// </summary>
+    /// <remarks>
+    /// Collecting per-document folders and then collapsing descendants (e.g.
+    /// dropping <c>/a/b/c</c> when <c>/a/b</c> is already present) keeps the
+    /// watcher count bounded by the shape of the source tree rather than the
+    /// number of projects.
+    /// </remarks>
     internal IReadOnlyCollection<string> GetWatchDirectories()
     {
         var dirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
         var solutionDir = Path.GetDirectoryName(LoadedPath);
         if (!string.IsNullOrEmpty(solutionDir))
             dirs.Add(PathResolver.NormalizePath(solutionDir));
@@ -173,8 +181,57 @@ public sealed class WorkspaceContext : IDisposable
             var projectDir = Path.GetDirectoryName(project.FilePath ?? "");
             if (!string.IsNullOrEmpty(projectDir))
                 dirs.Add(PathResolver.NormalizePath(projectDir));
+
+            foreach (var document in project.Documents)
+            {
+                var docDir = Path.GetDirectoryName(document.FilePath ?? "");
+                if (!string.IsNullOrEmpty(docDir))
+                    dirs.Add(PathResolver.NormalizePath(docDir));
+            }
         }
-        return dirs;
+
+        return ReduceToRecursiveRoots(dirs);
+    }
+
+    /// <summary>
+    /// Given a set of absolute directories, returns the minimal subset such that
+    /// each input directory is equal to or a descendant of some element in the
+    /// result. Because watchers run with <c>IncludeSubdirectories = true</c>, any
+    /// descendant is already covered by its ancestor and is redundant.
+    /// </summary>
+    private static IReadOnlyCollection<string> ReduceToRecursiveRoots(IEnumerable<string> paths)
+    {
+        var sorted = paths
+            .Where(p => !string.IsNullOrEmpty(p))
+            .OrderBy(p => p.Length)
+            .ToList();
+
+        var roots = new List<string>(sorted.Count);
+        foreach (var path in sorted)
+        {
+            var covered = false;
+            foreach (var root in roots)
+            {
+                if (IsSameOrDescendant(path, root))
+                {
+                    covered = true;
+                    break;
+                }
+            }
+            if (!covered)
+                roots.Add(path);
+        }
+        return roots;
+    }
+
+    private static bool IsSameOrDescendant(string candidate, string ancestor)
+    {
+        if (string.Equals(candidate, ancestor, StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        var sep = Path.DirectorySeparatorChar;
+        var prefix = ancestor.Length > 0 && ancestor[^1] == sep ? ancestor : ancestor + sep;
+        return candidate.StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>

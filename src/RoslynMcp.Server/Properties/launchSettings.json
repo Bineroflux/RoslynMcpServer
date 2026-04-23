@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "RoslynMcp.Server": {
+      "commandName": "Project",
+      "commandLineArgs": "--http"
+    }
+  }
+}

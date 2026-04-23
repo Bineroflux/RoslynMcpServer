@@ -95,6 +95,9 @@ try
     if (parsed.Verbose)
         Console.Error.WriteLine($"[verbose] Loading solution: {parsed.SolutionPath}");
 
+    // Open a timing scope so WorkspaceTimingContext.RecordLoadMs reaches the
+    // operation bases. Must start before the CreateContextAsync await.
+    using var timingScope = WorkspaceTimingContext.BeginScope();
     using var context = await workspaceProvider.CreateContextAsync(parsed.SolutionPath!, cts.Token);
 
     if (parsed.Verbose)

@@ -164,6 +164,12 @@ public sealed class McpRequestDispatcher
             return McpResponse.Failure(request.Id, -32602, $"Unknown tool: {callParams.Name}");
         }
 
+        // Open a timing scope so the workspace provider can record load time
+        // through WorkspaceTimingContext and the operation bases can observe it.
+        // Established here (synchronously, before any await on handler.ExecuteAsync)
+        // so the shared mutable box is visible to the whole downstream call tree.
+        using var _ = WorkspaceTimingContext.BeginScope();
+
         try
         {
             FileLogger.Log($"Executing tool: {callParams.Name}");

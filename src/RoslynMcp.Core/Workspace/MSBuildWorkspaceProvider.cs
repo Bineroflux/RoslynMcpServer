@@ -74,7 +74,7 @@ public sealed class MSBuildWorkspaceProvider : IWorkspaceProvider, IDisposable
             ct => LoadWorkspaceAsync(projectOrSolutionPath, ct),
             cancellationToken);
 
-        WorkspaceTimingContext.LastLoadMs = loadMs;
+        WorkspaceTimingContext.RecordLoadMs(loadMs);
         return context;
     }
 

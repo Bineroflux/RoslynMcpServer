@@ -77,6 +77,7 @@ public sealed class WorkspaceCache : IDisposable
         // Fast path: cache hit.
         if (_entries.TryGetValue(key, out var existing) && existing.TryAcquire())
         {
+            await EnterOperationOrRelease(existing, cancellationToken);
             stopwatch.Stop();
             return (existing.Context, stopwatch.ElapsedMilliseconds);
         }
@@ -90,6 +91,7 @@ public sealed class WorkspaceCache : IDisposable
             // Re-check after acquiring the guard; another caller may have populated the cache.
             if (_entries.TryGetValue(key, out existing) && existing.TryAcquire())
             {
+                await EnterOperationOrRelease(existing, cancellationToken);
                 stopwatch.Stop();
                 return (existing.Context, stopwatch.ElapsedMilliseconds);
             }
@@ -107,6 +109,10 @@ public sealed class WorkspaceCache : IDisposable
             _entries[key] = entry;
             entry.StartWatching();
 
+            // The freshly loaded workspace has no outstanding leases, so the
+            // operation gate is idle — this await completes synchronously.
+            await EnterOperationOrRelease(entry, cancellationToken);
+
             stopwatch.Stop();
             LogCallback?.Invoke(
                 $"Workspace loaded for '{key}' in {stopwatch.ElapsedMilliseconds} ms.");
@@ -115,6 +121,21 @@ public sealed class WorkspaceCache : IDisposable
         finally
         {
             guard.Release();
+        }
+    }
+
+    private static async Task EnterOperationOrRelease(CachedEntry entry, CancellationToken ct)
+    {
+        try
+        {
+            await entry.Context.EnterOperationAsync(ct);
+        }
+        catch
+        {
+            // Gate entry failed (typically cancellation); give the lease back
+            // so the entry doesn't leak a reference count.
+            entry.OnLeaseReleased();
+            throw;
         }
     }
 

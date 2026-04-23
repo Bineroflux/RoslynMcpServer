@@ -22,6 +22,7 @@ public sealed class WorkspaceContext : IDisposable
     private readonly MSBuildWorkspace _workspace;
     private readonly IFileWriter _fileWriter;
     private readonly SemaphoreSlim _commitLock = new(1, 1);
+    private readonly WorkspaceOperationGate _gate = new();
     private Solution _solution;
     private bool _disposed;
     private Action? _onLeaseReleased;
@@ -109,13 +110,28 @@ public sealed class WorkspaceContext : IDisposable
     }
 
     /// <summary>
+    /// Takes a shared operation lease. All MCP tool invocations run while
+    /// holding a lease, so filesystem-driven updates can't mutate the solution
+    /// under them. Multiple leases may be held simultaneously; the cache is
+    /// expected to call <see cref="ExitOperation"/> when it releases the lease.
+    /// </summary>
+    internal Task EnterOperationAsync(CancellationToken cancellationToken)
+        => _gate.EnterOperationAsync(cancellationToken);
+
+    /// <summary>
+    /// Releases an operation lease previously obtained via
+    /// <see cref="EnterOperationAsync"/>.
+    /// </summary>
+    internal void ExitOperation() => _gate.ExitOperation();
+
+    /// <summary>
     /// Applies an external text change to the in-memory solution snapshot.
     /// Called by the cache in response to filesystem change events.
     /// </summary>
     /// <remarks>
-    /// Serialized with commits via the internal commit lock so that
-    /// <see cref="CommitChangesAsync"/> never computes a diff against a
-    /// concurrently mutated baseline. If no document in the solution matches
+    /// Waits for the exclusive file-update lease so the mutation only runs
+    /// when no operation is active; once queued, the gate prioritises it over
+    /// newly arriving operations. If no document in the solution matches
     /// <paramref name="filePath"/>, the call is a no-op.
     /// </remarks>
     internal async Task ApplyExternalTextChangeAsync(
@@ -125,7 +141,7 @@ public sealed class WorkspaceContext : IDisposable
     {
         ThrowIfDisposed();
 
-        await _commitLock.WaitAsync(cancellationToken);
+        await _gate.EnterFileUpdateAsync(cancellationToken);
         try
         {
             if (_disposed) return;
@@ -153,7 +169,7 @@ public sealed class WorkspaceContext : IDisposable
         }
         finally
         {
-            _commitLock.Release();
+            _gate.ExitFileUpdate();
         }
     }
 
@@ -361,7 +377,9 @@ public sealed class WorkspaceContext : IDisposable
         if (_cacheOwned)
         {
             // Lease release: cache owns lifetime; signal it so it can update
-            // the last-access timestamp and ref count.
+            // the last-access timestamp and ref count. The operation lease is
+            // exited first so any queued file update can start immediately.
+            _gate.ExitOperation();
             _onLeaseReleased?.Invoke();
             return;
         }

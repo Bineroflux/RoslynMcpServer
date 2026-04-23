@@ -138,7 +138,8 @@ public sealed class FindReferencesOperation : QueryOperationBase<FindReferencesP
             TotalCount = totalCount,
             Truncated = totalCount > locations.Count,
             SymbolIsCandidate = resolved.IsCandidate,
-            CandidateFullyQualifiedNames = candidateFqns
+            CandidateFullyQualifiedNames = candidateFqns,
+            LocationOverride = resolved.LocationOverride
         };
 
         return QueryResult<FindReferencesResult>.Succeeded(operationId, result);

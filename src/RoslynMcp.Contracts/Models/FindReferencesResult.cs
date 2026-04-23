@@ -43,4 +43,11 @@ public sealed class FindReferencesResult
     /// Empty when the symbol was resolved definitively.
     /// </summary>
     public IReadOnlyList<string> CandidateFullyQualifiedNames { get; init; } = [];
+
+    /// <summary>
+    /// Non-null when the caller-supplied line/column did not point at the requested
+    /// symbol but the server recovered by finding a unique identifier with the
+    /// expected name on that line. Describes the position actually used.
+    /// </summary>
+    public SymbolLocationOverride? LocationOverride { get; init; }
 }

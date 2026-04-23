@@ -4,6 +4,7 @@ using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.FindSymbols;
 using RoslynMcp.Contracts.Errors;
+using RoslynMcp.Contracts.Models;
 using RoslynMcp.Core.FileSystem;
 using RoslynMcp.Core.Refactoring;
 using RoslynMcp.Core.Workspace;
@@ -97,6 +98,39 @@ public sealed class SymbolResolver
         int column,
         CancellationToken cancellationToken)
     {
+        var direct = await TryResolveByPositionAsync(
+            document, root, semanticModel, expectedName, line, column, cancellationToken);
+        if (direct != null)
+            return direct;
+
+        // Fallback: agents frequently pass the wrong column when the intended symbol
+        // is embedded in a compound expression (e.g. TimeSpan.FromSeconds — pointing
+        // at TimeSpan's column instead of FromSeconds'). If expectedName was supplied
+        // and the specified line contains exactly one identifier token with that name,
+        // retry at that token's position.
+        if (!string.IsNullOrEmpty(expectedName))
+        {
+            var recovered = await TryRecoverByLineScanAsync(
+                document, root, semanticModel, expectedName, line, column, cancellationToken);
+            if (recovered != null)
+                return recovered;
+        }
+
+        var nameMsg = expectedName != null ? $" named '{expectedName}'" : "";
+        throw new RefactoringException(
+            ErrorCodes.SymbolNotFound,
+            $"No symbol{nameMsg} found at line {line}, column {column}.");
+    }
+
+    private async Task<GeneralSymbolResolutionResult?> TryResolveByPositionAsync(
+        Document document,
+        SyntaxNode root,
+        SemanticModel semanticModel,
+        string? expectedName,
+        int line,
+        int column,
+        CancellationToken cancellationToken)
+    {
         var position = GetPosition(root, line, column);
         var token = root.FindToken(position);
 
@@ -165,10 +199,102 @@ public sealed class SymbolResolver
             node = node.Parent;
         }
 
-        var nameMsg = expectedName != null ? $" named '{expectedName}'" : "";
-        throw new RefactoringException(
-            ErrorCodes.SymbolNotFound,
-            $"No symbol{nameMsg} found at line {line}, column {column}.");
+        return null;
+    }
+
+    private async Task<GeneralSymbolResolutionResult?> TryRecoverByLineScanAsync(
+        Document document,
+        SyntaxNode root,
+        SemanticModel semanticModel,
+        string expectedName,
+        int requestedLine,
+        int requestedColumn,
+        CancellationToken cancellationToken)
+    {
+        var text = root.GetText();
+        var lineIndex = requestedLine - 1;
+        if (lineIndex < 0 || lineIndex >= text.Lines.Count)
+            return null;
+
+        var lineSpan = text.Lines[lineIndex];
+        var candidates = new List<SyntaxToken>();
+        foreach (var tok in root.DescendantTokens(lineSpan.Span, descendIntoTrivia: false))
+        {
+            if (IsSymbolIdentifierToken(tok, expectedName))
+                candidates.Add(tok);
+        }
+
+        if (candidates.Count != 1)
+            return null;
+
+        var recoveredToken = candidates[0];
+        var recoveredSpan = recoveredToken.GetLocation().GetLineSpan();
+        var recoveredLine = recoveredSpan.StartLinePosition.Line + 1;
+        var recoveredColumn = recoveredSpan.StartLinePosition.Character + 1;
+
+        var retry = await TryResolveByPositionAsync(
+            document, root, semanticModel, expectedName,
+            recoveredLine, recoveredColumn, cancellationToken);
+
+        if (retry == null)
+            return null;
+
+        return new GeneralSymbolResolutionResult
+        {
+            Symbol = retry.Symbol,
+            Document = retry.Document,
+            IsCandidate = retry.IsCandidate,
+            AllCandidates = retry.AllCandidates,
+            LocationOverride = new SymbolLocationOverride
+            {
+                RequestedLine = requestedLine,
+                RequestedColumn = requestedColumn,
+                ResolvedLine = recoveredLine,
+                ResolvedColumn = recoveredColumn,
+                Reason = $"The supplied position did not resolve to '{expectedName}'. " +
+                         $"Recovered to the unique '{expectedName}' identifier on line " +
+                         $"{recoveredLine}, column {recoveredColumn}."
+            }
+        };
+    }
+
+    /// <summary>
+    /// True when the token is an <see cref="SyntaxKind.IdentifierToken"/> whose
+    /// text matches <paramref name="name"/> and whose parent is a name-bearing
+    /// node — either a <see cref="SimpleNameSyntax"/> reference or a declaration
+    /// that carries an Identifier token.
+    /// </summary>
+    private static bool IsSymbolIdentifierToken(SyntaxToken token, string name)
+    {
+        if (!token.IsKind(SyntaxKind.IdentifierToken)) return false;
+        if (!string.Equals(token.ValueText, name, StringComparison.Ordinal)) return false;
+
+        var parent = token.Parent;
+        if (parent == null) return false;
+
+        if (parent is SimpleNameSyntax simpleName && simpleName.Identifier == token)
+            return true;
+
+        return parent switch
+        {
+            BaseTypeDeclarationSyntax t => t.Identifier == token,
+            DelegateDeclarationSyntax d => d.Identifier == token,
+            MethodDeclarationSyntax m => m.Identifier == token,
+            ConstructorDeclarationSyntax c => c.Identifier == token,
+            DestructorDeclarationSyntax d => d.Identifier == token,
+            PropertyDeclarationSyntax p => p.Identifier == token,
+            EventDeclarationSyntax e => e.Identifier == token,
+            EnumMemberDeclarationSyntax e => e.Identifier == token,
+            VariableDeclaratorSyntax v => v.Identifier == token,
+            ParameterSyntax p => p.Identifier == token,
+            TypeParameterSyntax tp => tp.Identifier == token,
+            SingleVariableDesignationSyntax s => s.Identifier == token,
+            ForEachStatementSyntax f => f.Identifier == token,
+            LabeledStatementSyntax l => l.Identifier == token,
+            CatchDeclarationSyntax c => c.Identifier == token,
+            LocalFunctionStatementSyntax l => l.Identifier == token,
+            _ => false
+        };
     }
 
     private static GeneralSymbolResolutionResult ResolveByName(
@@ -299,4 +425,11 @@ public sealed class GeneralSymbolResolutionResult
     /// <see cref="Symbol"/> is always the first entry. Empty when resolution was definitive.
     /// </summary>
     public IReadOnlyList<ISymbol> AllCandidates { get; init; } = [];
+
+    /// <summary>
+    /// Non-null when position resolution fell back to a line-scan recovery because
+    /// the caller's line/column did not directly point at <see cref="Symbol"/>.
+    /// Describes the position actually used.
+    /// </summary>
+    public SymbolLocationOverride? LocationOverride { get; init; }
 }

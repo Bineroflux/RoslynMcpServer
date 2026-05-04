@@ -169,14 +169,20 @@ public sealed class MSBuildWorkspaceProvider : IWorkspaceProvider, IDisposable
                 errorMsg);
         }
 
-        // Check for critical errors
-        var errors = diagnostics.Where(d => d.Kind == WorkspaceDiagnosticKind.Failure).ToList();
-        if (errors.Count > 0)
+        // Tolerate per-project failures the way VS IDE does. NuGet restore problems
+        // (e.g. NU1903/NU1904 vulnerability advisories) and similar surface as
+        // WorkspaceDiagnosticKind.Failure, but the solution and the unaffected
+        // projects still load. Only treat it as fatal if nothing came back at all.
+        if (solution.ProjectIds.Count == 0)
         {
             workspace.Dispose();
+            var errors = diagnostics.Where(d => d.Kind == WorkspaceDiagnosticKind.Failure).ToList();
+            var detail = errors.Count > 0
+                ? string.Join("; ", errors.Select(e => e.Message))
+                : "no projects were loaded";
             throw new RefactoringException(
                 ErrorCodes.SolutionLoadFailed,
-                $"Failed to load solution: {string.Join("; ", errors.Select(e => e.Message))}");
+                $"Failed to load solution: {detail}");
         }
 
         // Eagerly materialize compilations so the first symbol query doesn't silently pay

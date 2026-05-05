@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using Microsoft.Build.Locator;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.Diagnostics;
 using Microsoft.CodeAnalysis.MSBuild;
 using RoslynMcp.Contracts.Errors;
 using RoslynMcp.Core.FileSystem;
@@ -185,12 +186,58 @@ public sealed class MSBuildWorkspaceProvider : IWorkspaceProvider, IDisposable
                 $"Failed to load solution: {detail}");
         }
 
+        // Strip UnresolvedAnalyzerReference instances so downstream Roslyn paths
+        // (compilation, code actions, SymbolFinder) don't trip on them. Roslyn
+        // creates these placeholders when MSBuild reported an analyzer that
+        // couldn't actually be loaded (missing DLL, target-framework mismatch,
+        // restore artifact gone). Several internal switches don't have a case
+        // for them and throw "Unexpected value 'UnresolvedAnalyzerReference'".
+        solution = StripUnresolvedAnalyzerReferences(workspace, solution);
+
         // Eagerly materialize compilations so the first symbol query doesn't silently pay
         // a multi-minute lazy-compilation cost. Including this in LoadWorkspaceAsync folds
         // the real cold-load cost into WorkspaceLoadMs and keeps subsequent queries cheap.
         await MaterializeCompilationsAsync(workspace, solution, timeoutCts, linkedCts.Token, cancellationToken);
 
         return new WorkspaceContext(workspace, solution, normalizedPath, _fileWriter);
+    }
+
+    /// <summary>
+    /// Returns a solution where every project's analyzer reference list has any
+    /// <see cref="UnresolvedAnalyzerReference"/> entries removed, and pushes the
+    /// cleaned solution into the workspace so <c>workspace.CurrentSolution</c>
+    /// stays in sync with the held snapshot.
+    /// </summary>
+    private Solution StripUnresolvedAnalyzerReferences(
+        MSBuildWorkspace workspace, Solution solution)
+    {
+        var totalRemoved = 0;
+        foreach (var projectId in solution.ProjectIds)
+        {
+            var project = solution.GetProject(projectId);
+            if (project is null) continue;
+
+            var keep = project.AnalyzerReferences
+                .Where(r => r is not UnresolvedAnalyzerReference)
+                .ToList();
+            var removed = project.AnalyzerReferences.Count - keep.Count;
+            if (removed == 0) continue;
+
+            totalRemoved += removed;
+            LogCallback?.Invoke(
+                $"Stripping {removed} unresolved analyzer reference(s) from project '{project.Name}'.");
+            solution = solution.WithProjectAnalyzerReferences(projectId, keep);
+        }
+
+        if (totalRemoved > 0 && !workspace.TryApplyChanges(solution))
+        {
+            // Falling back to the held snapshot is fine: every operation reads
+            // through WorkspaceContext.Solution, which we update below.
+            LogCallback?.Invoke(
+                "TryApplyChanges rejected the analyzer-reference cleanup; using held snapshot only.");
+        }
+
+        return solution;
     }
 
     private async Task MaterializeCompilationsAsync(

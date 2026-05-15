@@ -81,15 +81,62 @@ public sealed class GetDiagnosticsOperation : QueryOperationBase<GetDiagnosticsP
 
         foreach (var project in Context.Solution.Projects)
         {
-            var compilation = await project.GetCompilationAsync(cancellationToken);
-            if (compilation == null) continue;
+            // Roslyn's compilation tracker eagerly enumerates generators across
+            // every AnalyzerReference while building the final compilation
+            // state, so a buggy generator (throwing during Initialize, in a
+            // ctor, or via an AnalyzerReference override) propagates out of
+            // GetCompilationAsync. Catching it here lets us surface RMCP0002
+            // for the offending project and still return diagnostics for the
+            // rest of the solution, instead of failing the whole call.
+            Compilation? compilation = null;
+            string? generatorFailure = null;
+            try
+            {
+                compilation = await project.GetCompilationAsync(cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                generatorFailure = ex.Message;
+            }
 
             // compilation.GetDiagnostics() includes everything Roslyn computes itself —
             // including CS errors inside generator-emitted .g.cs trees — but NOT the
             // diagnostics that source generators report via ReportDiagnostic. RZ
             // diagnostics from the Razor source generator fall into that gap, so we
             // re-run the generators and union their reported diagnostics in.
-            var generatorDiags = await GetGeneratorReportedDiagnosticsAsync(project, compilation, cancellationToken);
+            var generatorDiags = ImmutableArray<Diagnostic>.Empty;
+            if (compilation is not null)
+            {
+                var helperResult = await GetGeneratorReportedDiagnosticsAsync(
+                    project, compilation, cancellationToken);
+                generatorDiags = helperResult.Diagnostics;
+                generatorFailure ??= helperResult.Failure;
+            }
+
+            // Surface a generator runtime failure as a synthetic info-level
+            // diagnostic (RMCP0002) so callers don't get silently-empty results
+            // when a generator crashes during construction or execution. Same
+            // severity-filter gate as RMCP0001.
+            if (generatorFailure is not null && severityFilter != DiagnosticSeverityFilter.Error)
+            {
+                diagnostics.Add(new DiagnosticInfo
+                {
+                    Id = "RMCP0002",
+                    Message = $"Source generator failed while processing project '{project.Name}': {generatorFailure}. " +
+                              "Generator-reported diagnostics (e.g. RZ codes for .razor) will be missing.",
+                    Severity = DiagnosticSeverity.Info.ToString(),
+                    Category = "RoslynMcp.Workspace",
+                    File = null,
+                    Line = 0,
+                    Column = 0
+                });
+            }
+
+            if (compilation is null) continue;
 
             foreach (var diag in compilation.GetDiagnostics(cancellationToken).Concat(generatorDiags))
             {
@@ -184,12 +231,14 @@ public sealed class GetDiagnosticsOperation : QueryOperationBase<GetDiagnosticsP
     /// returns the diagnostics they reported via <c>GeneratorExecutionContext.ReportDiagnostic</c>.
     /// These are not part of <see cref="Compilation.GetDiagnostics(CancellationToken)"/>,
     /// so callers that want to surface generator-side diagnostics (e.g. Razor's
-    /// RZ codes) must collect them separately. Returns an empty array when the
-    /// project has no generators or when the driver fails to construct (e.g.
-    /// unresolved analyzer references — those are surfaced via RMCP0001 instead).
+    /// RZ codes) must collect them separately. Returns an empty array (and a
+    /// non-null failure message) when the driver throws during construction or
+    /// execution — the caller surfaces that as RMCP0002. Returns an empty array
+    /// with a null failure message when the project has no generators.
     /// </summary>
-    private static async Task<ImmutableArray<Diagnostic>> GetGeneratorReportedDiagnosticsAsync(
-        Project project, Compilation compilation, CancellationToken cancellationToken)
+    private static async Task<(ImmutableArray<Diagnostic> Diagnostics, string? Failure)>
+        GetGeneratorReportedDiagnosticsAsync(
+            Project project, Compilation compilation, CancellationToken cancellationToken)
     {
         ImmutableArray<ISourceGenerator> generators;
         try
@@ -198,11 +247,12 @@ public sealed class GetDiagnosticsOperation : QueryOperationBase<GetDiagnosticsP
                 .SelectMany(r => r.GetGenerators(LanguageNames.CSharp))
                 .ToImmutableArray();
         }
-        catch
+        catch (Exception ex)
         {
-            return ImmutableArray<Diagnostic>.Empty;
+            return (ImmutableArray<Diagnostic>.Empty, $"failed to enumerate generators: {ex.Message}");
         }
-        if (generators.IsEmpty) return ImmutableArray<Diagnostic>.Empty;
+        if (generators.IsEmpty)
+            return (ImmutableArray<Diagnostic>.Empty, null);
 
         var additionalTexts = ImmutableArray.CreateBuilder<AdditionalText>();
         foreach (var doc in project.AdditionalDocuments)
@@ -222,14 +272,19 @@ public sealed class GetDiagnosticsOperation : QueryOperationBase<GetDiagnosticsP
                 parseOptions: parseOptions,
                 optionsProvider: null);
             driver = driver.RunGenerators(compilation, cancellationToken);
-            return driver.GetRunResult().Diagnostics;
+            return (driver.GetRunResult().Diagnostics, null);
         }
-        catch
+        catch (OperationCanceledException)
         {
-            // A generator that throws during construction or initialization shouldn't
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // A generator that throws during construction or execution shouldn't
             // take down the whole get_diagnostics call. The compilation diagnostics
             // are still returned; the generator-side ones just won't be included.
-            return ImmutableArray<Diagnostic>.Empty;
+            // Surface the failure as RMCP0002 via the caller.
+            return (ImmutableArray<Diagnostic>.Empty, ex.Message);
         }
     }
 

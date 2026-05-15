@@ -54,6 +54,28 @@ public sealed class GetDiagnosticsOperation : QueryOperationBase<GetDiagnosticsP
         var severityFilter = ParseSeverityFilter(@params.SeverityFilter);
         var diagnostics = new List<DiagnosticInfo>();
 
+        // Surface workspace-level load issues (e.g. the Razor source generator
+        // failed to load) as synthetic info-level diagnostics. Emitted whenever
+        // the caller's filter would include informational results — i.e. for
+        // anything except an explicit Errors-only request, because the message
+        // explains why their .razor query came back empty.
+        if (severityFilter != DiagnosticSeverityFilter.Error)
+        {
+            foreach (var issue in Context.GeneratorLoadIssues)
+            {
+                diagnostics.Add(new DiagnosticInfo
+                {
+                    Id = "RMCP0001",
+                    Message = issue,
+                    Severity = DiagnosticSeverity.Info.ToString(),
+                    Category = "RoslynMcp.Workspace",
+                    File = null,
+                    Line = 0,
+                    Column = 0
+                });
+            }
+        }
+
         foreach (var project in Context.Solution.Projects)
         {
             var compilation = await project.GetCompilationAsync(cancellationToken);

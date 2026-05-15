@@ -192,24 +192,29 @@ public sealed class MSBuildWorkspaceProvider : IWorkspaceProvider, IDisposable
         // couldn't actually be loaded (missing DLL, target-framework mismatch,
         // restore artifact gone). Several internal switches don't have a case
         // for them and throw "Unexpected value 'UnresolvedAnalyzerReference'".
-        solution = StripUnresolvedAnalyzerReferences(workspace, solution);
+        var generatorIssues = new List<string>();
+        solution = StripUnresolvedAnalyzerReferences(workspace, solution, generatorIssues);
 
         // Eagerly materialize compilations so the first symbol query doesn't silently pay
         // a multi-minute lazy-compilation cost. Including this in LoadWorkspaceAsync folds
         // the real cold-load cost into WorkspaceLoadMs and keeps subsequent queries cheap.
         await MaterializeCompilationsAsync(workspace, solution, timeoutCts, linkedCts.Token, cancellationToken);
 
-        return new WorkspaceContext(workspace, solution, normalizedPath, _fileWriter);
+        return new WorkspaceContext(
+            workspace, solution, normalizedPath, _fileWriter,
+            generatorLoadIssues: generatorIssues.Count == 0 ? null : generatorIssues);
     }
 
     /// <summary>
     /// Returns a solution where every project's analyzer reference list has any
     /// <see cref="UnresolvedAnalyzerReference"/> entries removed, and pushes the
     /// cleaned solution into the workspace so <c>workspace.CurrentSolution</c>
-    /// stays in sync with the held snapshot.
+    /// stays in sync with the held snapshot. Records any stripped references
+    /// that look like known source generators (currently: Razor) into
+    /// <paramref name="generatorIssues"/> so callers can surface them.
     /// </summary>
     private Solution StripUnresolvedAnalyzerReferences(
-        MSBuildWorkspace workspace, Solution solution)
+        MSBuildWorkspace workspace, Solution solution, List<string> generatorIssues)
     {
         var totalRemoved = 0;
         foreach (var projectId in solution.ProjectIds)
@@ -217,15 +222,35 @@ public sealed class MSBuildWorkspaceProvider : IWorkspaceProvider, IDisposable
             var project = solution.GetProject(projectId);
             if (project is null) continue;
 
-            var keep = project.AnalyzerReferences
-                .Where(r => r is not UnresolvedAnalyzerReference)
-                .ToList();
+            var keep = new List<AnalyzerReference>(project.AnalyzerReferences.Count);
+            var razorRemovedPaths = new List<string>();
+            foreach (var reference in project.AnalyzerReferences)
+            {
+                if (reference is UnresolvedAnalyzerReference)
+                {
+                    if (LooksLikeRazorGenerator(reference))
+                        razorRemovedPaths.Add(reference.FullPath ?? reference.Display ?? "<unknown>");
+                    continue;
+                }
+                keep.Add(reference);
+            }
             var removed = project.AnalyzerReferences.Count - keep.Count;
             if (removed == 0) continue;
 
             totalRemoved += removed;
             LogCallback?.Invoke(
                 $"Stripping {removed} unresolved analyzer reference(s) from project '{project.Name}'.");
+
+            foreach (var path in razorRemovedPaths)
+            {
+                var msg =
+                    $"RazorSourceGenerator failed to load for project '{project.Name}' " +
+                    $"(unresolved analyzer reference: {path}). " +
+                    ".razor / .cshtml diagnostics will not appear.";
+                LogErrorCallback?.Invoke(msg, null);
+                generatorIssues.Add(msg);
+            }
+
             solution = solution.WithProjectAnalyzerReferences(projectId, keep);
         }
 
@@ -238,6 +263,14 @@ public sealed class MSBuildWorkspaceProvider : IWorkspaceProvider, IDisposable
         }
 
         return solution;
+    }
+
+    private static bool LooksLikeRazorGenerator(AnalyzerReference reference)
+    {
+        var display = reference.Display ?? string.Empty;
+        var fullPath = reference.FullPath ?? string.Empty;
+        return display.Contains("Razor.SourceGenerators", StringComparison.OrdinalIgnoreCase)
+            || fullPath.Contains("Razor.SourceGenerators", StringComparison.OrdinalIgnoreCase);
     }
 
     private async Task MaterializeCompilationsAsync(

@@ -48,16 +48,28 @@ public sealed class WorkspaceContext : IDisposable
     /// </summary>
     public WorkspaceState State { get; private set; }
 
+    /// <summary>
+    /// Issues encountered while loading the workspace that affect downstream
+    /// analysis but are not themselves fatal — most notably source generators
+    /// (e.g. the Razor source generator) that failed to load and were stripped
+    /// from analyzer references. Tools may surface these as synthetic info-level
+    /// diagnostics so callers can tell apart "no diagnostics" from "the
+    /// generator that would have produced them never ran".
+    /// </summary>
+    public IReadOnlyList<string> GeneratorLoadIssues { get; }
+
     internal WorkspaceContext(
         MSBuildWorkspace workspace,
         Solution solution,
         string loadedPath,
-        IFileWriter? fileWriter = null)
+        IFileWriter? fileWriter = null,
+        IReadOnlyList<string>? generatorLoadIssues = null)
     {
         _workspace = workspace;
         _solution = solution;
         _fileWriter = fileWriter ?? new AtomicFileWriter();
         LoadedPath = loadedPath;
+        GeneratorLoadIssues = generatorLoadIssues ?? Array.Empty<string>();
         State = WorkspaceState.Ready;
     }
 

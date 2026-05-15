@@ -113,6 +113,35 @@ public sealed class GetDiagnosticsRazorIntegrationTests
     }
 
     [Fact]
+    public async Task GetDiagnostics_FilteredToUnclosedTagRazor_EmitsRz9980()
+    {
+        using var fixture = RazorFixture.TryCreate(out var skip);
+        if (skip is not null) Assert.Skip(skip);
+
+        using var provider = new MSBuildWorkspaceProvider();
+        using var ctx = await provider.CreateContextAsync(
+            fixture!.SolutionPath, TestContext.Current.CancellationToken);
+
+        var op = new GetDiagnosticsOperation(ctx);
+        var result = await op.ExecuteAsync(
+            new GetDiagnosticsParams
+            {
+                SourceFile = fixture.UnclosedTagRazor,
+                SeverityFilter = "Error"
+            },
+            TestContext.Current.CancellationToken);
+
+        Assert.True(result.Success);
+        Assert.NotNull(result.Data);
+
+        var diagnostics = result.Data!.Diagnostics;
+        Assert.NotEmpty(diagnostics);
+        Assert.Contains(diagnostics, d => d.Id == "RZ9980");
+        Assert.All(diagnostics, d =>
+            Assert.EndsWith("UnclosedTag.razor", d.File ?? string.Empty, StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
     public async Task GetDiagnostics_TxtFile_ThrowsValidation()
     {
         using var fixture = RazorFixture.TryCreate(out var skip);
@@ -143,14 +172,18 @@ public sealed class GetDiagnosticsRazorIntegrationTests
         public string CounterRazor { get; }
         public string CsErrorRazor { get; }
         public string RazorErrorRazor { get; }
+        public string UnclosedTagRazor { get; }
 
-        private RazorFixture(string rootDir, string solutionPath, string counter, string csError, string razorError)
+        private RazorFixture(
+            string rootDir, string solutionPath,
+            string counter, string csError, string razorError, string unclosedTag)
         {
             RootDir = rootDir;
             SolutionPath = solutionPath;
             CounterRazor = counter;
             CsErrorRazor = csError;
             RazorErrorRazor = razorError;
+            UnclosedTagRazor = unclosedTag;
         }
 
         public static RazorFixture? TryCreate(out string? skipReason)
@@ -194,7 +227,8 @@ public sealed class GetDiagnosticsRazorIntegrationTests
                 slnPath,
                 Path.Combine(projDir, "Counter.razor"),
                 Path.Combine(projDir, "CsError.razor"),
-                Path.Combine(projDir, "RazorError.razor"));
+                Path.Combine(projDir, "RazorError.razor"),
+                Path.Combine(projDir, "UnclosedTag.razor"));
         }
 
         private static string LocateFixtureSource()

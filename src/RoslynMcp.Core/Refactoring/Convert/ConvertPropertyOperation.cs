@@ -34,7 +34,7 @@ public sealed class ConvertPropertyOperation : RefactoringOperationBase<ConvertP
             throw new RefactoringException(ErrorCodes.InvalidSourcePath, "sourceFile must be an absolute path.");
 
         if (!PathResolver.IsValidCSharpFilePath(@params.SourceFile))
-            throw new RefactoringException(ErrorCodes.InvalidSourcePath, "sourceFile must be a .cs file.");
+            throw new RefactoringException(ErrorCodes.InvalidSourcePath, PathResolver.GetCSharpFileRejectionReason(@params.SourceFile));
 
         if (!@params.Line.HasValue && string.IsNullOrWhiteSpace(@params.PropertyName))
             throw new RefactoringException(ErrorCodes.MissingRequiredParam, "Either propertyName or line must be provided.");

@@ -61,4 +61,51 @@ public class PathResolverTests
         { WinOrUnix(@"C:\project\File.cs", "/project/File.cs"), false },
         { @"relative\Solution.sln", false }
     };
+
+    [Theory]
+    [MemberData(nameof(IsValidRazorFilePathData))]
+    public void IsValidRazorFilePath_ReturnsExpected(string path, bool expected)
+    {
+        var result = PathResolver.IsValidRazorFilePath(path);
+        Assert.Equal(expected, result);
+    }
+
+    public static TheoryData<string, bool> IsValidRazorFilePathData => new()
+    {
+        { WinOrUnix(@"C:\project\Pages\Counter.razor", "/project/Pages/Counter.razor"), true },
+        { WinOrUnix(@"C:\project\Pages\Counter.RAZOR", "/project/Pages/Counter.RAZOR"), true },
+        { WinOrUnix(@"C:\project\Views\Index.cshtml", "/project/Views/Index.cshtml"), true },
+        { WinOrUnix(@"C:\project\src\File.cs", "/project/src/File.cs"), false },
+        { WinOrUnix(@"C:\project\src\File.txt", "/project/src/File.txt"), false },
+        { @"relative\Counter.razor", false },
+        { "", false }
+    };
+
+    [Theory]
+    [MemberData(nameof(IsValidDiagnosticsSourcePathData))]
+    public void IsValidDiagnosticsSourcePath_ReturnsExpected(string path, bool expected)
+    {
+        var result = PathResolver.IsValidDiagnosticsSourcePath(path);
+        Assert.Equal(expected, result);
+    }
+
+    public static TheoryData<string, bool> IsValidDiagnosticsSourcePathData => new()
+    {
+        { WinOrUnix(@"C:\project\src\File.cs", "/project/src/File.cs"), true },
+        { WinOrUnix(@"C:\project\Pages\Counter.razor", "/project/Pages/Counter.razor"), true },
+        { WinOrUnix(@"C:\project\Views\Index.cshtml", "/project/Views/Index.cshtml"), true },
+        { WinOrUnix(@"C:\project\src\File.txt", "/project/src/File.txt"), false },
+        { @"relative\File.cs", false },
+        { "", false }
+    };
+
+    [Theory]
+    [InlineData(@"C:\project\src\File.txt", "sourceFile", "sourceFile must be a .cs file.")]
+    [InlineData(@"C:\project\Pages\Counter.razor", "sourceFile", "sourceFile is a Razor/CSHTML file")]
+    [InlineData(@"C:\project\Views\Index.cshtml", "targetFile", "targetFile is a Razor/CSHTML file")]
+    public void GetCSharpFileRejectionReason_ReturnsExpectedMessage(string path, string parameterName, string expectedFragment)
+    {
+        var message = PathResolver.GetCSharpFileRejectionReason(path, parameterName);
+        Assert.Contains(expectedFragment, message);
+    }
 }

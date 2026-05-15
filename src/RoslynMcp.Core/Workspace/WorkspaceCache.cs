@@ -387,9 +387,23 @@ public sealed class WorkspaceCache : IDisposable
                     return;
                 }
 
-                if (!string.Equals(ext, ".cs", StringComparison.OrdinalIgnoreCase) &&
-                    !string.Equals(oldExt, ".cs", StringComparison.OrdinalIgnoreCase))
+                var isCs = IsCSharpExt(ext) || IsCSharpExt(oldExt);
+                var isRazor = IsRazorExt(ext) || IsRazorExt(oldExt);
+                if (!isCs && !isRazor)
                 {
+                    return;
+                }
+
+                // Razor/CSHTML files are AdditionalDocuments consumed by the source
+                // generator; we can't apply an incremental text update through the
+                // Document-centric ApplyExternalTextChangeAsync path, so any edit
+                // invalidates the entry. The next access reloads from scratch and
+                // picks up the new Razor content.
+                if (isRazor)
+                {
+                    _cache.LogCallback?.Invoke(
+                        $"Razor/CSHTML file {changeType} '{fullPath}'; invalidating '{_key}'.");
+                    _cache.Invalidate(_key);
                     return;
                 }
 
@@ -483,5 +497,12 @@ public sealed class WorkspaceCache : IDisposable
             }
             return false;
         }
+
+        private static bool IsCSharpExt(string? extension)
+            => string.Equals(extension, ".cs", StringComparison.OrdinalIgnoreCase);
+
+        private static bool IsRazorExt(string? extension)
+            => string.Equals(extension, ".razor", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(extension, ".cshtml", StringComparison.OrdinalIgnoreCase);
     }
 }

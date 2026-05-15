@@ -49,7 +49,7 @@ public sealed class GetDiagnosticsTool : IToolHandler
             sourceFile = new
             {
                 type = "string",
-                description = "Absolute path to a .cs file to restrict diagnostics to (optional)"
+                description = "Absolute path to a .cs, .razor, or .cshtml file to restrict diagnostics to (optional). Razor diagnostics are mapped back to the source file via #line pragmas where available."
             },
             severityFilter = new
             {

@@ -40,7 +40,7 @@ public sealed class ExtractInterfaceOperation : RefactoringOperationBase<Extract
             throw new RefactoringException(ErrorCodes.InvalidSourcePath, "sourceFile must be an absolute path.");
 
         if (!PathResolver.IsValidCSharpFilePath(@params.SourceFile))
-            throw new RefactoringException(ErrorCodes.InvalidSourcePath, "sourceFile must be a .cs file.");
+            throw new RefactoringException(ErrorCodes.InvalidSourcePath, PathResolver.GetCSharpFileRejectionReason(@params.SourceFile));
 
         if (!File.Exists(@params.SourceFile))
             throw new RefactoringException(ErrorCodes.SourceFileNotFound, $"Source file not found: {@params.SourceFile}");
@@ -54,7 +54,7 @@ public sealed class ExtractInterfaceOperation : RefactoringOperationBase<Extract
                 throw new RefactoringException(ErrorCodes.InvalidTargetPath, "targetFile must be an absolute path.");
 
             if (!PathResolver.IsValidCSharpFilePath(@params.TargetFile))
-                throw new RefactoringException(ErrorCodes.InvalidTargetPath, "targetFile must be a .cs file.");
+                throw new RefactoringException(ErrorCodes.InvalidTargetPath, PathResolver.GetCSharpFileRejectionReason(@params.TargetFile, "targetFile"));
         }
     }
 

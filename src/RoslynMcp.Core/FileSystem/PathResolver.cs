@@ -67,6 +67,51 @@ public static class PathResolver
     }
 
     /// <summary>
+    /// Validates that a path is a Razor (.razor) or legacy Razor (.cshtml) source file.
+    /// </summary>
+    /// <remarks>
+    /// Razor sources are not Roslyn <c>Document</c>s — they live in the project as
+    /// <c>AdditionalDocument</c>s and are consumed by the Razor source generator,
+    /// which emits <c>*_razor.g.cs</c> files into the compilation.
+    /// </remarks>
+    public static bool IsValidRazorFilePath(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return false;
+
+        if (!IsAbsolutePath(path))
+            return false;
+
+        return path.EndsWith(".razor", StringComparison.OrdinalIgnoreCase) ||
+               path.EndsWith(".cshtml", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Validates that a path is acceptable as the <c>sourceFile</c> argument for
+    /// the <c>get_diagnostics</c> tool. Accepts both regular C# files and Razor
+    /// markup files; diagnostics from .razor/.cshtml flow through Roslyn via the
+    /// Razor source generator.
+    /// </summary>
+    public static bool IsValidDiagnosticsSourcePath(string path)
+        => IsValidCSharpFilePath(path) || IsValidRazorFilePath(path);
+
+    /// <summary>
+    /// Returns the error message used when a C#-only operation receives a
+    /// non-.cs file. Razor inputs get a more actionable message that directs the
+    /// caller toward <c>get_diagnostics</c> (for diagnostics) or the Razor
+    /// language server (for refactors).
+    /// </summary>
+    /// <param name="path">The offending path supplied by the caller.</param>
+    /// <param name="parameterName">Name of the parameter (e.g. "sourceFile"/"targetFile") used in the message.</param>
+    public static string GetCSharpFileRejectionReason(string path, string parameterName = "sourceFile")
+    {
+        return IsValidRazorFilePath(path)
+            ? $"{parameterName} is a Razor/CSHTML file. This operation only supports .cs files. " +
+              "Razor diagnostics are available via get_diagnostics; Razor refactors require the Razor language server."
+            : $"{parameterName} must be a .cs file.";
+    }
+
+    /// <summary>
     /// Validates that a path is a valid solution or project path.
     /// </summary>
     /// <param name="path">Path to validate.</param>

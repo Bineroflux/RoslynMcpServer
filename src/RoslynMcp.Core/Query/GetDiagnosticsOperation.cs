@@ -28,8 +28,10 @@ public sealed class GetDiagnosticsOperation : QueryOperationBase<GetDiagnosticsP
             if (!PathResolver.IsAbsolutePath(@params.SourceFile))
                 throw new RefactoringException(ErrorCodes.InvalidSourcePath, "sourceFile must be an absolute path.");
 
-            if (!PathResolver.IsValidCSharpFilePath(@params.SourceFile))
-                throw new RefactoringException(ErrorCodes.InvalidSourcePath, "sourceFile must be a .cs file.");
+            if (!PathResolver.IsValidDiagnosticsSourcePath(@params.SourceFile))
+                throw new RefactoringException(
+                    ErrorCodes.InvalidSourcePath,
+                    "sourceFile must be a .cs, .razor, or .cshtml file.");
 
             if (!File.Exists(@params.SourceFile))
                 throw new RefactoringException(ErrorCodes.SourceFileNotFound, $"Source file not found: {@params.SourceFile}");
@@ -62,16 +64,27 @@ public sealed class GetDiagnosticsOperation : QueryOperationBase<GetDiagnosticsP
                 if (!PassesSeverityFilter(diag.Severity, severityFilter))
                     continue;
 
+                // For Razor/CSHTML, diagnostics live in generator-emitted *_razor.g.cs
+                // syntax trees. GetMappedLineSpan() honours #line pragmas the Razor
+                // generator emits, so it returns the .razor path/line when one is
+                // available. Falling back to the unmapped span covers Razor errors
+                // that the generator reports without a mapping (e.g. some RZ
+                // diagnostics) and all plain C# diagnostics.
+                var unmappedSpan = diag.Location.IsInSource ? diag.Location.GetLineSpan() : default;
+                var mappedSpan = diag.Location.IsInSource ? diag.Location.GetMappedLineSpan() : default;
+                var preferredSpan = mappedSpan.IsValid && mappedSpan.HasMappedPath ? mappedSpan : unmappedSpan;
+
                 // Filter by file if specified
-                if (!string.IsNullOrWhiteSpace(@params.SourceFile) && diag.Location.IsInSource)
+                if (!string.IsNullOrWhiteSpace(@params.SourceFile))
                 {
-                    var diagPath = diag.Location.GetLineSpan().Path;
-                    if (!string.Equals(diagPath, @params.SourceFile, StringComparison.OrdinalIgnoreCase))
+                    if (!diag.Location.IsInSource)
                         continue;
-                }
-                else if (!string.IsNullOrWhiteSpace(@params.SourceFile) && !diag.Location.IsInSource)
-                {
-                    continue;
+
+                    var matches =
+                        string.Equals(preferredSpan.Path, @params.SourceFile, StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(unmappedSpan.Path, @params.SourceFile, StringComparison.OrdinalIgnoreCase);
+                    if (!matches)
+                        continue;
                 }
 
                 string? file = null;
@@ -80,10 +93,9 @@ public sealed class GetDiagnosticsOperation : QueryOperationBase<GetDiagnosticsP
 
                 if (diag.Location.IsInSource)
                 {
-                    var lineSpan = diag.Location.GetLineSpan();
-                    file = lineSpan.Path;
-                    line = lineSpan.StartLinePosition.Line + 1;
-                    column = lineSpan.StartLinePosition.Character + 1;
+                    file = preferredSpan.Path;
+                    line = preferredSpan.StartLinePosition.Line + 1;
+                    column = preferredSpan.StartLinePosition.Character + 1;
                 }
 
                 var info = new DiagnosticInfo

@@ -30,7 +30,7 @@ public sealed class AnalyzeDataFlowOperation : QueryOperationBase<AnalyzeDataFlo
             throw new RefactoringException(ErrorCodes.InvalidSourcePath, "sourceFile must be an absolute path.");
 
         if (!PathResolver.IsValidCSharpFilePath(@params.SourceFile))
-            throw new RefactoringException(ErrorCodes.InvalidSourcePath, "sourceFile must be a .cs file.");
+            throw new RefactoringException(ErrorCodes.InvalidSourcePath, PathResolver.GetCSharpFileRejectionReason(@params.SourceFile));
 
         if (@params.StartLine < 1)
             throw new RefactoringException(ErrorCodes.InvalidLineNumber, "startLine must be >= 1.");

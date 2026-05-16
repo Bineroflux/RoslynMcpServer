@@ -22,7 +22,7 @@ namespace RoslynMcp.Core.Workspace;
 public sealed class WorkspaceCache : IDisposable
 {
     /// <summary>Default time-to-live for unreferenced entries.</summary>
-    public static readonly TimeSpan DefaultIdleTtl = TimeSpan.FromMinutes(5);
+    public static readonly TimeSpan DefaultIdleTtl = TimeSpan.FromMinutes(20);
 
     /// <summary>How often the sweeper checks for idle entries.</summary>
     public static readonly TimeSpan DefaultSweepInterval = TimeSpan.FromMinutes(1);

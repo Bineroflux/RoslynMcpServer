@@ -264,14 +264,31 @@ public sealed class GetDiagnosticsOperation : QueryOperationBase<GetDiagnosticsP
 
         var parseOptions = project.ParseOptions as CSharpParseOptions;
 
+        // Pass the project's analyzer-config options provider so the generator
+        // sees MSBuild properties (e.g. build_property.RazorLangVersion,
+        // build_property.RootNamespace). Without it the Razor source generator
+        // emits RZ3600 ("Invalid value '' for RazorLangVersion") and uses a
+        // synthetic 'ASP.C_*' namespace, which then conflicts with the
+        // properly-namespaced components Roslyn's internal driver already
+        // produced — surfacing as bogus RZ9985 "Multiple components use the
+        // tag X" and RZ10009 duplicate-parameter diagnostics.
+        var optionsProvider = project.AnalyzerOptions?.AnalyzerConfigOptionsProvider;
+
+        // Strip Roslyn's internal generator output from the compilation before
+        // re-running. If we leave it in, the Razor generator's tag-helper
+        // discovery sees both Roslyn's already-emitted components and the
+        // components it is about to emit, producing duplicate-component
+        // diagnostics that don't appear in `dotnet build`.
+        var cleanCompilation = StripGeneratedTrees(project, compilation);
+
         try
         {
             GeneratorDriver driver = CSharpGeneratorDriver.Create(
                 generators: generators,
                 additionalTexts: additionalTexts.ToImmutable(),
                 parseOptions: parseOptions,
-                optionsProvider: null);
-            driver = driver.RunGenerators(compilation, cancellationToken);
+                optionsProvider: optionsProvider);
+            driver = driver.RunGenerators(cleanCompilation, cancellationToken);
             return (driver.GetRunResult().Diagnostics, null);
         }
         catch (OperationCanceledException)
@@ -286,6 +303,36 @@ public sealed class GetDiagnosticsOperation : QueryOperationBase<GetDiagnosticsP
             // Surface the failure as RMCP0002 via the caller.
             return (ImmutableArray<Diagnostic>.Empty, ex.Message);
         }
+    }
+
+    /// <summary>
+    /// Returns <paramref name="compilation"/> with any syntax trees that did not
+    /// originate from a regular project <see cref="Document"/> removed. In
+    /// practice this drops the trees Roslyn's internal generator driver added,
+    /// giving us a "pre-generation" compilation safe to feed back into a
+    /// manual driver run without producing duplicate-emit diagnostics.
+    /// </summary>
+    private static Compilation StripGeneratedTrees(Project project, Compilation compilation)
+    {
+        var documentPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var doc in project.Documents)
+        {
+            if (!string.IsNullOrEmpty(doc.FilePath))
+                documentPaths.Add(doc.FilePath);
+        }
+
+        var toRemove = new List<SyntaxTree>();
+        foreach (var tree in compilation.SyntaxTrees)
+        {
+            // Generated trees typically have a synthetic path of the form
+            // "<GeneratorTypeName>/<output>.g.cs" that never matches a real
+            // document path. Anything that doesn't correspond to a project
+            // document is treated as generator output and dropped.
+            if (!documentPaths.Contains(tree.FilePath))
+                toRemove.Add(tree);
+        }
+
+        return toRemove.Count == 0 ? compilation : compilation.RemoveSyntaxTrees(toRemove);
     }
 
     private sealed class ProjectAdditionalText : AdditionalText

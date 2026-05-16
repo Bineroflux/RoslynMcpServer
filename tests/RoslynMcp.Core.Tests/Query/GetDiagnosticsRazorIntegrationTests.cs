@@ -142,6 +142,44 @@ public sealed class GetDiagnosticsRazorIntegrationTests
     }
 
     [Fact]
+    public async Task GetDiagnostics_UnfilteredSolutionWide_MatchesDotnetBuildIds()
+    {
+        // Regression for the case where running the manual generator driver
+        // without an AnalyzerConfigOptionsProvider produced RZ3600
+        // ("Invalid value '' for RazorLangVersion") and, on projects with a
+        // non-trivial RootNamespace, RZ9985 / RZ10009 from the Razor generator
+        // re-emitting components into a fallback 'ASP.*' namespace and seeing
+        // its own previously-emitted components alongside the new ones.
+        //
+        // The contract: the set of error IDs surfaced for the fixture must
+        // match exactly what `dotnet build` reports — CS0029, RZ1013, RZ9980 —
+        // and must contain none of the spurious-when-options-missing codes.
+        using var fixture = RazorFixture.TryCreate(out var skip);
+        if (skip is not null) Assert.Skip(skip);
+
+        using var provider = new MSBuildWorkspaceProvider();
+        using var ctx = await provider.CreateContextAsync(
+            fixture!.SolutionPath, TestContext.Current.CancellationToken);
+
+        var op = new GetDiagnosticsOperation(ctx);
+        var result = await op.ExecuteAsync(
+            new GetDiagnosticsParams { SeverityFilter = "Error" },
+            TestContext.Current.CancellationToken);
+
+        Assert.True(result.Success);
+        var ids = result.Data!.Diagnostics.Select(d => d.Id).ToHashSet();
+        var dump = string.Join("\n  ",
+            result.Data.Diagnostics.Select(d => $"{d.Id} {d.File}:{d.Line}:{d.Column} - {d.Message}"));
+
+        Assert.Equal(
+            new HashSet<string> { "CS0029", "RZ1013", "RZ9980" },
+            ids);
+        Assert.DoesNotContain("RZ3600", ids); // spurious when options provider is missing
+        Assert.DoesNotContain("RZ9985", ids); // spurious when generator runs over its own prior output
+        Assert.DoesNotContain("RZ10009", ids); // cascade from RZ9985
+    }
+
+    [Fact]
     public async Task GetDiagnostics_TxtFile_ThrowsValidation()
     {
         using var fixture = RazorFixture.TryCreate(out var skip);

@@ -37,6 +37,13 @@ public sealed class MSBuildWorkspaceProvider : IWorkspaceProvider, IDisposable
     /// </summary>
     public static readonly TimeSpan DefaultWorkspaceLoadTimeout = TimeSpan.FromMinutes(5);
 
+    /// <summary>
+    /// Environment variable that disables analyzer/source-generator shadow copying.
+    /// Set to <c>1</c> / <c>true</c> to fall back to Roslyn's default in-place loader
+    /// (which locks the analyzer DLLs and can break concurrent <c>dotnet build</c>).
+    /// </summary>
+    public const string DisableShadowCopyEnvVar = "ROSLYNMCP_DISABLE_ANALYZER_SHADOW_COPY";
+
     private readonly IFileWriter _fileWriter;
     private readonly TimeSpan _workspaceLoadTimeout;
     private readonly WorkspaceCache _cache;
@@ -195,6 +202,18 @@ public sealed class MSBuildWorkspaceProvider : IWorkspaceProvider, IDisposable
         var generatorIssues = new List<string>();
         solution = StripUnresolvedAnalyzerReferences(workspace, solution, generatorIssues);
 
+        // Re-wrap analyzer/source-generator references so their assemblies load from
+        // shadow copies instead of the build output. This is what lets a concurrent
+        // `dotnet build` overwrite the *.SourceGenerator.dll in obj/bin while this
+        // server has the solution open (the way Visual Studio behaves). Done before
+        // materializing compilations, since that is what first triggers the loader.
+        ShadowCopyAnalyzerAssemblyLoader? analyzerLoader = null;
+        if (ShadowCopyEnabled)
+        {
+            analyzerLoader = new ShadowCopyAnalyzerAssemblyLoader(msg => LogCallback?.Invoke(msg));
+            solution = ShadowCopyAnalyzerReferences(workspace, solution, analyzerLoader);
+        }
+
         // Eagerly materialize compilations so the first symbol query doesn't silently pay
         // a multi-minute lazy-compilation cost. Including this in LoadWorkspaceAsync folds
         // the real cold-load cost into WorkspaceLoadMs and keeps subsequent queries cheap.
@@ -202,7 +221,8 @@ public sealed class MSBuildWorkspaceProvider : IWorkspaceProvider, IDisposable
 
         return new WorkspaceContext(
             workspace, solution, normalizedPath, _fileWriter,
-            generatorLoadIssues: generatorIssues.Count == 0 ? null : generatorIssues);
+            generatorLoadIssues: generatorIssues.Count == 0 ? null : generatorIssues,
+            analyzerAssemblyLoader: analyzerLoader);
     }
 
     /// <summary>
@@ -271,6 +291,74 @@ public sealed class MSBuildWorkspaceProvider : IWorkspaceProvider, IDisposable
         var fullPath = reference.FullPath ?? string.Empty;
         return display.Contains("Razor.SourceGenerators", StringComparison.OrdinalIgnoreCase)
             || fullPath.Contains("Razor.SourceGenerators", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Whether analyzer/source-generator assemblies should be shadow-copied before
+    /// loading. Enabled unless <see cref="DisableShadowCopyEnvVar"/> is set truthy.
+    /// </summary>
+    private static bool ShadowCopyEnabled
+    {
+        get
+        {
+            var value = Environment.GetEnvironmentVariable(DisableShadowCopyEnvVar);
+            return !(string.Equals(value, "1", StringComparison.Ordinal)
+                  || string.Equals(value, "true", StringComparison.OrdinalIgnoreCase));
+        }
+    }
+
+    /// <summary>
+    /// Replaces every project's <see cref="AnalyzerFileReference"/> with an equivalent
+    /// reference backed by <paramref name="loader"/>, so the analyzer and
+    /// source-generator assemblies are loaded from shadow copies rather than the
+    /// on-disk build output. The copy is lazy — it only happens when an analyzer is
+    /// actually loaded — so unused analyzers cost nothing.
+    /// </summary>
+    private Solution ShadowCopyAnalyzerReferences(
+        MSBuildWorkspace workspace, Solution solution, ShadowCopyAnalyzerAssemblyLoader loader)
+    {
+        var changed = false;
+        foreach (var projectId in solution.ProjectIds)
+        {
+            var project = solution.GetProject(projectId);
+            if (project is null || project.AnalyzerReferences.Count == 0) continue;
+
+            var rewritten = new List<AnalyzerReference>(project.AnalyzerReferences.Count);
+            var rewroteAny = false;
+            foreach (var reference in project.AnalyzerReferences)
+            {
+                if (reference is AnalyzerFileReference fileRef && !string.IsNullOrEmpty(fileRef.FullPath))
+                {
+                    rewritten.Add(new AnalyzerFileReference(fileRef.FullPath, loader));
+                    rewroteAny = true;
+                }
+                else
+                {
+                    // In-memory (AnalyzerImageReference) and already-stripped unresolved
+                    // references have no file to lock; leave them as-is.
+                    rewritten.Add(reference);
+                }
+            }
+
+            if (!rewroteAny) continue;
+
+            solution = solution.WithProjectAnalyzerReferences(projectId, rewritten);
+            changed = true;
+        }
+
+        if (changed)
+        {
+            LogCallback?.Invoke("Re-wrapped analyzer references to load from shadow copies.");
+            if (!workspace.TryApplyChanges(solution))
+            {
+                // Reads go through WorkspaceContext.Solution, which gets the snapshot
+                // we return, so the held snapshot alone is sufficient.
+                LogCallback?.Invoke(
+                    "TryApplyChanges rejected the shadow-copy analyzer rewrite; using held snapshot only.");
+            }
+        }
+
+        return solution;
     }
 
     private async Task MaterializeCompilationsAsync(

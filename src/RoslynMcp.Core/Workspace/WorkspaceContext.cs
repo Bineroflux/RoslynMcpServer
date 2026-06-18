@@ -21,6 +21,7 @@ public sealed class WorkspaceContext : IDisposable
 {
     private readonly MSBuildWorkspace _workspace;
     private readonly IFileWriter _fileWriter;
+    private readonly IDisposable? _analyzerAssemblyLoader;
     private readonly SemaphoreSlim _commitLock = new(1, 1);
     private readonly WorkspaceOperationGate _gate = new();
     private Solution _solution;
@@ -63,11 +64,13 @@ public sealed class WorkspaceContext : IDisposable
         Solution solution,
         string loadedPath,
         IFileWriter? fileWriter = null,
-        IReadOnlyList<string>? generatorLoadIssues = null)
+        IReadOnlyList<string>? generatorLoadIssues = null,
+        IDisposable? analyzerAssemblyLoader = null)
     {
         _workspace = workspace;
         _solution = solution;
         _fileWriter = fileWriter ?? new AtomicFileWriter();
+        _analyzerAssemblyLoader = analyzerAssemblyLoader;
         LoadedPath = loadedPath;
         GeneratorLoadIssues = generatorLoadIssues ?? Array.Empty<string>();
         State = WorkspaceState.Ready;
@@ -411,6 +414,11 @@ public sealed class WorkspaceContext : IDisposable
         State = WorkspaceState.Disposed;
         _commitLock.Dispose();
         _workspace.Dispose();
+
+        // Dispose after the workspace so it has already released its references to
+        // the shadow-copied analyzer assemblies; this unloads the dedicated load
+        // context and prunes the temp copies.
+        _analyzerAssemblyLoader?.Dispose();
     }
 
     private void ThrowIfDisposed()

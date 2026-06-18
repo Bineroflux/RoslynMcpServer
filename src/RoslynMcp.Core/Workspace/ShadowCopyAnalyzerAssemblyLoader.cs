@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Globalization;
 using System.Reflection;
 using System.Runtime.Loader;
@@ -23,12 +24,14 @@ namespace RoslynMcp.Core.Workspace;
 /// temp directory leaves the build output untouched.
 /// </para>
 /// <para>
-/// Each instance owns one collectible <see cref="AssemblyLoadContext"/>. Compiler
-/// (<c>Microsoft.CodeAnalysis.*</c>) and runtime/BCL assemblies are deliberately
-/// resolved from the host's default context so analyzer/generator types unify with
-/// the Roslyn the server is already running — otherwise the generators would be
-/// rejected. The analyzer's own private dependencies are shadow-copied and loaded
-/// into the dedicated context.
+/// Following Roslyn's own model, there is one collectible
+/// <see cref="AssemblyLoadContext"/> per analyzer <em>directory</em>, so analyzers from
+/// different directories are isolated and can't clash over differently-versioned
+/// dependencies. Compiler (<c>Microsoft.CodeAnalysis.*</c>) and runtime/BCL assemblies
+/// are deliberately resolved from the host's default context so analyzer/generator
+/// types unify with the Roslyn the server is already running; an analyzer's own private
+/// dependencies are shadow-copied and loaded into its context. When the same simple
+/// name is registered from multiple paths, the highest version wins.
 /// </para>
 /// <para>
 /// Copies live under a per-OS-process directory (<c>pid-{pid}</c>) so several servers
@@ -40,14 +43,13 @@ namespace RoslynMcp.Core.Workspace;
 /// </para>
 /// <para>
 /// Liveness is tracked by an <c>in_use.lock</c> file at the root of the process
-/// directory, also held open with delete-on-close. While the process lives the lock
-/// exists; when it dies the kernel removes it. On startup — right after creating its
-/// own directory and lock — a process sweeps the sibling <c>pid-*</c> directories and
-/// deletes any that have no lock file. The lock's presence, not an emptiness check, is
-/// the guarantee: a dead process leaves behind empty sub-directories that an emptiness
-/// check would wrongly preserve.
+/// directory, also held open with delete-on-close. On startup a process sweeps sibling
+/// <c>pid-*</c> directories and deletes any with no lock file (their owner has exited).
+/// In addition, when a loader is disposed (a workspace is evicted/reloaded) its
+/// directory is queued for best-effort mid-session reclamation, so temp copies don't
+/// accumulate for the whole process lifetime.
 /// </para>
-/// <para>Thread-safe: all mutable state is guarded by <see cref="_gate"/>.</para>
+/// <para>Thread-safe: shared mutable state is guarded by <see cref="_gate"/>.</para>
 /// </remarks>
 internal sealed class ShadowCopyAnalyzerAssemblyLoader : IAnalyzerAssemblyLoader, IDisposable
 {
@@ -74,17 +76,26 @@ internal sealed class ShadowCopyAnalyzerAssemblyLoader : IAnalyzerAssemblyLoader
     // without a GUID, so loaders in the same process never overwrite each other.
     private static int _loaderCounter;
 
+    // Shadow directories of disposed loaders awaiting best-effort deletion. A loaded
+    // assembly can't be deleted while its (collectible) context is still mapped, so we
+    // retry as contexts unload rather than blocking disposal.
+    private static readonly ConcurrentQueue<string> RetiredShadowDirs = new();
+    private static int _reclaiming;
+
     private readonly string _shadowDir;
-    private readonly ShadowCopyLoadContext _loadContext;
     private readonly object _gate = new();
     private readonly Action<string>? _log;
+
+    // One collectible load context per analyzer directory (Roslyn's isolation model).
+    private readonly ConcurrentDictionary<string, ShadowCopyLoadContext> _loadContextsByDir =
+        new(StringComparer.OrdinalIgnoreCase);
 
     // Delete-on-close handles keeping each shadow copy pinned for this process's
     // lifetime; closed on Dispose and, ultimately, by the OS on process termination.
     private readonly List<SafeFileHandle> _pins = new();
 
-    // Simple assembly name -> original full path, populated via AddDependencyLocation.
-    private readonly Dictionary<string, string> _dependencyPathsByName =
+    // Simple assembly name -> all registered original paths (multiple versions possible).
+    private readonly Dictionary<string, List<string>> _dependencyPathsByName =
         new(StringComparer.OrdinalIgnoreCase);
 
     // Directories to probe for sibling dependencies not explicitly registered.
@@ -93,6 +104,10 @@ internal sealed class ShadowCopyAnalyzerAssemblyLoader : IAnalyzerAssemblyLoader
 
     // Normalized original path -> shadow-copied path (so each file is copied once).
     private readonly Dictionary<string, string> _shadowByOriginal =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    // Original path -> its AssemblyName (cached; null if unreadable), for version compare.
+    private readonly Dictionary<string, AssemblyName?> _assemblyNameByPath =
         new(StringComparer.OrdinalIgnoreCase);
 
     private bool _disposed;
@@ -111,7 +126,10 @@ internal sealed class ShadowCopyAnalyzerAssemblyLoader : IAnalyzerAssemblyLoader
         var index = Interlocked.Increment(ref _loaderCounter);
         _shadowDir = Path.Combine(ProcessShadowRoot, index.ToString(CultureInfo.InvariantCulture));
         Directory.CreateDirectory(_shadowDir);
-        _loadContext = new ShadowCopyLoadContext(this);
+
+        // Opportunistically reclaim directories left by loaders disposed earlier in this
+        // process; by now their contexts may have unloaded.
+        ReclaimRetiredDirectories();
     }
 
     /// <inheritdoc />
@@ -128,6 +146,8 @@ internal sealed class ShadowCopyAnalyzerAssemblyLoader : IAnalyzerAssemblyLoader
     /// <inheritdoc />
     public Assembly LoadFromPath(string fullPath)
     {
+        var context = GetOrCreateContext(GetContextDirectory(fullPath));
+
         string shadow;
         lock (_gate)
         {
@@ -137,20 +157,22 @@ internal sealed class ShadowCopyAnalyzerAssemblyLoader : IAnalyzerAssemblyLoader
             shadow = GetOrCreateShadowCopyNoLock(fullPath) ?? fullPath;
         }
 
-        return _loadContext.LoadFromAssemblyPath(shadow);
+        return context.LoadFromAssemblyPath(shadow);
     }
 
     /// <summary>
-    /// Resolves a dependency requested by the dedicated load context. The compiler
+    /// Resolves a dependency requested by a per-directory load context. The compiler
     /// itself and runtime/BCL assemblies are shared with the host so analyzer types
     /// unify with the Roslyn we're already running; every other dependency — including
     /// analyzer assemblies that merely live under the <c>Microsoft.CodeAnalysis.*</c>
-    /// namespace, such as the Razor source generator — is shadow-copied and loaded
-    /// into the dedicated context.
+    /// namespace, such as the Razor source generator — is shadow-copied and loaded into
+    /// the requesting context (keeping each analyzer directory isolated).
     /// </summary>
-    internal Assembly? Resolve(AssemblyName name)
+    internal Assembly? Resolve(AssemblyName name, ShadowCopyLoadContext context)
     {
         var simpleName = name.Name;
+        if (string.IsNullOrEmpty(simpleName))
+            return null;
 
         // Compiler + framework/runtime: share with the host. Returning the host's
         // already-loaded instance (or null, so the runtime resolves from the default
@@ -158,50 +180,122 @@ internal sealed class ShadowCopyAnalyzerAssemblyLoader : IAnalyzerAssemblyLoader
         if (ShouldShareWithHost(simpleName))
             return FindInDefault(simpleName);
 
-        // Private analyzer dependency: load from the analyzer's own (shadow-copied) folder.
+        // Unify with anything the host already loaded (e.g. its own private deps).
+        var hostLoaded = FindInDefault(simpleName);
+        if (hostLoaded is not null)
+            return hostLoaded;
+
         lock (_gate)
         {
-            string? original = null;
-            if (simpleName is not null &&
-                _dependencyPathsByName.TryGetValue(simpleName, out var registered))
-            {
-                original = registered;
-            }
-            original ??= ProbeForDependencyNoLock(simpleName);
-
+            var original = ResolveBestDependencyPathNoLock(simpleName, name, context.Directory);
             if (original is not null)
             {
                 var shadow = GetOrCreateShadowCopyNoLock(original) ?? original;
-                return _loadContext.LoadFromAssemblyPath(shadow);
+                return context.LoadFromAssemblyPath(shadow);
             }
         }
 
-        // Not a known private dependency — fall back to whatever the host already has.
-        return FindInDefault(simpleName);
+        // Not a known private dependency — let the runtime fall back to the default context.
+        return null;
     }
 
     private void RegisterLocationNoLock(string fullPath)
     {
         var name = Path.GetFileNameWithoutExtension(fullPath);
         if (!string.IsNullOrEmpty(name))
-            _dependencyPathsByName[name] = fullPath;
+        {
+            if (!_dependencyPathsByName.TryGetValue(name, out var list))
+                _dependencyPathsByName[name] = list = new List<string>(1);
+            if (!list.Contains(fullPath, StringComparer.OrdinalIgnoreCase))
+                list.Add(fullPath);
+        }
 
         var dir = Path.GetDirectoryName(fullPath);
         if (!string.IsNullOrEmpty(dir))
             _probeDirectories.Add(dir);
     }
 
-    private string? ProbeForDependencyNoLock(string? simpleName)
+    /// <summary>
+    /// Picks the best original path for <paramref name="simpleName"/>: prefers an exact
+    /// version match to <paramref name="requested"/>, otherwise the highest version.
+    /// Candidates are the requesting analyzer's own directory first, then every
+    /// registered/probed location. Mirrors Roslyn's <c>GetBestResolvedPath</c>.
+    /// </summary>
+    private string? ResolveBestDependencyPathNoLock(
+        string simpleName, AssemblyName requested, string? preferDirectory)
     {
-        if (string.IsNullOrEmpty(simpleName)) return null;
+        var candidates = new List<string>();
 
-        foreach (var dir in _probeDirectories)
+        void AddCandidateFromDir(string? dir)
         {
+            if (string.IsNullOrEmpty(dir)) return;
             var candidate = Path.Combine(dir, simpleName + ".dll");
-            if (File.Exists(candidate))
-                return candidate;
+            if (File.Exists(candidate) &&
+                !candidates.Contains(candidate, StringComparer.OrdinalIgnoreCase))
+                candidates.Add(candidate);
         }
-        return null;
+
+        AddCandidateFromDir(preferDirectory);
+        if (_dependencyPathsByName.TryGetValue(simpleName, out var registered))
+        {
+            foreach (var path in registered)
+                if (File.Exists(path) &&
+                    !candidates.Contains(path, StringComparer.OrdinalIgnoreCase))
+                    candidates.Add(path);
+        }
+        foreach (var dir in _probeDirectories)
+            AddCandidateFromDir(dir);
+
+        if (candidates.Count == 0) return null;
+        if (candidates.Count == 1) return candidates[0];
+
+        string? best = null;
+        Version? bestVersion = null;
+        foreach (var path in candidates)
+        {
+            var version = GetAssemblyNameNoLock(path)?.Version;
+            if (version is null)
+            {
+                best ??= path; // keep an unreadable candidate only as a last resort
+                continue;
+            }
+            if (requested.Version is not null && version == requested.Version)
+                return path; // exact match wins immediately
+            if (bestVersion is null || version > bestVersion)
+            {
+                best = path;
+                bestVersion = version;
+            }
+        }
+        return best;
+    }
+
+    private AssemblyName? GetAssemblyNameNoLock(string path)
+    {
+        if (_assemblyNameByPath.TryGetValue(path, out var cached))
+            return cached;
+
+        AssemblyName? name = null;
+        try { name = AssemblyName.GetAssemblyName(path); }
+        catch { /* corrupt / native / unreadable: treat as version-less */ }
+
+        _assemblyNameByPath[path] = name;
+        return name;
+    }
+
+    private ShadowCopyLoadContext GetOrCreateContext(string directory)
+        => _loadContextsByDir.GetOrAdd(directory, dir => new ShadowCopyLoadContext(this, dir));
+
+    private static string GetContextDirectory(string fullPath)
+    {
+        try
+        {
+            return Path.GetDirectoryName(Path.GetFullPath(fullPath)) ?? fullPath;
+        }
+        catch
+        {
+            return Path.GetDirectoryName(fullPath) ?? fullPath;
+        }
     }
 
     private string? GetOrCreateShadowCopyNoLock(string originalPath)
@@ -266,8 +360,8 @@ internal sealed class ShadowCopyAnalyzerAssemblyLoader : IAnalyzerAssemblyLoader
         }
         catch (Exception ex)
         {
-            // Without the pin the copy just lingers until a later startup sweep; not
-            // fatal, so keep loading rather than failing the workspace.
+            // Without the pin the copy just lingers until a later sweep; not fatal,
+            // so keep loading rather than failing the workspace.
             _log?.Invoke($"Could not pin shadow copy '{shadowPath}' for delete-on-close: {ex.Message}.");
         }
     }
@@ -280,10 +374,8 @@ internal sealed class ShadowCopyAnalyzerAssemblyLoader : IAnalyzerAssemblyLoader
     /// <c>Microsoft.CodeAnalysis.Razor.Compiler</c>) live under that namespace and must
     /// load from their own shadow-copied assemblies rather than the (absent) host copy.
     /// </summary>
-    private static bool ShouldShareWithHost(string? simpleName)
+    private static bool ShouldShareWithHost(string simpleName)
     {
-        if (string.IsNullOrEmpty(simpleName)) return false;
-
         switch (simpleName)
         {
             case "Microsoft.CodeAnalysis":
@@ -308,10 +400,8 @@ internal sealed class ShadowCopyAnalyzerAssemblyLoader : IAnalyzerAssemblyLoader
             || simpleName.Equals("Microsoft.VisualBasic", StringComparison.OrdinalIgnoreCase);
     }
 
-    private static Assembly? FindInDefault(string? simpleName)
+    private static Assembly? FindInDefault(string simpleName)
     {
-        if (string.IsNullOrEmpty(simpleName)) return null;
-
         foreach (var asm in AssemblyLoadContext.Default.Assemblies)
         {
             if (string.Equals(asm.GetName().Name, simpleName, StringComparison.OrdinalIgnoreCase))
@@ -342,14 +432,57 @@ internal sealed class ShadowCopyAnalyzerAssemblyLoader : IAnalyzerAssemblyLoader
             _pins.Clear();
         }
 
-        try { _loadContext.Unload(); }
-        catch { /* non-collectible or already unloading */ }
+        foreach (var context in _loadContextsByDir.Values)
+        {
+            try { context.Unload(); }
+            catch { /* non-collectible or already unloading */ }
+        }
+        _loadContextsByDir.Clear();
 
-        // The copies are removed by the kernel once every handle closes — ours above
-        // plus the CLR's image mapping, released after the unloaded context is GC'd.
-        // The unload is asynchronous, so this directory delete usually fails here and
-        // the now-empty directory is pruned by a later process's startup sweep.
-        TryDeleteDirectory(_shadowDir);
+        // The copies can't be deleted until the (now unloaded) contexts are GC'd and the
+        // CLR releases their image mappings. Queue this directory and try to reclaim it
+        // (plus any earlier ones) now and on future loads; the OS reclaims anything left
+        // at process exit via the delete-on-close handles.
+        RetiredShadowDirs.Enqueue(_shadowDir);
+        ReclaimRetiredDirectories();
+    }
+
+    /// <summary>
+    /// Best-effort deletion of shadow directories belonging to disposed loaders. Runs a
+    /// plain pass first; if anything is still mapped, nudges the GC to finish unloading
+    /// collectible contexts and retries once. Whatever still can't be deleted is requeued
+    /// for the next attempt (and is guaranteed to go at process exit via delete-on-close).
+    /// </summary>
+    private static void ReclaimRetiredDirectories()
+    {
+        if (RetiredShadowDirs.IsEmpty) return;
+        if (Interlocked.CompareExchange(ref _reclaiming, 1, 0) != 0) return; // one reclaim at a time
+        try
+        {
+            var stuck = new List<string>();
+            while (RetiredShadowDirs.TryDequeue(out var dir))
+            {
+                if (!TryDeleteDirectoryReturningSuccess(dir))
+                    stuck.Add(dir);
+            }
+
+            if (stuck.Count > 0)
+            {
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+                GC.Collect();
+
+                foreach (var dir in stuck)
+                {
+                    if (!TryDeleteDirectoryReturningSuccess(dir))
+                        RetiredShadowDirs.Enqueue(dir); // try again next time
+                }
+            }
+        }
+        finally
+        {
+            Volatile.Write(ref _reclaiming, 0);
+        }
     }
 
     /// <summary>
@@ -404,32 +537,61 @@ internal sealed class ShadowCopyAnalyzerAssemblyLoader : IAnalyzerAssemblyLoader
         catch { /* best effort */ }
     }
 
-    private static void TryDeleteDirectory(string dir)
+    private static void TryDeleteDirectory(string dir) => TryDeleteDirectoryReturningSuccess(dir);
+
+    private static bool TryDeleteDirectoryReturningSuccess(string dir)
     {
         try
         {
             if (Directory.Exists(dir))
                 Directory.Delete(dir, recursive: true);
+            return true;
         }
-        catch { /* still in use by this or another process; leave for later */ }
+        catch
+        {
+            return false; // still in use by this or another process; leave for later
+        }
     }
 
+    // --- Test seams (internal; exercised by RoslynMcp.Core.Tests) ---
+
+    /// <summary>Number of per-directory load contexts currently held.</summary>
+    internal int ActiveLoadContextCount => _loadContextsByDir.Count;
+
+    /// <summary>Resolves the best original path for a simple name, as <see cref="Resolve"/> would.</summary>
+    internal string? ResolveBestDependencyPathForTest(string simpleName, Version? requestedVersion)
+    {
+        var requested = new AssemblyName(simpleName);
+        if (requestedVersion is not null) requested.Version = requestedVersion;
+        lock (_gate)
+            return ResolveBestDependencyPathNoLock(simpleName, requested, preferDirectory: null);
+    }
+
+    internal static void EnqueueRetiredDirectoryForTest(string directory) => RetiredShadowDirs.Enqueue(directory);
+
+    internal static void ReclaimRetiredDirectoriesForTest() => ReclaimRetiredDirectories();
+
     /// <summary>
-    /// Dedicated, collectible load context for shadow-copied analyzer assemblies.
-    /// Delegates dependency resolution back to the owning loader so compiler/runtime
-    /// assemblies unify with the host and private dependencies are shadow-copied.
+    /// Dedicated, collectible load context for the shadow-copied analyzer assemblies of
+    /// a single directory. Delegates dependency resolution back to the owning loader so
+    /// compiler/runtime assemblies unify with the host and private dependencies are
+    /// shadow-copied into this same context.
     /// </summary>
-    private sealed class ShadowCopyLoadContext : AssemblyLoadContext
+    internal sealed class ShadowCopyLoadContext : AssemblyLoadContext
     {
         private readonly ShadowCopyAnalyzerAssemblyLoader _owner;
 
-        public ShadowCopyLoadContext(ShadowCopyAnalyzerAssemblyLoader owner)
-            : base("RoslynMcpAnalyzerShadowCopy", isCollectible: true)
+        public ShadowCopyLoadContext(ShadowCopyAnalyzerAssemblyLoader owner, string directory)
+            : base($"RoslynMcpAnalyzerShadowCopy:{directory}", isCollectible: true)
         {
             _owner = owner;
+            Directory = directory;
         }
 
+        /// <summary>The original analyzer directory this context serves.</summary>
+        public string Directory { get; }
+
         protected override Assembly? Load(AssemblyName assemblyName)
-            => _owner.Resolve(assemblyName);
+            => _owner.Resolve(assemblyName, this);
     }
 }

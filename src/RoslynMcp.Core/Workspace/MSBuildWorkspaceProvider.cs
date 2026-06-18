@@ -200,7 +200,7 @@ public sealed class MSBuildWorkspaceProvider : IWorkspaceProvider, IDisposable
         // restore artifact gone). Several internal switches don't have a case
         // for them and throw "Unexpected value 'UnresolvedAnalyzerReference'".
         var generatorIssues = new List<string>();
-        solution = StripUnresolvedAnalyzerReferences(workspace, solution, generatorIssues);
+        solution = StripUnresolvedAnalyzerReferences(solution, generatorIssues);
 
         // Re-wrap analyzer/source-generator references so their assemblies load from
         // shadow copies instead of the build output. This is what lets a concurrent
@@ -211,7 +211,7 @@ public sealed class MSBuildWorkspaceProvider : IWorkspaceProvider, IDisposable
         if (ShadowCopyEnabled)
         {
             analyzerLoader = new ShadowCopyAnalyzerAssemblyLoader(msg => LogCallback?.Invoke(msg));
-            solution = ShadowCopyAnalyzerReferences(workspace, solution, analyzerLoader);
+            solution = ShadowCopyAnalyzerReferences(solution, analyzerLoader);
         }
 
         // Eagerly materialize compilations so the first symbol query doesn't silently pay
@@ -227,16 +227,20 @@ public sealed class MSBuildWorkspaceProvider : IWorkspaceProvider, IDisposable
 
     /// <summary>
     /// Returns a solution where every project's analyzer reference list has any
-    /// <see cref="UnresolvedAnalyzerReference"/> entries removed, and pushes the
-    /// cleaned solution into the workspace so <c>workspace.CurrentSolution</c>
-    /// stays in sync with the held snapshot. Records any stripped references
-    /// that look like known source generators (currently: Razor) into
+    /// <see cref="UnresolvedAnalyzerReference"/> entries removed. Records any stripped
+    /// references that look like known source generators (currently: Razor) into
     /// <paramref name="generatorIssues"/> so callers can surface them.
     /// </summary>
+    /// <remarks>
+    /// The cleaned solution is returned as the in-memory snapshot only; it is
+    /// deliberately NOT pushed back via <c>workspace.TryApplyChanges</c>. MSBuildWorkspace
+    /// persists analyzer-reference edits to the <c>.csproj</c> on disk, so applying them
+    /// would rewrite the user's project files. Every operation reads through
+    /// <see cref="WorkspaceContext.Solution"/>, so the held snapshot is authoritative.
+    /// </remarks>
     private Solution StripUnresolvedAnalyzerReferences(
-        MSBuildWorkspace workspace, Solution solution, List<string> generatorIssues)
+        Solution solution, List<string> generatorIssues)
     {
-        var totalRemoved = 0;
         foreach (var projectId in solution.ProjectIds)
         {
             var project = solution.GetProject(projectId);
@@ -257,7 +261,6 @@ public sealed class MSBuildWorkspaceProvider : IWorkspaceProvider, IDisposable
             var removed = project.AnalyzerReferences.Count - keep.Count;
             if (removed == 0) continue;
 
-            totalRemoved += removed;
             LogCallback?.Invoke(
                 $"Stripping {removed} unresolved analyzer reference(s) from project '{project.Name}'.");
 
@@ -272,14 +275,6 @@ public sealed class MSBuildWorkspaceProvider : IWorkspaceProvider, IDisposable
             }
 
             solution = solution.WithProjectAnalyzerReferences(projectId, keep);
-        }
-
-        if (totalRemoved > 0 && !workspace.TryApplyChanges(solution))
-        {
-            // Falling back to the held snapshot is fine: every operation reads
-            // through WorkspaceContext.Solution, which we update below.
-            LogCallback?.Invoke(
-                "TryApplyChanges rejected the analyzer-reference cleanup; using held snapshot only.");
         }
 
         return solution;
@@ -314,8 +309,15 @@ public sealed class MSBuildWorkspaceProvider : IWorkspaceProvider, IDisposable
     /// on-disk build output. The copy is lazy — it only happens when an analyzer is
     /// actually loaded — so unused analyzers cost nothing.
     /// </summary>
+    /// <remarks>
+    /// The rewrite lives in the returned in-memory snapshot only. It must NOT be pushed
+    /// back via <c>workspace.TryApplyChanges</c>: MSBuildWorkspace persists
+    /// analyzer-reference edits to the <c>.csproj</c>, which would rewrite every project
+    /// file on disk (with absolute analyzer paths). Reads go through
+    /// <see cref="WorkspaceContext.Solution"/>, so the snapshot alone is sufficient.
+    /// </remarks>
     private Solution ShadowCopyAnalyzerReferences(
-        MSBuildWorkspace workspace, Solution solution, ShadowCopyAnalyzerAssemblyLoader loader)
+        Solution solution, ShadowCopyAnalyzerAssemblyLoader loader)
     {
         var changed = false;
         foreach (var projectId in solution.ProjectIds)
@@ -347,16 +349,7 @@ public sealed class MSBuildWorkspaceProvider : IWorkspaceProvider, IDisposable
         }
 
         if (changed)
-        {
             LogCallback?.Invoke("Re-wrapped analyzer references to load from shadow copies.");
-            if (!workspace.TryApplyChanges(solution))
-            {
-                // Reads go through WorkspaceContext.Solution, which gets the snapshot
-                // we return, so the held snapshot alone is sufficient.
-                LogCallback?.Invoke(
-                    "TryApplyChanges rejected the shadow-copy analyzer rewrite; using held snapshot only.");
-            }
-        }
 
         return solution;
     }

@@ -257,6 +257,31 @@ public sealed class ShadowCopyAnalyzerTests
         });
     }
 
+    [Fact]
+    public async Task CreateContextAsync_DoesNotModifyProjectFilesOnDisk()
+    {
+        if (!ModuleInitializer.MsBuildAvailable)
+            Assert.Skip($"MSBuild not available: {ModuleInitializer.MsBuildError}");
+
+        using var working = TestSolutionCopy.Create();
+        var csproj = Path.Combine(working.RootDir, "TestProject", "TestProject.csproj");
+        Assert.True(File.Exists(csproj), $"Expected project file at {csproj}.");
+        var before = await File.ReadAllBytesAsync(csproj, TestContext.Current.CancellationToken);
+
+        using var provider = new MSBuildWorkspaceProvider();
+        using var ctx = await provider.CreateContextAsync(
+            working.SolutionPath, TestContext.Current.CancellationToken);
+
+        // Touch the analyzer references the way real queries do.
+        _ = ctx.Solution.Projects.SelectMany(p => p.AnalyzerReferences).ToList();
+
+        // Rewriting analyzer references must stay in-memory: applying them back to an
+        // MSBuildWorkspace would persist <Analyzer Include> items into the .csproj.
+        var after = await File.ReadAllBytesAsync(csproj, TestContext.Current.CancellationToken);
+        Assert.True(before.AsSpan().SequenceEqual(after),
+            "Loading a solution must not rewrite the project file on disk.");
+    }
+
     /// <summary>
     /// Compiles a minimal incremental source generator to <paramref name="outputPath"/>
     /// so the test has a real generator assembly to load through the shadow loader,

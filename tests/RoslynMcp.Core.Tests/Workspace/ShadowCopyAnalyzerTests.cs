@@ -241,6 +241,20 @@ public sealed class ShadowCopyAnalyzerTests
         // loader so nothing is loaded in place from the build output.
         Assert.All(fileReferences, r =>
             Assert.IsType<ShadowCopyAnalyzerAssemblyLoader>(r.AssemblyLoader));
+
+        // The rewrite swaps ONLY the loader: each reference is still an
+        // AnalyzerFileReference whose FullPath is the ORIGINAL on-disk assembly, not
+        // the internal shadow copy. The staleness check relies on this — it reads
+        // FullPath via CaptureMutableAnalyzerStamps and stats that file.
+        var shadowRoot = Path.Combine(Path.GetTempPath(), "RoslynMcp", "AnalyzerShadowCopy");
+        Assert.All(fileReferences, r =>
+        {
+            Assert.False(string.IsNullOrEmpty(r.FullPath));
+            Assert.True(File.Exists(r.FullPath),
+                $"FullPath should point at the real original assembly: {r.FullPath}");
+            Assert.False(r.FullPath!.Contains(shadowRoot, StringComparison.OrdinalIgnoreCase),
+                $"FullPath must be the original, not the shadow copy: {r.FullPath}");
+        });
     }
 
     /// <summary>

@@ -1,4 +1,5 @@
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.Diagnostics;
 using Microsoft.CodeAnalysis.MSBuild;
 using Microsoft.CodeAnalysis.Text;
 using RoslynMcp.Contracts.Enums;
@@ -22,6 +23,7 @@ public sealed class WorkspaceContext : IDisposable
     private readonly MSBuildWorkspace _workspace;
     private readonly IFileWriter _fileWriter;
     private readonly IDisposable? _analyzerAssemblyLoader;
+    private readonly IReadOnlyList<AnalyzerFileStamp> _analyzerStamps;
     private readonly SemaphoreSlim _commitLock = new(1, 1);
     private readonly WorkspaceOperationGate _gate = new();
     private Solution _solution;
@@ -71,6 +73,7 @@ public sealed class WorkspaceContext : IDisposable
         _solution = solution;
         _fileWriter = fileWriter ?? new AtomicFileWriter();
         _analyzerAssemblyLoader = analyzerAssemblyLoader;
+        _analyzerStamps = CaptureMutableAnalyzerStamps(solution);
         LoadedPath = loadedPath;
         GeneratorLoadIssues = generatorLoadIssues ?? Array.Empty<string>();
         State = WorkspaceState.Ready;
@@ -264,6 +267,108 @@ public sealed class WorkspaceContext : IDisposable
         var prefix = ancestor.Length > 0 && ancestor[^1] == sep ? ancestor : ancestor + sep;
         return candidate.StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
     }
+
+    /// <summary>
+    /// On-disk identity (last-write time + length) of a referenced analyzer assembly,
+    /// captured at load time so a later change can be detected.
+    /// </summary>
+    internal readonly record struct AnalyzerFileStamp(string Path, DateTime LastWriteUtc, long Length);
+
+    /// <summary>
+    /// Records the on-disk identity of every project-local analyzer/source-generator
+    /// assembly the solution references. Analyzers shipped via NuGet or the .NET SDK are
+    /// skipped: they are immutable once restored/installed, so checking them would only
+    /// add cost and risk spurious reloads. The build-output generators — the ones a
+    /// <c>dotnet build</c> rewrites, and the reason for shadow copying — are exactly the
+    /// mutable ones we keep.
+    /// </summary>
+    internal static IReadOnlyList<AnalyzerFileStamp> CaptureMutableAnalyzerStamps(Solution solution)
+    {
+        var stamps = new List<AnalyzerFileStamp>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var project in solution.Projects)
+        {
+            foreach (var reference in project.AnalyzerReferences)
+            {
+                if (reference is not AnalyzerFileReference fileRef) continue;
+                var path = fileRef.FullPath;
+                if (string.IsNullOrEmpty(path) || !seen.Add(path)) continue;
+                if (!IsMutableAnalyzerPath(path)) continue;
+
+                try
+                {
+                    var info = new FileInfo(path);
+                    if (info.Exists)
+                        stamps.Add(new AnalyzerFileStamp(path, info.LastWriteTimeUtc, info.Length));
+                }
+                catch { /* unreadable: we simply won't track changes to this one */ }
+            }
+        }
+
+        return stamps;
+    }
+
+    /// <summary>
+    /// True if any project-local analyzer/generator assembly recorded at load time has
+    /// since changed, been replaced, or been removed on disk — meaning this cached
+    /// workspace (and its shadow copies) is stale and should be reloaded.
+    /// </summary>
+    internal bool AnalyzerReferencesChangedOnDisk() => StampsChanged(_analyzerStamps);
+
+    internal static bool StampsChanged(IReadOnlyList<AnalyzerFileStamp> stamps)
+    {
+        foreach (var stamp in stamps)
+        {
+            try
+            {
+                var info = new FileInfo(stamp.Path);
+                if (!info.Exists) return true;
+                if (info.LastWriteTimeUtc != stamp.LastWriteUtc || info.Length != stamp.Length)
+                    return true;
+            }
+            catch
+            {
+                return true; // can no longer stat it -> treat as changed
+            }
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Whether an analyzer path is a mutable build output (worth tracking) rather than
+    /// an immutable NuGet- or SDK-provided assembly.
+    /// </summary>
+    internal static bool IsMutableAnalyzerPath(string path)
+    {
+        var normalized = PathResolver.NormalizePath(path);
+        foreach (var root in ImmutableAnalyzerRoots.Value)
+            if (IsSameOrDescendant(normalized, root))
+                return false;
+        return true;
+    }
+
+    private static readonly Lazy<string[]> ImmutableAnalyzerRoots = new(() =>
+    {
+        var roots = new List<string>();
+
+        var nuget = Environment.GetEnvironmentVariable("NUGET_PACKAGES");
+        if (string.IsNullOrEmpty(nuget))
+            nuget = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".nuget", "packages");
+        roots.Add(nuget);
+
+        var dotnetRoot = Environment.GetEnvironmentVariable("DOTNET_ROOT");
+        if (!string.IsNullOrEmpty(dotnetRoot)) roots.Add(dotnetRoot);
+
+        var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+        if (!string.IsNullOrEmpty(programFiles)) roots.Add(Path.Combine(programFiles, "dotnet"));
+
+        return roots
+            .Where(r => !string.IsNullOrEmpty(r))
+            .Select(PathResolver.NormalizePath)
+            .ToArray();
+    });
 
     /// <summary>
     /// Commits all pending changes to the filesystem.

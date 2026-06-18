@@ -77,9 +77,17 @@ public sealed class WorkspaceCache : IDisposable
         // Fast path: cache hit.
         if (_entries.TryGetValue(key, out var existing) && existing.TryAcquire())
         {
-            await EnterOperationOrRelease(existing, cancellationToken);
-            stopwatch.Stop();
-            return (existing.Context, stopwatch.ElapsedMilliseconds);
+            if (IsFresh(existing, key))
+            {
+                await EnterOperationOrRelease(existing, cancellationToken);
+                stopwatch.Stop();
+                return (existing.Context, stopwatch.ElapsedMilliseconds);
+            }
+            // Stale (a referenced generator/analyzer DLL changed on disk): drop the
+            // lease and invalidate so the load below produces a fresh workspace and
+            // fresh shadow copies. Fall through to the slow path.
+            existing.OnLeaseReleased();
+            Invalidate(key);
         }
 
         // Slow path: load under a per-key guard so parallel cache-miss callers
@@ -91,9 +99,14 @@ public sealed class WorkspaceCache : IDisposable
             // Re-check after acquiring the guard; another caller may have populated the cache.
             if (_entries.TryGetValue(key, out existing) && existing.TryAcquire())
             {
-                await EnterOperationOrRelease(existing, cancellationToken);
-                stopwatch.Stop();
-                return (existing.Context, stopwatch.ElapsedMilliseconds);
+                if (IsFresh(existing, key))
+                {
+                    await EnterOperationOrRelease(existing, cancellationToken);
+                    stopwatch.Stop();
+                    return (existing.Context, stopwatch.ElapsedMilliseconds);
+                }
+                existing.OnLeaseReleased();
+                Invalidate(key);
             }
 
             LogCallback?.Invoke($"Cache miss for '{key}'; loading workspace...");
@@ -122,6 +135,29 @@ public sealed class WorkspaceCache : IDisposable
         {
             guard.Release();
         }
+    }
+
+    /// <summary>
+    /// Whether a leased cache entry is still usable. Returns false when a project-local
+    /// analyzer/source-generator assembly the workspace references has changed on disk
+    /// since it was loaded (e.g. the project was rebuilt), so the caller reloads instead
+    /// of serving stale generator output.
+    /// </summary>
+    private bool IsFresh(CachedEntry entry, string key)
+    {
+        try
+        {
+            if (!entry.Context.AnalyzerReferencesChangedOnDisk())
+                return true;
+        }
+        catch
+        {
+            return true; // can't tell -> keep the cached workspace rather than churn
+        }
+
+        LogCallback?.Invoke(
+            $"Analyzer/generator assembly changed on disk for '{key}'; reloading workspace.");
+        return false;
     }
 
     private static async Task EnterOperationOrRelease(CachedEntry entry, CancellationToken ct)

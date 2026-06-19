@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.FindSymbols;
+using RoslynMcp.Contracts.Enums;
 using RoslynMcp.Core.Workspace;
 using Xunit;
 
@@ -272,6 +273,40 @@ public sealed class WorkspaceCacheBehaviorTests
         {
             blocker?.Dispose();
         }
+    }
+
+    [Fact]
+    public async Task Invalidate_WhileLeaseHeld_DefersTeardownThenDisposesOnLeaseRelease()
+    {
+        if (!ModuleInitializer.MsBuildAvailable)
+        {
+            Assert.Skip($"MSBuild not available: {ModuleInitializer.MsBuildError}");
+        }
+
+        using var working = TempSolutionCopy.Create();
+        var ct = TestContext.Current.CancellationToken;
+
+        var cache = new WorkspaceCache(
+            idleTtl: TimeSpan.FromHours(1),
+            sweepInterval: TimeSpan.FromHours(1));
+        using var provider = new MSBuildWorkspaceProvider(cache: cache);
+
+        // Hold a lease, then invalidate the entry while that lease is still outstanding
+        // (this is what a file-watcher edit during an in-flight tool call does).
+        var ctx = await provider.CreateContextAsync(working.SolutionPath, ct);
+        Assert.Equal(WorkspaceState.Ready, ctx.State);
+
+        cache.Invalidate(working.SolutionPath);
+
+        // Teardown must be deferred while the lease is held — the workspace stays usable.
+        Assert.NotEqual(WorkspaceState.Disposed, ctx.State);
+        Assert.True(ctx.Solution.Projects.Any());
+
+        // Releasing the final lease must run the deferred teardown. Before the packed-
+        // state fix the lease count was clobbered by the tombstone sentinel, so this
+        // release never triggered disposal and the workspace (+ shadow loader) leaked.
+        ctx.Dispose();
+        Assert.Equal(WorkspaceState.Disposed, ctx.State);
     }
 
     /// <summary>

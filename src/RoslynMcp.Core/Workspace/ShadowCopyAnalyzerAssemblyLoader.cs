@@ -87,7 +87,9 @@ internal sealed class ShadowCopyAnalyzerAssemblyLoader : IAnalyzerAssemblyLoader
     private readonly Action<string>? _log;
 
     // One collectible load context per analyzer directory (Roslyn's isolation model).
-    private readonly ConcurrentDictionary<string, ShadowCopyLoadContext> _loadContextsByDir =
+    // Lazy so concurrent loads for the same directory share a single context — a bare
+    // ConcurrentDictionary factory may run more than once and create throwaway contexts.
+    private readonly ConcurrentDictionary<string, Lazy<ShadowCopyLoadContext>> _loadContextsByDir =
         new(StringComparer.OrdinalIgnoreCase);
 
     // Delete-on-close handles keeping each shadow copy pinned for this process's
@@ -128,8 +130,9 @@ internal sealed class ShadowCopyAnalyzerAssemblyLoader : IAnalyzerAssemblyLoader
         Directory.CreateDirectory(_shadowDir);
 
         // Opportunistically reclaim directories left by loaders disposed earlier in this
-        // process; by now their contexts may have unloaded.
-        ReclaimRetiredDirectories();
+        // process; by now their contexts may have unloaded. Plain delete pass only —
+        // never force a GC on the workspace-load path.
+        ReclaimRetiredDirectories(nudgeGc: false);
     }
 
     /// <inheritdoc />
@@ -185,15 +188,20 @@ internal sealed class ShadowCopyAnalyzerAssemblyLoader : IAnalyzerAssemblyLoader
         if (hostLoaded is not null)
             return hostLoaded;
 
+        string? shadow = null;
         lock (_gate)
         {
             var original = ResolveBestDependencyPathNoLock(simpleName, name, context.Directory);
             if (original is not null)
-            {
-                var shadow = GetOrCreateShadowCopyNoLock(original) ?? original;
-                return context.LoadFromAssemblyPath(shadow);
-            }
+                shadow = GetOrCreateShadowCopyNoLock(original) ?? original;
         }
+
+        // Load outside the lock: LoadFromAssemblyPath re-enters this resolver for the
+        // assembly's own dependencies (and copying/probing already did its file I/O),
+        // so holding _gate across it would needlessly serialize all dependency loading
+        // — same reason LoadFromPath releases _gate before loading.
+        if (shadow is not null)
+            return context.LoadFromAssemblyPath(shadow);
 
         // Not a known private dependency — let the runtime fall back to the default context.
         return null;
@@ -216,10 +224,13 @@ internal sealed class ShadowCopyAnalyzerAssemblyLoader : IAnalyzerAssemblyLoader
     }
 
     /// <summary>
-    /// Picks the best original path for <paramref name="simpleName"/>: prefers an exact
-    /// version match to <paramref name="requested"/>, otherwise the highest version.
-    /// Candidates are the requesting analyzer's own directory first, then every
-    /// registered/probed location. Mirrors Roslyn's <c>GetBestResolvedPath</c>.
+    /// Picks the best original path for <paramref name="simpleName"/>: an exact version
+    /// match to <paramref name="requested"/> wins outright; otherwise the highest version
+    /// across all candidates wins (mirroring Roslyn's <c>GetBestResolvedPath</c>). The
+    /// requesting analyzer's own directory is probed first, so it only breaks ties — an
+    /// equal-version sibling is kept over a later equal-version candidate, and it is the
+    /// fallback when no candidate's version is readable — but it does NOT override a
+    /// genuinely higher version found in another directory.
     /// </summary>
     private string? ResolveBestDependencyPathNoLock(
         string simpleName, AssemblyName requested, string? preferDirectory)
@@ -275,16 +286,24 @@ internal sealed class ShadowCopyAnalyzerAssemblyLoader : IAnalyzerAssemblyLoader
         if (_assemblyNameByPath.TryGetValue(path, out var cached))
             return cached;
 
-        AssemblyName? name = null;
+        AssemblyName? name;
         try { name = AssemblyName.GetAssemblyName(path); }
-        catch { /* corrupt / native / unreadable: treat as version-less */ }
+        catch
+        {
+            // Corrupt / native / momentarily-unreadable (e.g. mid-build): treat as
+            // version-less, but DON'T cache the failure so a candidate that becomes
+            // readable later is reconsidered for version comparison.
+            return null;
+        }
 
         _assemblyNameByPath[path] = name;
         return name;
     }
 
     private ShadowCopyLoadContext GetOrCreateContext(string directory)
-        => _loadContextsByDir.GetOrAdd(directory, dir => new ShadowCopyLoadContext(this, dir));
+        => _loadContextsByDir.GetOrAdd(
+            directory,
+            dir => new Lazy<ShadowCopyLoadContext>(() => new ShadowCopyLoadContext(this, dir))).Value;
 
     private static string GetContextDirectory(string fullPath)
     {
@@ -432,9 +451,10 @@ internal sealed class ShadowCopyAnalyzerAssemblyLoader : IAnalyzerAssemblyLoader
             _pins.Clear();
         }
 
-        foreach (var context in _loadContextsByDir.Values)
+        foreach (var lazy in _loadContextsByDir.Values)
         {
-            try { context.Unload(); }
+            if (!lazy.IsValueCreated) continue;
+            try { lazy.Value.Unload(); }
             catch { /* non-collectible or already unloading */ }
         }
         _loadContextsByDir.Clear();
@@ -444,7 +464,7 @@ internal sealed class ShadowCopyAnalyzerAssemblyLoader : IAnalyzerAssemblyLoader
         // (plus any earlier ones) now and on future loads; the OS reclaims anything left
         // at process exit via the delete-on-close handles.
         RetiredShadowDirs.Enqueue(_shadowDir);
-        ReclaimRetiredDirectories();
+        ReclaimRetiredDirectories(nudgeGc: true);
     }
 
     /// <summary>
@@ -453,7 +473,7 @@ internal sealed class ShadowCopyAnalyzerAssemblyLoader : IAnalyzerAssemblyLoader
     /// collectible contexts and retries once. Whatever still can't be deleted is requeued
     /// for the next attempt (and is guaranteed to go at process exit via delete-on-close).
     /// </summary>
-    private static void ReclaimRetiredDirectories()
+    private static void ReclaimRetiredDirectories(bool nudgeGc)
     {
         if (RetiredShadowDirs.IsEmpty) return;
         if (Interlocked.CompareExchange(ref _reclaiming, 1, 0) != 0) return; // one reclaim at a time
@@ -465,18 +485,26 @@ internal sealed class ShadowCopyAnalyzerAssemblyLoader : IAnalyzerAssemblyLoader
                 if (!TryDeleteDirectoryReturningSuccess(dir))
                     stuck.Add(dir);
             }
+            if (stuck.Count == 0) return;
 
-            if (stuck.Count > 0)
+            // Whatever is still mapped belongs to a collectible context the GC hasn't
+            // finalized yet. Only nudge the GC when called off the cold-load path —
+            // i.e. from Dispose, right after we unloaded contexts — so a fresh
+            // workspace load is never blocked on a full blocking GC. Anything still
+            // stuck is requeued for the next attempt and, failing that, removed at
+            // process exit via the delete-on-close handles.
+            if (nudgeGc)
             {
                 GC.Collect();
                 GC.WaitForPendingFinalizers();
                 GC.Collect();
+            }
 
-                foreach (var dir in stuck)
-                {
-                    if (!TryDeleteDirectoryReturningSuccess(dir))
-                        RetiredShadowDirs.Enqueue(dir); // try again next time
-                }
+            foreach (var dir in stuck)
+            {
+                if (nudgeGc && TryDeleteDirectoryReturningSuccess(dir))
+                    continue;
+                RetiredShadowDirs.Enqueue(dir); // try again on the next reclaim
             }
         }
         finally
@@ -558,6 +586,9 @@ internal sealed class ShadowCopyAnalyzerAssemblyLoader : IAnalyzerAssemblyLoader
     /// <summary>Number of per-directory load contexts currently held.</summary>
     internal int ActiveLoadContextCount => _loadContextsByDir.Count;
 
+    /// <summary>Test seam over <see cref="ShouldShareWithHost"/> (the host/shadow split).</summary>
+    internal static bool ShouldShareWithHostForTest(string simpleName) => ShouldShareWithHost(simpleName);
+
     /// <summary>Resolves the best original path for a simple name, as <see cref="Resolve"/> would.</summary>
     internal string? ResolveBestDependencyPathForTest(string simpleName, Version? requestedVersion)
     {
@@ -569,7 +600,7 @@ internal sealed class ShadowCopyAnalyzerAssemblyLoader : IAnalyzerAssemblyLoader
 
     internal static void EnqueueRetiredDirectoryForTest(string directory) => RetiredShadowDirs.Enqueue(directory);
 
-    internal static void ReclaimRetiredDirectoriesForTest() => ReclaimRetiredDirectories();
+    internal static void ReclaimRetiredDirectoriesForTest() => ReclaimRetiredDirectories(nudgeGc: true);
 
     /// <summary>
     /// Dedicated, collectible load context for the shadow-copied analyzer assemblies of

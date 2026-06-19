@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+using System.Runtime.Loader;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.Diagnostics;
@@ -371,6 +373,129 @@ public sealed class ShadowCopyAnalyzerTests
         Assert.False(Directory.Exists(dir), "A retired, unmapped directory should be reclaimed.");
     }
 
+    [Theory]
+    [InlineData("Microsoft.CodeAnalysis", true)]              // the compiler proper: share with host
+    [InlineData("Microsoft.CodeAnalysis.CSharp", true)]
+    [InlineData("Microsoft.CodeAnalysis.Workspaces", true)]
+    [InlineData("System.Collections.Immutable", true)]        // compiler dependency that must unify
+    [InlineData("System.Runtime", true)]
+    [InlineData("mscorlib", true)]
+    [InlineData("netstandard", true)]
+    [InlineData("Microsoft.CodeAnalysis.Razor.Compiler", false)] // the gotcha: a real generator, NOT shared
+    [InlineData("Microsoft.CodeAnalysis.NetAnalyzers", false)]   // an analyzer under the CA.* namespace
+    [InlineData("Microsoft.CodeAnalysis.CSharp.NetAnalyzers", false)]
+    [InlineData("Newtonsoft.Json", false)]                    // an ordinary private dependency
+    public void ShouldShareWithHost_SharesCompilerAndRuntime_ButNotAnalyzersUnderTheSameNamespace(
+        string simpleName, bool expectedShared)
+    {
+        // The split is load-bearing for source generators: the compiler + BCL must unify
+        // with the running Roslyn, but assemblies that merely live under the
+        // Microsoft.CodeAnalysis.* namespace (the Razor generator, the .NET analyzers)
+        // are real analyzers and must load from their own shadow copies, not the (absent)
+        // host copy. Misclassifying Razor as "share with host" is exactly what makes its
+        // generator silently fail to load.
+        Assert.Equal(
+            expectedShared,
+            ShadowCopyAnalyzerAssemblyLoader.ShouldShareWithHostForTest(simpleName));
+    }
+
+    [Fact]
+    public void LoadFromPath_ConcurrentLoadsAcrossDirectories_AreThreadSafeAndShareOneContextPerDir()
+    {
+        const int directoryCount = 8;
+        var tempDir = Path.Combine(Path.GetTempPath(), $"RoslynMcp.ConcurrentLoad-{Guid.NewGuid():N}");
+        var paths = new string[directoryCount];
+        for (var i = 0; i < directoryCount; i++)
+        {
+            var dir = Path.Combine(tempDir, i.ToString());
+            Directory.CreateDirectory(dir);
+            paths[i] = Path.Combine(dir, "Iso.dll");
+            EmitVersionedAssembly(paths[i], "Iso", "1.0.0.0");
+        }
+
+        try
+        {
+            using var loader = new ShadowCopyAnalyzerAssemblyLoader();
+            var failures = new ConcurrentBag<Exception>();
+
+            // Hammer the loader from many threads. Iterations outnumber directories, so
+            // the same directory is loaded concurrently — exercising the per-directory
+            // context cache (Lazy/GetOrAdd) under genuine contention.
+            Parallel.For(0, 256, new ParallelOptions { MaxDegreeOfParallelism = 16 }, j =>
+            {
+                try
+                {
+                    var asm = loader.LoadFromPath(paths[j % directoryCount]);
+                    Assert.NotNull(asm);
+                }
+                catch (Exception ex)
+                {
+                    failures.Add(ex);
+                }
+            });
+
+            Assert.True(failures.IsEmpty,
+                $"Concurrent loads threw: {string.Join(" | ", failures.Select(e => e.Message))}");
+
+            // Exactly one collectible context per directory, even under contention —
+            // no throwaway/duplicate contexts.
+            Assert.Equal(directoryCount, loader.ActiveLoadContextCount);
+
+            // Each path resolves to one stable assembly instance.
+            foreach (var path in paths)
+                Assert.Same(loader.LoadFromPath(path), loader.LoadFromPath(path));
+        }
+        finally
+        {
+            TryDeleteDirectory(tempDir);
+        }
+    }
+
+    [Fact]
+    public void Resolve_PrivateDependency_IsShadowCopiedIntoRequestingContext_AndOriginalStaysUnlocked()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"RoslynMcp.TransitiveDep-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+        var depPath = Path.Combine(tempDir, "Dep.dll");
+        var mainPath = Path.Combine(tempDir, "Main.dll");
+
+        // Dep defines a base type; Main derives from it, so touching Main's type forces
+        // the runtime to resolve Dep through the loader's Load -> Resolve path.
+        EmitAssembly(depPath, "Dep", "namespace DepNs { public class DepBase { } }");
+        EmitAssembly(mainPath, "Main", "public class MainType : DepNs.DepBase { }",
+            extraReferences: new[] { depPath });
+
+        try
+        {
+            using var loader = new ShadowCopyAnalyzerAssemblyLoader();
+            loader.AddDependencyLocation(depPath);
+
+            var main = loader.LoadFromPath(mainPath);
+            // Accessing BaseType forces Dep to load via the context's Load override.
+            var baseType = main.GetType("MainType", throwOnError: true)!.BaseType;
+            Assert.NotNull(baseType);
+            Assert.Equal("DepBase", baseType!.Name);
+
+            var shadowRoot = Path.Combine(Path.GetTempPath(), "RoslynMcp", "AnalyzerShadowCopy");
+            var depAssembly = baseType.Assembly;
+
+            // The dependency was loaded from a shadow copy, not the original on disk.
+            Assert.Contains(shadowRoot, depAssembly.Location, StringComparison.OrdinalIgnoreCase);
+
+            // ...into the SAME load context as the analyzer that required it (per-dir isolation).
+            Assert.Same(
+                AssemblyLoadContext.GetLoadContext(main),
+                AssemblyLoadContext.GetLoadContext(depAssembly));
+
+            // ...leaving the real Dep.dll unlocked so a concurrent build can overwrite it.
+            Assert.Null(Record.Exception(() => File.Delete(depPath)));
+        }
+        finally
+        {
+            TryDeleteDirectory(tempDir);
+        }
+    }
+
     /// <summary>
     /// Compiles a minimal incremental source generator to <paramref name="outputPath"/>
     /// so the test has a real generator assembly to load through the shadow loader,
@@ -399,7 +524,8 @@ public sealed class ShadowCopyAnalyzerTests
             assemblyName,
             $"[assembly: System.Reflection.AssemblyVersion(\"{version}\")] public sealed class Marker {{ }}");
 
-    private static void EmitAssembly(string outputPath, string assemblyName, string source)
+    private static void EmitAssembly(
+        string outputPath, string assemblyName, string source, string[]? extraReferences = null)
     {
         var syntaxTree = CSharpSyntaxTree.ParseText(source);
 
@@ -413,6 +539,8 @@ public sealed class ShadowCopyAnalyzerTests
                 if (!string.IsNullOrEmpty(p)) paths.Add(p);
         }
         paths.Add(typeof(GeneratorAttribute).Assembly.Location);
+        if (extraReferences is not null)
+            foreach (var r in extraReferences) paths.Add(r);
 
         var references = paths
             .Where(File.Exists)

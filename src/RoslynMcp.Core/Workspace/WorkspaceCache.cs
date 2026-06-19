@@ -86,8 +86,7 @@ public sealed class WorkspaceCache : IDisposable
             // Stale (a referenced generator/analyzer DLL changed on disk): drop the
             // lease and invalidate so the load below produces a fresh workspace and
             // fresh shadow copies. Fall through to the slow path.
-            existing.OnLeaseReleased();
-            Invalidate(key);
+            InvalidateStaleEntry(key, existing);
         }
 
         // Slow path: load under a per-key guard so parallel cache-miss callers
@@ -105,8 +104,7 @@ public sealed class WorkspaceCache : IDisposable
                     stopwatch.Stop();
                     return (existing.Context, stopwatch.ElapsedMilliseconds);
                 }
-                existing.OnLeaseReleased();
-                Invalidate(key);
+                InvalidateStaleEntry(key, existing);
             }
 
             LogCallback?.Invoke($"Cache miss for '{key}'; loading workspace...");
@@ -188,6 +186,23 @@ public sealed class WorkspaceCache : IDisposable
         }
     }
 
+    /// <summary>
+    /// Drops our lease on a stale entry and removes it from the cache — but only
+    /// if it is still the published entry for <paramref name="key"/>. Using an
+    /// identity-checked removal (rather than the key-only <see cref="Invalidate"/>)
+    /// stops a redundant staleness check on one thread from evicting a fresh entry
+    /// another thread may have just loaded for the same key — which would otherwise
+    /// force a second, wasteful reload and tear the new workspace down mid-use.
+    /// </summary>
+    private void InvalidateStaleEntry(string key, CachedEntry stale)
+    {
+        // Tombstone before releasing our lease so no one can acquire the stale
+        // entry in the gap; teardown is deferred to our OnLeaseReleased below.
+        if (_entries.TryRemove(new KeyValuePair<string, CachedEntry>(key, stale)))
+            stale.BeginTeardown();
+        stale.OnLeaseReleased();
+    }
+
     private void Sweep()
     {
         if (_disposed) return;
@@ -238,17 +253,24 @@ public sealed class WorkspaceCache : IDisposable
     /// </summary>
     private sealed class CachedEntry
     {
-        // Sentinel ref-count values:
-        //   >= 0 : active; value is the number of outstanding leases.
-        //   int.MinValue : tombstoned; entry is disposed or in teardown.
-        private const int Tombstone = int.MinValue;
+        // Lease state packed into a single long for atomic transitions:
+        //   bits [31..0] : number of outstanding leases (never negative).
+        //   bit  [32]    : tombstone flag, set once the entry is invalidated/evicted.
+        // Packing keeps the lease count intact across tombstoning, so whichever
+        // caller drives the count to zero *after* the flag is set performs the
+        // deferred teardown. An in-use entry that gets invalidated is therefore
+        // still torn down when its last lease releases — never leaked.
+        private const long TombstoneFlag = 1L << 32;
 
         private readonly WorkspaceCache _cache;
         private readonly string _key;
         private readonly List<FileSystemWatcher> _watchers = new();
-        private int _refCount;
+        private long _state;
         private long _lastAccessTicks;
         private int _torndown;
+
+        private static long LeaseCount(long state) => state & 0xFFFFFFFFL;
+        private static bool IsTombstoned(long state) => (state & TombstoneFlag) != 0;
 
         public WorkspaceContext Context { get; }
 
@@ -267,9 +289,9 @@ public sealed class WorkspaceCache : IDisposable
         {
             while (true)
             {
-                var cur = Volatile.Read(ref _refCount);
-                if (cur < 0) return false;
-                if (Interlocked.CompareExchange(ref _refCount, cur + 1, cur) == cur)
+                var cur = Volatile.Read(ref _state);
+                if (IsTombstoned(cur)) return false;
+                if (Interlocked.CompareExchange(ref _state, cur + 1, cur) == cur)
                 {
                     Interlocked.Exchange(ref _lastAccessTicks, DateTime.UtcNow.Ticks);
                     return true;
@@ -283,7 +305,19 @@ public sealed class WorkspaceCache : IDisposable
         public void OnLeaseReleased()
         {
             Interlocked.Exchange(ref _lastAccessTicks, DateTime.UtcNow.Ticks);
-            Interlocked.Decrement(ref _refCount);
+            while (true)
+            {
+                var cur = Volatile.Read(ref _state);
+                var next = cur - 1; // decrement the lease count, preserving the flag
+                if (Interlocked.CompareExchange(ref _state, next, cur) == cur)
+                {
+                    // Released the final lease of an already-tombstoned entry:
+                    // perform the teardown that BeginTeardown / eviction deferred.
+                    if (next == TombstoneFlag)
+                        Teardown();
+                    return;
+                }
+            }
         }
 
         /// <summary>
@@ -298,9 +332,9 @@ public sealed class WorkspaceCache : IDisposable
             var last = new DateTime(Volatile.Read(ref _lastAccessTicks), DateTimeKind.Utc);
             if (last > cutoff) return false;
 
-            // Commit the eviction atomically. Only succeeds when ref count is 0
-            // AND no one else has concurrently tombstoned us.
-            if (Interlocked.CompareExchange(ref _refCount, Tombstone, 0) != 0)
+            // Commit the eviction atomically. Only succeeds when the entry is fully
+            // idle: no outstanding leases and not already tombstoned (state == 0).
+            if (Interlocked.CompareExchange(ref _state, TombstoneFlag, 0) != 0)
                 return false;
 
             Teardown();
@@ -315,15 +349,16 @@ public sealed class WorkspaceCache : IDisposable
         public void BeginTeardown()
         {
             DisposeWatchers();
-            // Mark the entry as tombstoned so new acquires miss; let outstanding
-            // leases finish. Dispose only when ref count drops to zero.
+            // Set the tombstone flag while preserving the lease count, so new
+            // acquires miss but outstanding leases still finish. Dispose now only
+            // if nothing is leased; otherwise the final OnLeaseReleased does it.
             while (true)
             {
-                var cur = Volatile.Read(ref _refCount);
-                if (cur == Tombstone) return;
-                if (Interlocked.CompareExchange(ref _refCount, Tombstone, cur) == cur)
+                var cur = Volatile.Read(ref _state);
+                if (IsTombstoned(cur)) return;
+                if (Interlocked.CompareExchange(ref _state, cur | TombstoneFlag, cur) == cur)
                 {
-                    if (cur == 0) Teardown();
+                    if (LeaseCount(cur) == 0) Teardown();
                     return;
                 }
             }
@@ -395,13 +430,13 @@ public sealed class WorkspaceCache : IDisposable
 
         private void OnFileSystemEvent(object sender, FileSystemEventArgs e)
         {
-            if (Volatile.Read(ref _refCount) == Tombstone) return;
+            if (IsTombstoned(Volatile.Read(ref _state))) return;
             _ = HandleFileSystemEventAsync(e.ChangeType, e.FullPath, oldFullPath: null);
         }
 
         private void OnFileRenamed(object sender, RenamedEventArgs e)
         {
-            if (Volatile.Read(ref _refCount) == Tombstone) return;
+            if (IsTombstoned(Volatile.Read(ref _state))) return;
             _ = HandleFileSystemEventAsync(e.ChangeType, e.FullPath, e.OldFullPath);
         }
 
@@ -486,7 +521,7 @@ public sealed class WorkspaceCache : IDisposable
             {
                 try
                 {
-                    if (Volatile.Read(ref _refCount) == Tombstone) return;
+                    if (IsTombstoned(Volatile.Read(ref _state))) return;
 
                     // Read via a shared stream so editors holding the file open don't block us.
                     string text;

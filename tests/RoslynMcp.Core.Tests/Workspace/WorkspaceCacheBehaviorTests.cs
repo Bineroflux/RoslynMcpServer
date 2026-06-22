@@ -194,21 +194,68 @@ public sealed class WorkspaceCacheBehaviorTests
             second = ctx;
         Assert.Same(first, second);
         Assert.Equal(1, missCount);
+    }
 
-        // Non-vacuous guard: a genuine *external* .cs change must still invalidate, proving
-        // the watcher is live and the suppression is specific to our own commits.
-        var externalPath = Path.Combine(working.ProjectDir, "ExternallyAdded.cs");
-        await File.WriteAllTextAsync(
-            externalPath, "namespace TestProject { public class ExternallyAdded { } }\n", ct);
-
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(15);
-        while (DateTime.UtcNow < deadline && Volatile.Read(ref missCount) == 1)
+    [Fact]
+    public async Task AddingExternalCsFile_IsAddedIncrementally_WithoutReload()
+    {
+        if (!ModuleInitializer.MsBuildAvailable)
         {
-            using (await provider.CreateContextAsync(working.SolutionPath, ct)) { }
-            await Task.Delay(100, ct);
+            Assert.Skip($"MSBuild not available: {ModuleInitializer.MsBuildError}");
         }
 
-        Assert.Equal(2, missCount);
+        using var working = TempSolutionCopy.Create();
+        var ct = TestContext.Current.CancellationToken;
+
+        var missCount = 0;
+        var cache = new WorkspaceCache(
+            idleTtl: TimeSpan.FromHours(1),
+            sweepInterval: TimeSpan.FromHours(1))
+        {
+            LogCallback = msg =>
+            {
+                if (msg.StartsWith("Cache miss", StringComparison.Ordinal))
+                    Interlocked.Increment(ref missCount);
+            }
+        };
+        using var provider = new MSBuildWorkspaceProvider(cache: cache);
+
+        var newFilePath = Path.Combine(working.ProjectDir, "BrandNewType.cs");
+        const string newTypeName = "BrandNewType";
+
+        WorkspaceContext first;
+        using (var ctx = await provider.CreateContextAsync(working.SolutionPath, ct))
+        {
+            first = ctx;
+            Assert.Null(ctx.GetDocumentByPath(newFilePath)); // not present before
+        }
+
+        // A genuinely new .cs file appears (e.g. Claude's Write tool created it). The owning
+        // project is re-evaluated and the document added incrementally — no full reload.
+        await File.WriteAllTextAsync(
+            newFilePath, $"namespace TestProject {{ public class {newTypeName} {{ }} }}\n", ct);
+
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(30);
+        var tracked = false;
+        WorkspaceContext last = first;
+        while (DateTime.UtcNow < deadline)
+        {
+            using (var ctx = await provider.CreateContextAsync(working.SolutionPath, ct))
+            {
+                last = ctx;
+                if (ctx.GetDocumentByPath(newFilePath) != null &&
+                    await TypeExistsInWorkspaceAsync(ctx, newTypeName, ct))
+                {
+                    tracked = true;
+                    break;
+                }
+            }
+            await Task.Delay(150, ct);
+        }
+
+        Assert.True(tracked, "A newly created .cs file should be added to the workspace via project re-evaluation.");
+        Assert.Equal(1, missCount);   // added incrementally — never a full reload
+        Assert.Same(first, last);     // same cached workspace throughout
     }
 
     [Fact]

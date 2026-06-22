@@ -222,7 +222,8 @@ public sealed class MSBuildWorkspaceProvider : IWorkspaceProvider, IDisposable
         return new WorkspaceContext(
             workspace, solution, normalizedPath, _fileWriter,
             generatorLoadIssues: generatorIssues.Count == 0 ? null : generatorIssues,
-            analyzerAssemblyLoader: analyzerLoader);
+            analyzerAssemblyLoader: analyzerLoader,
+            msbuildProperties: properties);
     }
 
     /// <summary>

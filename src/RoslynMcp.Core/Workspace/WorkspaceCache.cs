@@ -262,9 +262,14 @@ public sealed class WorkspaceCache : IDisposable
         // still torn down when its last lease releases — never leaked.
         private const long TombstoneFlag = 1L << 32;
 
+        private static readonly TimeSpan ReevalDebounce = TimeSpan.FromMilliseconds(250);
+
         private readonly WorkspaceCache _cache;
         private readonly string _key;
         private readonly List<FileSystemWatcher> _watchers = new();
+        // Per-project monotonic generation used to debounce structural re-evaluations: a
+        // burst of add/remove events for one project coalesces into a single re-eval.
+        private readonly ConcurrentDictionary<string, long> _reevalGeneration = new(StringComparer.OrdinalIgnoreCase);
         private long _state;
         private long _lastAccessTicks;
         private int _torndown;
@@ -506,15 +511,18 @@ public sealed class WorkspaceCache : IDisposable
 
         /// <summary>
         /// Brings the in-memory solution back in line with the current on-disk state of a
-        /// single C# file, avoiding a full reload where possible:
+        /// single C# file, avoiding a full reload:
         /// <list type="bullet">
         ///   <item>present and tracked → incremental text update (covers our commits and
         ///     subsequent external edits alike);</item>
-        ///   <item>present, untracked, and the event looks like a new file → reload, so
-        ///     MSBuild can place it into the right project;</item>
+        ///   <item>present, untracked, and the event looks like a new file → re-evaluate the
+        ///     owning project and add the document incrementally;</item>
         ///   <item>gone (confirmed past the brief window of an atomic save) and tracked →
-        ///     incremental document removal, no reload.</item>
+        ///     re-evaluate the owning project so the document is removed incrementally.</item>
         /// </list>
+        /// Structural changes (add/remove) defer to a debounced per-project MSBuild
+        /// re-evaluation (<see cref="ScheduleOwningProjectReeval"/>) so membership is decided
+        /// by MSBuild, exactly as the Roslyn language server does — never a path heuristic.
         /// </summary>
         private async Task ReconcileCsPathAsync(string filePath, bool looksNew)
         {
@@ -526,12 +534,8 @@ public sealed class WorkspaceCache : IDisposable
                 if (text != null)
                 {
                     var applied = await Context.ApplyExternalTextChangeAsync(filePath, text);
-                    if (!applied && looksNew)
-                    {
-                        _cache.LogCallback?.Invoke(
-                            $"New C# file '{filePath}'; invalidating '{_key}' to pick up project membership.");
-                        _cache.Invalidate(_key);
-                    }
+                    if (!applied && looksNew && !IsUnderIntermediateOutput(filePath))
+                        ScheduleOwningProjectReeval(filePath);
                     return;
                 }
 
@@ -540,10 +544,10 @@ public sealed class WorkspaceCache : IDisposable
                 if (await StillMissingAsync(filePath))
                 {
                     if (IsTombstoned(Volatile.Read(ref _state))) return;
-                    var removed = await Context.ApplyExternalDocumentRemovalAsync(filePath);
-                    if (removed)
-                        _cache.LogCallback?.Invoke(
-                            $"C# file '{filePath}' deleted; removed from workspace '{_key}' without reload.");
+                    // Only a file the workspace actually tracks warrants a re-evaluation;
+                    // a stray deletion elsewhere under the project cone is irrelevant.
+                    if (Context.GetDocumentByPath(filePath) != null)
+                        ScheduleOwningProjectReeval(filePath);
                 }
                 else
                 {
@@ -557,6 +561,64 @@ public sealed class WorkspaceCache : IDisposable
             {
                 // Context was disposed mid-update (teardown race); nothing to do.
             }
+        }
+
+        /// <summary>
+        /// Schedules a debounced MSBuild re-evaluation of every project that could own
+        /// <paramref name="filePath"/>, so a newly created or deleted source file is
+        /// reflected as an incremental document add/remove rather than a full reload.
+        /// </summary>
+        private void ScheduleOwningProjectReeval(string filePath)
+        {
+            foreach (var projectFile in Context.FindProjectFilesForPath(filePath))
+                ScheduleProjectReeval(projectFile);
+        }
+
+        private void ScheduleProjectReeval(string projectFilePath)
+        {
+            if (IsTombstoned(Volatile.Read(ref _state))) return;
+            var key = PathResolver.NormalizePath(projectFilePath);
+            var generation = _reevalGeneration.AddOrUpdate(key, 1, (_, g) => g + 1);
+            _ = RunProjectReevalAfterDelayAsync(key, generation);
+        }
+
+        private async Task RunProjectReevalAfterDelayAsync(string projectKey, long generation)
+        {
+            try { await Task.Delay(ReevalDebounce); }
+            catch { return; }
+
+            // A newer event for the same project superseded this one; let it run instead.
+            if (_reevalGeneration.TryGetValue(projectKey, out var current) && current != generation)
+                return;
+            if (IsTombstoned(Volatile.Read(ref _state))) return;
+
+            try
+            {
+                var changed = await Context.ReconcileProjectDocumentsAsync(projectKey);
+                if (changed)
+                    _cache.LogCallback?.Invoke(
+                        $"Reconciled documents for project '{projectKey}' in '{_key}' without a reload.");
+            }
+            catch (ObjectDisposedException)
+            {
+                // Teardown race; nothing to do.
+            }
+            catch (Exception ex)
+            {
+                // Evaluation failed (transient MSBuild error, project mid-edit, etc.).
+                // Fall back to a full reload so we never serve a stale document set.
+                _cache.LogErrorCallback?.Invoke(
+                    $"Incremental re-evaluation of '{projectKey}' failed; invalidating '{_key}'.", ex);
+                _cache.Invalidate(_key);
+            }
+        }
+
+        private static bool IsUnderIntermediateOutput(string path)
+        {
+            var normalized = PathResolver.NormalizePath(path);
+            var sep = Path.DirectorySeparatorChar;
+            return normalized.Contains($"{sep}obj{sep}", StringComparison.OrdinalIgnoreCase)
+                || normalized.Contains($"{sep}bin{sep}", StringComparison.OrdinalIgnoreCase);
         }
 
         /// <summary>

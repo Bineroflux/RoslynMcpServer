@@ -25,6 +25,7 @@ public sealed class WorkspaceContext : IDisposable
     private readonly IFileWriter _fileWriter;
     private readonly IDisposable? _analyzerAssemblyLoader;
     private readonly IReadOnlyList<AnalyzerFileStamp> _analyzerStamps;
+    private readonly ImmutableDictionary<string, string> _msbuildProperties;
     private readonly SemaphoreSlim _commitLock = new(1, 1);
     private readonly WorkspaceOperationGate _gate = new();
     private Solution _solution;
@@ -68,13 +69,16 @@ public sealed class WorkspaceContext : IDisposable
         string loadedPath,
         IFileWriter? fileWriter = null,
         IReadOnlyList<string>? generatorLoadIssues = null,
-        IDisposable? analyzerAssemblyLoader = null)
+        IDisposable? analyzerAssemblyLoader = null,
+        IReadOnlyDictionary<string, string>? msbuildProperties = null)
     {
         _workspace = workspace;
         _solution = solution;
         _fileWriter = fileWriter ?? new AtomicFileWriter();
         _analyzerAssemblyLoader = analyzerAssemblyLoader;
         _analyzerStamps = CaptureMutableAnalyzerStamps(solution);
+        _msbuildProperties = msbuildProperties?.ToImmutableDictionary(StringComparer.OrdinalIgnoreCase)
+            ?? ImmutableDictionary<string, string>.Empty;
         LoadedPath = loadedPath;
         GeneratorLoadIssues = generatorLoadIssues ?? Array.Empty<string>();
         State = WorkspaceState.Ready;
@@ -199,55 +203,188 @@ public sealed class WorkspaceContext : IDisposable
     }
 
     /// <summary>
-    /// Removes every document matching <paramref name="filePath"/> from the in-memory
-    /// solution snapshot, so a deleted <c>.cs</c> file is reflected without a full
-    /// MSBuild reload. Called by the cache when a tracked source file disappears from
-    /// disk for good.
+    /// Re-evaluates a single project with MSBuild and reconciles its source-document set
+    /// into the in-memory solution as an incremental delta — adding files that newly
+    /// match the project's globs and removing files that no longer do — without a full
+    /// workspace reload.
     /// </summary>
-    /// <returns>True if at least one document was removed; false if none matched.</returns>
+    /// <returns>True if the solution snapshot changed.</returns>
     /// <remarks>
-    /// Removing a document is a pure in-memory <see cref="Solution"/> edit — it does not
-    /// touch the <c>.csproj</c>. For SDK-style projects the file stays globbed-in, so a
-    /// later reload (e.g. after a build) re-materializes it; until then queries simply
-    /// no longer see the deleted file. Runs under the same exclusive file-update lease as
-    /// <see cref="ApplyExternalTextChangeAsync"/>.
+    /// This mirrors how the Roslyn language-server host (<c>LoadedProject</c>) reacts to a
+    /// source-file create/delete: re-run the project's MSBuild evaluation, diff the
+    /// resulting document list against the live snapshot, and apply only the differences
+    /// via the workspace's add/remove-document primitives. We let MSBuild — not a path
+    /// heuristic — decide membership (globs, <c>&lt;Compile Remove&gt;</c>, links,
+    /// multi-targeting), so the result matches a full reload while costing a single
+    /// project evaluation. The evaluation runs outside the file-update gate (it is
+    /// comparatively slow); only the snapshot edit is gated. Throws if the evaluation
+    /// fails, so the caller can fall back to a full reload.
     /// </remarks>
-    internal async Task<bool> ApplyExternalDocumentRemovalAsync(
-        string filePath,
+    internal async Task<bool> ReconcileProjectDocumentsAsync(
+        string projectFilePath,
         CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
+
+        var normalizedProjectPath = PathResolver.NormalizePath(projectFilePath);
+
+        // Evaluate outside the gate — an MSBuild evaluation must not block operations.
+        // No ProjectMap: it would mark this project "already known" and short-circuit the
+        // load. LoadMetadataForReferencedProjects stays false (the default), so referenced
+        // projects surface only as metadata and the result is just this project's info(s).
+        var loader = new MSBuildProjectLoader(_workspace, _msbuildProperties);
+        var evaluated = await loader.LoadProjectInfoAsync(
+            projectFilePath, cancellationToken: cancellationToken);
+
+        // A load surfaces referenced projects too; keep only the project we re-evaluated.
+        var freshInfos = evaluated
+            .Where(i => i.FilePath != null && string.Equals(
+                PathResolver.NormalizePath(i.FilePath), normalizedProjectPath, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        if (freshInfos.Count == 0)
+            return false;
 
         await _gate.EnterFileUpdateAsync(cancellationToken);
         try
         {
             if (_disposed) return false;
-            var normalized = PathResolver.NormalizePath(filePath);
             var sol = _solution;
-            var toRemove = new List<DocumentId>();
-            foreach (var project in sol.Projects)
+
+            // Existing in-memory projects for this csproj. A multi-targeted project shares
+            // its file path across one entry per target framework, matched 1:1 below.
+            var candidates = sol.Projects
+                .Where(p => p.FilePath != null && string.Equals(
+                    PathResolver.NormalizePath(p.FilePath), normalizedProjectPath, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            var changed = false;
+            foreach (var fresh in freshInfos)
             {
-                foreach (var doc in project.Documents)
+                var existing = MatchExistingProject(candidates, fresh);
+                if (existing == null)
                 {
-                    if (doc.FilePath == null) continue;
-                    if (string.Equals(
-                            PathResolver.NormalizePath(doc.FilePath),
-                            normalized,
-                            StringComparison.OrdinalIgnoreCase))
-                        toRemove.Add(doc.Id);
+                    // Ambiguous (e.g. a target framework was added/removed): bail without
+                    // mutating the snapshot so the caller falls back to a safe full reload.
+                    throw new InvalidOperationException(
+                        $"Re-evaluated project '{fresh.Name}' did not map to exactly one loaded project.");
+                }
+
+                var freshDocs = new Dictionary<string, DocumentInfo>(StringComparer.OrdinalIgnoreCase);
+                foreach (var d in fresh.Documents)
+                    if (d.FilePath != null) freshDocs[PathResolver.NormalizePath(d.FilePath)] = d;
+
+                var existingDocs = new Dictionary<string, DocumentId>(StringComparer.OrdinalIgnoreCase);
+                foreach (var d in existing.Documents)
+                    if (d.FilePath != null) existingDocs[PathResolver.NormalizePath(d.FilePath)] = d.Id;
+
+                // Remove documents that are no longer part of the evaluated project.
+                var toRemove = existingDocs
+                    .Where(kv => !freshDocs.ContainsKey(kv.Key))
+                    .Select(kv => kv.Value)
+                    .ToImmutableArray();
+                if (toRemove.Length > 0)
+                {
+                    sol = sol.RemoveDocuments(toRemove);
+                    changed = true;
+                }
+
+                // Add documents that newly match the project (preserving MSBuild-evaluated
+                // name, folders, and source-code kind).
+                foreach (var (path, info) in freshDocs)
+                {
+                    if (existingDocs.ContainsKey(path)) continue;
+                    var text = await TryReadSourceTextAsync(info.FilePath!, cancellationToken);
+                    if (text == null) continue; // vanished again mid-reconcile; a later event settles it
+                    sol = sol.AddDocument(DocumentInfo.Create(
+                        DocumentId.CreateNewId(existing.Id),
+                        info.Name,
+                        folders: info.Folders,
+                        sourceCodeKind: info.SourceCodeKind,
+                        loader: TextLoader.From(TextAndVersion.Create(text, VersionStamp.Create(), info.FilePath)),
+                        filePath: info.FilePath));
+                    changed = true;
                 }
             }
-            if (toRemove.Count == 0)
-                return false;
 
-            sol = sol.RemoveDocuments(toRemove.ToImmutableArray());
-            _solution = sol;
-            return true;
+            if (changed)
+                _solution = sol;
+            return changed;
         }
         finally
         {
             _gate.ExitFileUpdate();
         }
+    }
+
+    /// <summary>
+    /// Returns the project files that might own <paramref name="filePath"/>: every project
+    /// already tracking a document at that path (so a delete or rename is reconciled), plus
+    /// the most specific (deepest-rooted) project whose directory contains it (so a newly
+    /// created file is considered). The caller re-evaluates these and lets MSBuild decide
+    /// actual membership.
+    /// </summary>
+    internal IReadOnlyCollection<string> FindProjectFilesForPath(string filePath)
+    {
+        var normalized = PathResolver.NormalizePath(filePath);
+        var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        string? deepestProjectFile = null;
+        var deepestDirLen = -1;
+
+        foreach (var project in _solution.Projects)
+        {
+            if (project.FilePath == null) continue;
+            var projFile = PathResolver.NormalizePath(project.FilePath);
+
+            foreach (var doc in project.Documents)
+            {
+                if (doc.FilePath != null && string.Equals(
+                        PathResolver.NormalizePath(doc.FilePath), normalized, StringComparison.OrdinalIgnoreCase))
+                {
+                    result.Add(projFile);
+                    break;
+                }
+            }
+
+            var projDir = Path.GetDirectoryName(projFile);
+            if (!string.IsNullOrEmpty(projDir) && IsSameOrDescendant(normalized, projDir) &&
+                projDir.Length > deepestDirLen)
+            {
+                deepestDirLen = projDir.Length;
+                deepestProjectFile = projFile;
+            }
+        }
+
+        if (deepestProjectFile != null)
+            result.Add(deepestProjectFile);
+        return result;
+    }
+
+    private static Project? MatchExistingProject(List<Project> candidates, ProjectInfo fresh)
+    {
+        // Single-targeted project: the one candidate is the match. Multi-targeted: match
+        // on the TFM-qualified Name (e.g. "Proj(net8.0)"); anything else is treated as
+        // ambiguous by the caller and triggers a safe reload rather than a risky guess.
+        if (candidates.Count == 1) return candidates[0];
+        return candidates.FirstOrDefault(p => string.Equals(p.Name, fresh.Name, StringComparison.Ordinal));
+    }
+
+    private static async Task<SourceText?> TryReadSourceTextAsync(string filePath, CancellationToken ct)
+    {
+        const int maxAttempts = 4;
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            try
+            {
+                using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read,
+                    FileShare.ReadWrite | FileShare.Delete);
+                return SourceText.From(fs);
+            }
+            catch (FileNotFoundException) { return null; }
+            catch (DirectoryNotFoundException) { return null; }
+            catch (IOException) when (attempt < maxAttempts) { await Task.Delay(50 * attempt, ct); }
+            catch (UnauthorizedAccessException) when (attempt < maxAttempts) { await Task.Delay(50 * attempt, ct); }
+        }
+        return null;
     }
 
     /// <summary>

@@ -1,13 +1,13 @@
 using System.Text.RegularExpressions;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
-using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.Rename;
 using RoslynMcp.Contracts.Enums;
 using RoslynMcp.Contracts.Errors;
 using RoslynMcp.Contracts.Models;
 using RoslynMcp.Core.FileSystem;
 using RoslynMcp.Core.Refactoring.Base;
+using RoslynMcp.Core.Resolution;
 using RoslynMcp.Core.Workspace;
 
 namespace RoslynMcp.Core.Refactoring.Rename;
@@ -21,12 +21,15 @@ public sealed class RenameSymbolOperation : RefactoringOperationBase<RenameSymbo
         @"^@?[A-Za-z_][A-Za-z0-9_]*$",
         RegexOptions.Compiled);
 
+    private readonly SymbolResolver _symbolResolver;
+
     /// <summary>
     /// Creates a new rename symbol operation.
     /// </summary>
     /// <param name="context">Workspace context.</param>
     public RenameSymbolOperation(WorkspaceContext context) : base(context)
     {
+        _symbolResolver = context.CreateGeneralSymbolResolver();
     }
 
     /// <inheritdoc />
@@ -190,111 +193,21 @@ public sealed class RenameSymbolOperation : RefactoringOperationBase<RenameSymbo
         RenameSymbolParams @params,
         CancellationToken cancellationToken)
     {
-        var document = GetDocumentOrThrow(@params.SourceFile);
-        var root = await document.GetSyntaxRootAsync(cancellationToken);
-        var semanticModel = await document.GetSemanticModelAsync(cancellationToken);
+        // Delegate to the shared resolver so rename benefits from the same
+        // position-then-name resolution and line-scan column recovery as the query
+        // tools. When a line is supplied without a column, the column defaults to 1,
+        // which for declarator-based symbols (fields, events, locals) lands on the
+        // leading modifier/type token rather than the identifier. Walking up the
+        // ancestors of that token never reaches the VariableDeclaratorSyntax, so the
+        // resolver's line-scan fallback recovers the unique identifier on the line.
+        var resolution = await _symbolResolver.ResolveSymbolAsync(
+            @params.SourceFile,
+            @params.SymbolName,
+            @params.Line,
+            @params.Column,
+            cancellationToken);
 
-        if (root == null || semanticModel == null)
-        {
-            throw new RefactoringException(ErrorCodes.RoslynError, "Could not parse file.");
-        }
-
-        // If line/column provided, find symbol at position
-        if (@params.Line.HasValue)
-        {
-            var position = GetPosition(root, @params.Line.Value, @params.Column ?? 1);
-            var token = root.FindToken(position);
-
-            // Walk up to find the symbol declaration or reference
-            var node = token.Parent;
-            while (node != null)
-            {
-                var symbol = semanticModel.GetDeclaredSymbol(node, cancellationToken);
-                if (symbol != null && symbol.Name == @params.SymbolName)
-                {
-                    return (symbol, document);
-                }
-
-                // Check for symbol info (reference)
-                var symbolInfo = semanticModel.GetSymbolInfo(node, cancellationToken);
-                if (symbolInfo.Symbol != null && symbolInfo.Symbol.Name == @params.SymbolName)
-                {
-                    return (symbolInfo.Symbol, document);
-                }
-
-                node = node.Parent;
-            }
-
-            throw new RefactoringException(
-                ErrorCodes.SymbolNotFound,
-                $"No symbol named '{@params.SymbolName}' found at line {@params.Line}.");
-        }
-
-        // Otherwise, search by name
-        var candidates = new List<ISymbol>();
-
-        foreach (var node in root.DescendantNodes())
-        {
-            var symbol = semanticModel.GetDeclaredSymbol(node, cancellationToken);
-            if (symbol != null && symbol.Name == @params.SymbolName)
-            {
-                candidates.Add(symbol);
-            }
-        }
-
-        if (candidates.Count == 0)
-        {
-            throw new RefactoringException(
-                ErrorCodes.SymbolNotFound,
-                $"No symbol named '{@params.SymbolName}' found in file.");
-        }
-
-        if (candidates.Count > 1)
-        {
-            throw new RefactoringException(
-                ErrorCodes.SymbolAmbiguous,
-                $"Multiple symbols named '{@params.SymbolName}' found. Provide line number to disambiguate.",
-                new Dictionary<string, object>
-                {
-                    ["candidateCount"] = candidates.Count
-                });
-        }
-
-        return (candidates[0], document);
-    }
-
-    /// <summary>
-    /// Converts 1-based line/column to absolute position with bounds validation.
-    /// </summary>
-    /// <param name="root">Syntax root to get text from.</param>
-    /// <param name="line">1-based line number.</param>
-    /// <param name="column">1-based column number.</param>
-    /// <returns>Absolute position in text.</returns>
-    /// <exception cref="RefactoringException">Thrown if line/column is out of bounds.</exception>
-    private static int GetPosition(SyntaxNode root, int line, int column)
-    {
-        var text = root.GetText();
-        var lineIndex = line - 1; // Convert to 0-based
-
-        if (lineIndex < 0 || lineIndex >= text.Lines.Count)
-        {
-            throw new RefactoringException(
-                ErrorCodes.InvalidLineNumber,
-                $"Line {line} is out of range. File has {text.Lines.Count} lines.");
-        }
-
-        var lineInfo = text.Lines[lineIndex];
-        var columnIndex = column - 1; // Convert to 0-based
-        var lineLength = lineInfo.End - lineInfo.Start;
-
-        if (columnIndex < 0 || columnIndex > lineLength)
-        {
-            throw new RefactoringException(
-                ErrorCodes.InvalidColumnNumber,
-                $"Column {column} is out of range for line {line} (line has {lineLength} characters).");
-        }
-
-        return lineInfo.Start + columnIndex;
+        return (resolution.Symbol, resolution.Document);
     }
 
     private static void ValidateRename(ISymbol symbol, RenameSymbolParams @params)

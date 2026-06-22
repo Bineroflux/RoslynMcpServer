@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- `rename_symbol` now resolves declarator-based symbols (fields, events, locals) when the `column` is omitted. Previously, omitting the column defaulted it to 1, which landed on the leading modifier/type token (e.g. `private`) whose ancestors never include the `VariableDeclaratorSyntax`, so resolution failed with `SymbolNotFound` even when the symbol was unambiguous on the line. `RenameSymbolOperation` now delegates to the shared `SymbolResolver`, gaining the same position-then-name resolution and unique-identifier line-scan recovery already used by the query tools (`find_references`, `go_to_definition`, etc.).
+
 ## [0.4.0] - 2026-02-23
 
 ### Added

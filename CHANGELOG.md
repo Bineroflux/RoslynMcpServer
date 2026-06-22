@@ -4,10 +4,36 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [Unreleased (0.5.0)]
+
+### Added
+- **Workspace caching** — a loaded solution is now cached (default 20-minute idle TTL) and reused across tool calls instead of paying a full MSBuild load every time. Edits to tracked files are applied incrementally as in-place document text updates; project-file and Razor changes still trigger a reload.
+- **Incremental document reconciliation** — newly added, removed, or renamed `.cs` files are picked up by re-evaluating just the affected project with MSBuild and applying the difference, instead of reloading the whole solution. MSBuild — not a path guess — decides which files belong to the project (globs, `<Compile Remove>`, links).
+- **Analyzer & source-generator shadow-copy loader** — analyzer/generator assemblies load from a private per-process temp copy (the way Visual Studio does), so a concurrent `dotnet build` is no longer blocked by build output the server holds open (MSB3026/MSB3027/MSB3021). Each analyzer directory gets its own isolated loader, dependencies resolve to the highest matching version, and stale copies are cleaned up during the session. Opt out with `ROSLYNMCP_DISABLE_ANALYZER_SHADOW_COPY=1`.
+- **HTTP transport mode** — the server can run over HTTP in addition to stdio.
+- **Razor / Blazor diagnostics** — `get_diagnostics` now accepts `.razor` and `.cshtml` files and reports RZ diagnostics against the source file (not the generated `.g.cs`). When the Razor generator can't be loaded it reports an `RMCP0001` info diagnostic, and a generator that throws at runtime reports `RMCP0002`, so an unexpectedly empty result is explained instead of silent.
+- **Symbol-search candidates on build errors** — symbol search responds with possible matching candidates when the project has build errors instead of failing outright.
+- **Wrong-column recovery** — when a supplied `line`/`column` lands on the wrong identifier (e.g. `TimeSpan` instead of `FromSeconds` in `TimeSpan.FromSeconds`) but a `symbolName` was given, the tool scans the line for a unique match, retries there, and reports the corrected location.
+- **Claude Code plugin definition** plus a `/setup` slash command that guides installation of the `roslyn-mcp` .NET global tool after the plugin is cloned.
+- Local install scripts [install-local.ps1](./install-local.ps1) for the `roslyn-mcp` dev tool and `roslyn-cli`.
+
+### Changed
+- Upgraded to **.NET 10** and **xUnit v3**.
+- Workspace load now tolerates per-project failures the way the VS IDE does — NuGet restore problems (e.g. NU1903/NU1904 advisories escalated to errors) no longer abort the whole load; it fails only when no project loads at all.
+- External file changes detected by the watcher now wait for any in-flight tool call to finish before updating the solution, so a background edit can't change the code mid-operation.
+- Default idle cache TTL raised from 5 to 20 minutes to cover typical "step away" gaps without a cold reload.
+- The package version is centralized in `src/Directory.Build.props` (now `0.5.0`); `install-local.ps1` reads that prefix and appends a `-local` suffix, so dev builds (`0.5.0-local`) stay distinguishable from released packages.
+- A project is now fully compiled at load time so the reported `workspaceLoadMs` reflects the real cold-load cost rather than deferring it to the first query.
 
 ### Fixed
-- `rename_symbol` now resolves declarator-based symbols (fields, events, locals) when the `column` is omitted. Previously, omitting the column defaulted it to 1, which landed on the leading modifier/type token (e.g. `private`) whose ancestors never include the `VariableDeclaratorSyntax`, so resolution failed with `SymbolNotFound` even when the symbol was unambiguous on the line. `RenameSymbolOperation` now delegates to the shared `SymbolResolver`, gaining the same position-then-name resolution and unique-identifier line-scan recovery already used by the query tools (`find_references`, `go_to_definition`, etc.).
+- `rename_symbol` now finds fields, events, and locals when a `line` is given without a `column`. It previously failed with "symbol not found" in that case, because the default column landed on the leading keyword (e.g. `private`) instead of the name. It now uses the same line-scanning resolution as `find_references` and `go_to_definition`.
+- The server's own refactor writes (and genuine external edits shortly after) no longer trigger a full MSBuild reload. File-watcher `.cs` events are reconciled against settled disk + workspace state rather than blindly invalidating the cache.
+- Cached workspace now reloads when a referenced generator assembly changes on disk, so stale source-generator output is no longer served after a `dotnet build`.
+- Analyzer-reference rewrites (shadow-copy and unresolved-reference stripping) are kept in-memory and never persisted to the `.csproj` — previously every solution load rewrote project files with absolute `<Analyzer Include="…"/>` paths and mangled formatting (BOM, dropped blank lines/trailing newline).
+- `get_diagnostics` no longer reports spurious Razor errors (RZ3600/RZ9985/RZ10009): the generator now receives the project's MSBuild properties (e.g. `RootNamespace`, `RazorLangVersion`) and leftover generator output is removed before re-running, so results match `dotnet build`.
+- Analyzers that MSBuild reports but the host can't load (missing DLL, target-framework mismatch) are dropped after load, fixing a `4003` error on the first tool call after an otherwise successful load.
+- Cache-invalidation race (a concurrent reload could evict a freshly loaded entry), a leak that kept the old workspace and analyzer loader alive when the cache was invalidated while a tool call was still using it, and analyzer-loader locking/GC hardening.
+- Responses now report timing broken out into the operation's own time (`executionTimeMs`), the workspace load time (`workspaceLoadMs`), and the combined total (`totalExecutionTimeMs`); previously the load time was lost on the way back.
 
 ## [0.4.0] - 2026-02-23
 

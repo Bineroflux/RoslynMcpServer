@@ -478,31 +478,23 @@ public sealed class WorkspaceCache : IDisposable
                     return;
                 }
 
-                switch (changeType)
+                // C# source change. Reconcile against the in-memory solution instead of
+                // blanket-invalidating. A content change to a file the workspace already
+                // tracks — which is what BOTH our own atomic commit (delete + rename +
+                // changed, per the FileSystemWatcher) AND a follow-up external edit look
+                // like — is applied incrementally with no reload. Only a genuinely new
+                // file forces a reload, so MSBuild can determine its project membership.
+                if (IsCSharpExt(ext))
                 {
-                    case WatcherChangeTypes.Changed:
-                        await ApplyTextChangeAsync(fullPath);
-                        break;
+                    var looksNew = changeType is WatcherChangeTypes.Created or WatcherChangeTypes.Renamed;
+                    await ReconcileCsPathAsync(fullPath, looksNew);
+                }
 
-                    case WatcherChangeTypes.Renamed when oldFullPath != null &&
-                            string.Equals(ext, oldExt, StringComparison.OrdinalIgnoreCase):
-                        // Rename that keeps the extension: treat as a text change on
-                        // the new path IF the workspace already knows it (unusual);
-                        // otherwise invalidate since the document-id map is now stale.
-                        _cache.LogCallback?.Invoke(
-                            $"File renamed '{oldFullPath}' -> '{fullPath}'; invalidating '{_key}'.");
-                        _cache.Invalidate(_key);
-                        break;
-
-                    case WatcherChangeTypes.Created:
-                    case WatcherChangeTypes.Deleted:
-                    case WatcherChangeTypes.Renamed:
-                        // Add/remove/rename of a .cs file affects the project's
-                        // document list; full reload is the safe path.
-                        _cache.LogCallback?.Invoke(
-                            $"File {changeType} '{fullPath}'; invalidating '{_key}'.");
-                        _cache.Invalidate(_key);
-                        break;
+                // A rename also vacates the old path; reflect its removal if it was tracked.
+                if (oldFullPath != null && IsCSharpExt(oldExt) &&
+                    !string.Equals(oldFullPath, fullPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    await ReconcileCsPathAsync(oldFullPath, looksNew: false);
                 }
             }
             catch (Exception ex)
@@ -512,50 +504,100 @@ public sealed class WorkspaceCache : IDisposable
             }
         }
 
-        private async Task ApplyTextChangeAsync(string filePath)
+        /// <summary>
+        /// Brings the in-memory solution back in line with the current on-disk state of a
+        /// single C# file, avoiding a full reload where possible:
+        /// <list type="bullet">
+        ///   <item>present and tracked → incremental text update (covers our commits and
+        ///     subsequent external edits alike);</item>
+        ///   <item>present, untracked, and the event looks like a new file → reload, so
+        ///     MSBuild can place it into the right project;</item>
+        ///   <item>gone (confirmed past the brief window of an atomic save) and tracked →
+        ///     incremental document removal, no reload.</item>
+        /// </list>
+        /// </summary>
+        private async Task ReconcileCsPathAsync(string filePath, bool looksNew)
         {
-            // Editors often touch the file several times during save; retry briefly
-            // on IO contention before giving up.
+            if (IsTombstoned(Volatile.Read(ref _state))) return;
+
+            try
+            {
+                var text = await TryReadAllTextAsync(filePath);
+                if (text != null)
+                {
+                    var applied = await Context.ApplyExternalTextChangeAsync(filePath, text);
+                    if (!applied && looksNew)
+                    {
+                        _cache.LogCallback?.Invoke(
+                            $"New C# file '{filePath}'; invalidating '{_key}' to pick up project membership.");
+                        _cache.Invalidate(_key);
+                    }
+                    return;
+                }
+
+                // Not readable right now. An atomic save deletes then renames into place,
+                // so confirm the file is really gone before treating it as a deletion.
+                if (await StillMissingAsync(filePath))
+                {
+                    if (IsTombstoned(Volatile.Read(ref _state))) return;
+                    var removed = await Context.ApplyExternalDocumentRemovalAsync(filePath);
+                    if (removed)
+                        _cache.LogCallback?.Invoke(
+                            $"C# file '{filePath}' deleted; removed from workspace '{_key}' without reload.");
+                }
+                else
+                {
+                    // Reappeared — the atomic write landed; pick up the new content.
+                    var reread = await TryReadAllTextAsync(filePath);
+                    if (reread != null)
+                        await Context.ApplyExternalTextChangeAsync(filePath, reread);
+                }
+            }
+            catch (ObjectDisposedException)
+            {
+                // Context was disposed mid-update (teardown race); nothing to do.
+            }
+        }
+
+        /// <summary>
+        /// Reads a file's text, retrying briefly on IO contention (editors touch a file
+        /// several times during save). Returns null if the file is absent or unreadable.
+        /// </summary>
+        private static async Task<string?> TryReadAllTextAsync(string filePath)
+        {
             const int maxAttempts = 4;
             for (var attempt = 1; attempt <= maxAttempts; attempt++)
             {
                 try
                 {
-                    if (IsTombstoned(Volatile.Read(ref _state))) return;
-
                     // Read via a shared stream so editors holding the file open don't block us.
-                    string text;
-                    using (var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read,
-                               FileShare.ReadWrite | FileShare.Delete))
-                    using (var reader = new StreamReader(fs))
-                    {
-                        text = await reader.ReadToEndAsync();
-                    }
-
-                    await Context.ApplyExternalTextChangeAsync(filePath, text);
-                    return;
+                    using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read,
+                        FileShare.ReadWrite | FileShare.Delete);
+                    using var reader = new StreamReader(fs);
+                    return await reader.ReadToEndAsync();
                 }
-                catch (FileNotFoundException)
-                {
-                    return; // File no longer present; Deleted event will invalidate.
-                }
-                catch (DirectoryNotFoundException)
-                {
-                    return;
-                }
-                catch (IOException) when (attempt < maxAttempts)
-                {
-                    await Task.Delay(50 * attempt);
-                }
-                catch (UnauthorizedAccessException) when (attempt < maxAttempts)
-                {
-                    await Task.Delay(50 * attempt);
-                }
-                catch (ObjectDisposedException)
-                {
-                    return; // Context was disposed mid-update.
-                }
+                catch (FileNotFoundException) { return null; }
+                catch (DirectoryNotFoundException) { return null; }
+                catch (IOException) when (attempt < maxAttempts) { await Task.Delay(50 * attempt); }
+                catch (UnauthorizedAccessException) when (attempt < maxAttempts) { await Task.Delay(50 * attempt); }
             }
+            return null;
+        }
+
+        /// <summary>
+        /// Polls briefly to confirm a file is genuinely gone rather than momentarily
+        /// absent during an atomic save (delete-then-rename). Returns true only if it
+        /// never reappears within the grace window.
+        /// </summary>
+        private static async Task<bool> StillMissingAsync(string filePath)
+        {
+            const int attempts = 6;
+            for (var i = 0; i < attempts; i++)
+            {
+                if (File.Exists(filePath)) return false;
+                await Task.Delay(50);
+            }
+            return !File.Exists(filePath);
         }
 
         private static bool IsProjectFile(string? extension)

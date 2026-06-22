@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.Diagnostics;
 using Microsoft.CodeAnalysis.MSBuild;
@@ -146,13 +147,18 @@ public sealed class WorkspaceContext : IDisposable
     /// Applies an external text change to the in-memory solution snapshot.
     /// Called by the cache in response to filesystem change events.
     /// </summary>
+    /// <returns>
+    /// True if at least one document in the solution matched <paramref name="filePath"/>
+    /// and was updated; false if the path is not (yet) part of the workspace — which the
+    /// caller uses to tell "edit to a known file" (apply incrementally) apart from "a
+    /// brand-new file appeared" (needs a reload so MSBuild can place it).
+    /// </returns>
     /// <remarks>
     /// Waits for the exclusive file-update lease so the mutation only runs
     /// when no operation is active; once queued, the gate prioritises it over
-    /// newly arriving operations. If no document in the solution matches
-    /// <paramref name="filePath"/>, the call is a no-op.
+    /// newly arriving operations.
     /// </remarks>
-    internal async Task ApplyExternalTextChangeAsync(
+    internal async Task<bool> ApplyExternalTextChangeAsync(
         string filePath,
         string newText,
         CancellationToken cancellationToken = default)
@@ -162,7 +168,7 @@ public sealed class WorkspaceContext : IDisposable
         await _gate.EnterFileUpdateAsync(cancellationToken);
         try
         {
-            if (_disposed) return;
+            if (_disposed) return false;
             var normalized = PathResolver.NormalizePath(filePath);
             var sol = _solution;
             var sourceText = SourceText.From(newText);
@@ -184,6 +190,59 @@ public sealed class WorkspaceContext : IDisposable
             }
             if (updated)
                 _solution = sol;
+            return updated;
+        }
+        finally
+        {
+            _gate.ExitFileUpdate();
+        }
+    }
+
+    /// <summary>
+    /// Removes every document matching <paramref name="filePath"/> from the in-memory
+    /// solution snapshot, so a deleted <c>.cs</c> file is reflected without a full
+    /// MSBuild reload. Called by the cache when a tracked source file disappears from
+    /// disk for good.
+    /// </summary>
+    /// <returns>True if at least one document was removed; false if none matched.</returns>
+    /// <remarks>
+    /// Removing a document is a pure in-memory <see cref="Solution"/> edit — it does not
+    /// touch the <c>.csproj</c>. For SDK-style projects the file stays globbed-in, so a
+    /// later reload (e.g. after a build) re-materializes it; until then queries simply
+    /// no longer see the deleted file. Runs under the same exclusive file-update lease as
+    /// <see cref="ApplyExternalTextChangeAsync"/>.
+    /// </remarks>
+    internal async Task<bool> ApplyExternalDocumentRemovalAsync(
+        string filePath,
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+
+        await _gate.EnterFileUpdateAsync(cancellationToken);
+        try
+        {
+            if (_disposed) return false;
+            var normalized = PathResolver.NormalizePath(filePath);
+            var sol = _solution;
+            var toRemove = new List<DocumentId>();
+            foreach (var project in sol.Projects)
+            {
+                foreach (var doc in project.Documents)
+                {
+                    if (doc.FilePath == null) continue;
+                    if (string.Equals(
+                            PathResolver.NormalizePath(doc.FilePath),
+                            normalized,
+                            StringComparison.OrdinalIgnoreCase))
+                        toRemove.Add(doc.Id);
+                }
+            }
+            if (toRemove.Count == 0)
+                return false;
+
+            sol = sol.RemoveDocuments(toRemove.ToImmutableArray());
+            _solution = sol;
+            return true;
         }
         finally
         {

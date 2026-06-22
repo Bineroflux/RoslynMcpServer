@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.FindSymbols;
+using Microsoft.CodeAnalysis.Text;
 using RoslynMcp.Contracts.Enums;
 using RoslynMcp.Core.Workspace;
 using Xunit;
@@ -129,6 +130,219 @@ public sealed class WorkspaceCacheBehaviorTests
         Assert.Fail(
             $"Symbol '{markerClassName}' did not appear in any project compilation within " +
             $"{IncrementalUpdateDeadline} after modifying Models.cs on disk.");
+    }
+
+    [Fact]
+    public async Task CommitChangesAsync_ThroughCachedContext_DoesNotInvalidateEntry()
+    {
+        if (!ModuleInitializer.MsBuildAvailable)
+        {
+            Assert.Skip($"MSBuild not available: {ModuleInitializer.MsBuildError}");
+        }
+
+        using var working = TempSolutionCopy.Create();
+        var ct = TestContext.Current.CancellationToken;
+
+        var missCount = 0;
+        var cache = new WorkspaceCache(
+            idleTtl: TimeSpan.FromHours(1),
+            sweepInterval: TimeSpan.FromHours(1))
+        {
+            LogCallback = msg =>
+            {
+                if (msg.StartsWith("Cache miss", StringComparison.Ordinal))
+                    Interlocked.Increment(ref missCount);
+            }
+        };
+        using var provider = new MSBuildWorkspaceProvider(cache: cache);
+
+        var modelsPath = Path.Combine(working.ProjectDir, "Models.cs");
+        Assert.True(File.Exists(modelsPath), $"Models.cs not found at {modelsPath}.");
+
+        // First load (cache miss). Commit a marker class through the cached context, the
+        // way a refactoring does — this writes Models.cs via the atomic temp+delete+rename
+        // path, which is exactly what used to make the watcher invalidate the entry.
+        const string markerClassName = "SelfWriteCommitMarker";
+        WorkspaceContext first;
+        using (var ctx = await provider.CreateContextAsync(working.SolutionPath, ct))
+        {
+            first = ctx;
+            var doc = ctx.GetDocumentByPath(modelsPath);
+            Assert.NotNull(doc);
+
+            var text = await doc!.GetTextAsync(ct);
+            var newText = text.ToString() +
+                $"\n\nnamespace TestProject.Models {{ public class {markerClassName} {{ }} }}\n";
+            var newSolution = ctx.Solution.WithDocumentText(doc.Id, SourceText.From(newText));
+
+            var commit = await ctx.CommitChangesAsync(newSolution, ct);
+            Assert.True(commit.Success, $"Commit failed: {commit.Error}");
+        }
+
+        // The write hit disk; confirm so the test fails loudly if nothing was written
+        // (which would make the no-invalidation assertion below vacuous).
+        var onDisk = await File.ReadAllTextAsync(modelsPath, ct);
+        Assert.Contains(markerClassName, onDisk, StringComparison.Ordinal);
+
+        // Give the FileSystemWatcher ample time to deliver the delete+rename events our
+        // own write produced. With self-write suppression they must NOT invalidate: a
+        // re-acquire stays a plain cache hit (same instance, no second MSBuild load).
+        await Task.Delay(2000, ct);
+
+        WorkspaceContext second;
+        using (var ctx = await provider.CreateContextAsync(working.SolutionPath, ct))
+            second = ctx;
+        Assert.Same(first, second);
+        Assert.Equal(1, missCount);
+
+        // Non-vacuous guard: a genuine *external* .cs change must still invalidate, proving
+        // the watcher is live and the suppression is specific to our own commits.
+        var externalPath = Path.Combine(working.ProjectDir, "ExternallyAdded.cs");
+        await File.WriteAllTextAsync(
+            externalPath, "namespace TestProject { public class ExternallyAdded { } }\n", ct);
+
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(15);
+        while (DateTime.UtcNow < deadline && Volatile.Read(ref missCount) == 1)
+        {
+            using (await provider.CreateContextAsync(working.SolutionPath, ct)) { }
+            await Task.Delay(100, ct);
+        }
+
+        Assert.Equal(2, missCount);
+    }
+
+    [Fact]
+    public async Task ExternalEditShortlyAfterCommit_IsReflected_AndDoesNotReload()
+    {
+        if (!ModuleInitializer.MsBuildAvailable)
+        {
+            Assert.Skip($"MSBuild not available: {ModuleInitializer.MsBuildError}");
+        }
+
+        using var working = TempSolutionCopy.Create();
+        var ct = TestContext.Current.CancellationToken;
+
+        var missCount = 0;
+        var cache = new WorkspaceCache(
+            idleTtl: TimeSpan.FromHours(1),
+            sweepInterval: TimeSpan.FromHours(1))
+        {
+            LogCallback = msg =>
+            {
+                if (msg.StartsWith("Cache miss", StringComparison.Ordinal))
+                    Interlocked.Increment(ref missCount);
+            }
+        };
+        using var provider = new MSBuildWorkspaceProvider(cache: cache);
+
+        var modelsPath = Path.Combine(working.ProjectDir, "Models.cs");
+        Assert.True(File.Exists(modelsPath), $"Models.cs not found at {modelsPath}.");
+
+        // Rename-style commit through the cached context (writes Models.cs atomically).
+        const string commitMarker = "CommitMarkerAlpha";
+        WorkspaceContext first;
+        using (var ctx = await provider.CreateContextAsync(working.SolutionPath, ct))
+        {
+            first = ctx;
+            var doc = ctx.GetDocumentByPath(modelsPath);
+            Assert.NotNull(doc);
+            var text = (await doc!.GetTextAsync(ct)).ToString();
+            var newText = text +
+                $"\n\nnamespace TestProject.Models {{ public class {commitMarker} {{ }} }}\n";
+            var commit = await ctx.CommitChangesAsync(
+                ctx.Solution.WithDocumentText(doc.Id, SourceText.From(newText)), ct);
+            Assert.True(commit.Success, $"Commit failed: {commit.Error}");
+        }
+
+        // IMMEDIATELY — no delay — edit the *same* file externally, the way Claude does
+        // when it fixes a comment right after a rename. With the old time-window
+        // suppression this edit was silently dropped; it must now be reflected.
+        var onDisk = await File.ReadAllTextAsync(modelsPath, ct);
+        Assert.Contains(commitMarker, onDisk, StringComparison.Ordinal);
+        const string externalMarker = "ExternalMarkerBeta";
+        await File.WriteAllTextAsync(
+            modelsPath,
+            onDisk + $"\n\nnamespace TestProject.Models {{ public class {externalMarker} {{ }} }}\n",
+            ct);
+
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(15);
+        var visible = false;
+        WorkspaceContext last = first;
+        while (DateTime.UtcNow < deadline)
+        {
+            using (var ctx = await provider.CreateContextAsync(working.SolutionPath, ct))
+            {
+                last = ctx;
+                if (await TypeExistsInWorkspaceAsync(ctx, externalMarker, ct))
+                {
+                    visible = true;
+                    break;
+                }
+            }
+            await Task.Delay(100, ct);
+        }
+
+        Assert.True(visible, "External edit made shortly after a commit must be reflected in the workspace.");
+        Assert.Equal(1, missCount);          // reflected incrementally — never reloaded
+        Assert.Same(first, last);            // same cached workspace throughout
+    }
+
+    [Fact]
+    public async Task DeletingTrackedCsFile_IsRemovedIncrementally_WithoutReload()
+    {
+        if (!ModuleInitializer.MsBuildAvailable)
+        {
+            Assert.Skip($"MSBuild not available: {ModuleInitializer.MsBuildError}");
+        }
+
+        using var working = TempSolutionCopy.Create();
+        var ct = TestContext.Current.CancellationToken;
+
+        var missCount = 0;
+        var cache = new WorkspaceCache(
+            idleTtl: TimeSpan.FromHours(1),
+            sweepInterval: TimeSpan.FromHours(1))
+        {
+            LogCallback = msg =>
+            {
+                if (msg.StartsWith("Cache miss", StringComparison.Ordinal))
+                    Interlocked.Increment(ref missCount);
+            }
+        };
+        using var provider = new MSBuildWorkspaceProvider(cache: cache);
+
+        var modelsPath = Path.Combine(working.ProjectDir, "Models.cs");
+        Assert.True(File.Exists(modelsPath), $"Models.cs not found at {modelsPath}.");
+
+        WorkspaceContext first;
+        using (var ctx = await provider.CreateContextAsync(working.SolutionPath, ct))
+        {
+            first = ctx;
+            Assert.NotNull(ctx.GetDocumentByPath(modelsPath)); // tracked before deletion
+        }
+
+        File.Delete(modelsPath);
+
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(15);
+        var stillTracked = true;
+        WorkspaceContext last = first;
+        while (DateTime.UtcNow < deadline)
+        {
+            using (var ctx = await provider.CreateContextAsync(working.SolutionPath, ct))
+            {
+                last = ctx;
+                if (ctx.GetDocumentByPath(modelsPath) == null)
+                {
+                    stillTracked = false;
+                    break;
+                }
+            }
+            await Task.Delay(100, ct);
+        }
+
+        Assert.False(stillTracked, "A deleted .cs file must be removed from the in-memory solution.");
+        Assert.Equal(1, missCount);          // removed incrementally — never reloaded
+        Assert.Same(first, last);            // same cached workspace throughout
     }
 
     [Fact]

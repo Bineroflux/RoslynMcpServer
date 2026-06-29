@@ -21,11 +21,12 @@ namespace RoslynMcp.Core.Workspace;
 /// </remarks>
 public sealed class WorkspaceContext : IDisposable
 {
-    private readonly MSBuildWorkspace _workspace;
+    private readonly Microsoft.CodeAnalysis.Workspace _workspace;
     private readonly IFileWriter _fileWriter;
     private readonly IDisposable? _analyzerAssemblyLoader;
     private readonly IReadOnlyList<AnalyzerFileStamp> _analyzerStamps;
     private readonly ImmutableDictionary<string, string> _msbuildProperties;
+    private readonly FileBasedProgramInfo? _fileBasedProgram;
     private readonly SemaphoreSlim _commitLock = new(1, 1);
     private readonly WorkspaceOperationGate _gate = new();
     private Solution _solution;
@@ -64,13 +65,14 @@ public sealed class WorkspaceContext : IDisposable
     public IReadOnlyList<string> GeneratorLoadIssues { get; }
 
     internal WorkspaceContext(
-        MSBuildWorkspace workspace,
+        Microsoft.CodeAnalysis.Workspace workspace,
         Solution solution,
         string loadedPath,
         IFileWriter? fileWriter = null,
         IReadOnlyList<string>? generatorLoadIssues = null,
         IDisposable? analyzerAssemblyLoader = null,
-        IReadOnlyDictionary<string, string>? msbuildProperties = null)
+        IReadOnlyDictionary<string, string>? msbuildProperties = null,
+        FileBasedProgramInfo? fileBasedProgram = null)
     {
         _workspace = workspace;
         _solution = solution;
@@ -79,6 +81,7 @@ public sealed class WorkspaceContext : IDisposable
         _analyzerStamps = CaptureMutableAnalyzerStamps(solution);
         _msbuildProperties = msbuildProperties?.ToImmutableDictionary(StringComparer.OrdinalIgnoreCase)
             ?? ImmutableDictionary<string, string>.Empty;
+        _fileBasedProgram = fileBasedProgram;
         LoadedPath = loadedPath;
         GeneratorLoadIssues = generatorLoadIssues ?? Array.Empty<string>();
         State = WorkspaceState.Ready;
@@ -119,6 +122,27 @@ public sealed class WorkspaceContext : IDisposable
     public void UpdateSolution(Solution newSolution)
     {
         _solution = newSolution;
+    }
+
+    /// <summary>
+    /// For a standalone "file-based program" workspace, decides whether an external edit to
+    /// its entry <c>.cs</c> file must trigger a full reload instead of an in-place text
+    /// update. A change to the file's <c>#:</c> directives can alter the resolved project
+    /// (references, SDK, properties), so the materialized project has to be regenerated; a
+    /// code-only edit can still be applied incrementally. Always false for ordinary
+    /// project/solution-backed workspaces.
+    /// </summary>
+    internal bool ShouldReloadOnSourceChange(string filePath, string newText)
+    {
+        if (_fileBasedProgram is null) return false;
+        if (!string.Equals(
+                PathResolver.NormalizePath(filePath),
+                _fileBasedProgram.EntryPath,
+                StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        var newSignature = FileBasedProgramProject.ComputeDirectiveSignature(newText);
+        return !string.Equals(newSignature, _fileBasedProgram.DirectiveSignature, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -225,6 +249,12 @@ public sealed class WorkspaceContext : IDisposable
         CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
+
+        // Only an MSBuild-backed workspace can be re-evaluated. A standalone .cs file lives
+        // in an AdhocWorkspace with no project on disk, so there is nothing to reconcile —
+        // its single document is kept current via ApplyExternalTextChangeAsync instead.
+        if (_workspace is not MSBuildWorkspace)
+            return false;
 
         var normalizedProjectPath = PathResolver.NormalizePath(projectFilePath);
 
@@ -727,6 +757,13 @@ public sealed class WorkspaceContext : IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
     }
 }
+
+/// <summary>
+/// Identity of a standalone "file-based program" workspace: the (normalized) entry
+/// <c>.cs</c> file and a fingerprint of its <c>#:</c> directives captured at load time,
+/// used to decide when an edit requires regenerating the materialized project.
+/// </summary>
+internal sealed record FileBasedProgramInfo(string EntryPath, string DirectiveSignature);
 
 /// <summary>
 /// Result of committing changes to the filesystem.

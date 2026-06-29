@@ -533,6 +533,18 @@ public sealed class WorkspaceCache : IDisposable
                 var text = await TryReadAllTextAsync(filePath);
                 if (text != null)
                 {
+                    // A standalone file-based program whose #: directives changed must be
+                    // rebuilt from scratch — the resolved references/SDK/properties may now
+                    // differ, which an in-place text update can't capture. A code-only edit
+                    // falls through to the normal incremental update.
+                    if (Context.ShouldReloadOnSourceChange(filePath, text))
+                    {
+                        _cache.LogCallback?.Invoke(
+                            $"File-based program directives changed in '{filePath}'; invalidating '{_key}' to rebuild.");
+                        _cache.Invalidate(_key);
+                        return;
+                    }
+
                     var applied = await Context.ApplyExternalTextChangeAsync(filePath, text);
                     if (!applied && looksNew && !IsUnderIntermediateOutput(filePath))
                         ScheduleOwningProjectReeval(filePath);

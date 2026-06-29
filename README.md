@@ -182,7 +182,7 @@ Config file locations:
 
 ## Available Tools
 
-All tools accept a `solutionPath` parameter (absolute path to a `.sln`, `.slnx`, or `.csproj` file). Refactoring tools also accept a `preview` parameter (set to `true` to see changes without applying them).
+All tools accept a `solutionPath` parameter (absolute path to a `.sln`, `.slnx`, or `.csproj` file). You can also point it at a single standalone `.cs` file — for example a .NET 10 [file-based program](https://learn.microsoft.com/dotnet/core/whats-new/dotnet-10/sdk#file-based-apps) you'd run with `dotnet run file.cs`. The SDK turns it into a project (via `dotnet run-api`) which is loaded through MSBuildWorkspace, so it behaves like a real project: the SDK's default analyzers and source generators run (`[GeneratedRegex]` works even with no directives), and `#:package`/`#:project`/`#:sdk`/`#:property` directives resolve — with `#:project` references navigable as source. The first load builds/restores once (then it's cached); a recent .NET 10 SDK is required for directive resolution. Refactoring tools also accept a `preview` parameter (set to `true` to see changes without applying them).
 
 ### Move and Rename
 
@@ -316,7 +316,7 @@ If MSBuild cannot be located or your solution fails to load:
 
 1. Make sure you can build the solution from the command line first: `dotnet build /path/to/MySolution.sln`
 2. On Windows, ensure Visual Studio Build Tools or a Visual Studio installation is available
-3. Check that `solutionPath` is an absolute path to a valid `.sln`, `.slnx`, or `.csproj` file
+3. Check that `solutionPath` is an absolute path to a valid `.sln`, `.slnx`, `.csproj`, or standalone `.cs` file
 
 ### Using the diagnose tool
 

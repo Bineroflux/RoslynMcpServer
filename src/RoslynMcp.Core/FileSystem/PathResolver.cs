@@ -130,6 +130,22 @@ public static class PathResolver
     }
 
     /// <summary>
+    /// Validates that a path is a standalone C# source file — a <c>.cs</c> file used on
+    /// its own, not as part of a <c>.csproj</c>/<c>.sln</c>. The canonical example is a
+    /// .NET 10 "file-based program" you launch with <c>dotnet run file.cs</c>.
+    /// </summary>
+    public static bool IsStandaloneCSharpFile(string path)
+        => IsValidCSharpFilePath(path);
+
+    /// <summary>
+    /// Validates that a path is acceptable as the workspace root for a tool's
+    /// <c>solutionPath</c> argument: a <c>.sln</c>/<c>.slnx</c>/<c>.csproj</c>, or a
+    /// standalone <c>.cs</c> file that is loaded into an ad-hoc, project-less workspace.
+    /// </summary>
+    public static bool IsValidWorkspacePath(string path)
+        => IsValidSolutionOrProjectPath(path) || IsStandaloneCSharpFile(path);
+
+    /// <summary>
     /// Gets the directory containing a file path.
     /// </summary>
     /// <param name="filePath">File path.</param>

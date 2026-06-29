@@ -75,6 +75,10 @@ public sealed class MSBuildWorkspaceProvider : IWorkspaceProvider, IDisposable
         CancellationToken cancellationToken = default)
     {
         ValidateRequest(projectOrSolutionPath);
+
+        // Required for both real projects/solutions and standalone .cs files: the latter are
+        // materialized into a project and loaded through MSBuildWorkspace too (only the
+        // framework-only ad-hoc fallback would not need it).
         EnsureMsBuildRegistered();
 
         var (context, loadMs) = await _cache.GetOrCreateAsync(
@@ -95,11 +99,11 @@ public sealed class MSBuildWorkspaceProvider : IWorkspaceProvider, IDisposable
                 "Project or solution path is required.");
         }
 
-        if (!PathResolver.IsValidSolutionOrProjectPath(projectOrSolutionPath))
+        if (!PathResolver.IsValidWorkspacePath(projectOrSolutionPath))
         {
             throw new RefactoringException(
                 ErrorCodes.InvalidSourcePath,
-                "Path must be a .sln, .slnx, or .csproj file.");
+                "Path must be a .sln, .slnx, .csproj, or standalone .cs file.");
         }
 
         if (!File.Exists(projectOrSolutionPath))
@@ -114,7 +118,46 @@ public sealed class MSBuildWorkspaceProvider : IWorkspaceProvider, IDisposable
         string projectOrSolutionPath,
         CancellationToken cancellationToken)
     {
-        LogCallback?.Invoke($"Creating workspace for: {projectOrSolutionPath}");
+        var normalizedPath = PathResolver.NormalizePath(projectOrSolutionPath);
+
+        // What MSBuild actually opens, what the workspace reports as its loaded path, and
+        // (for a standalone file) its file-based-program identity. These coincide for a
+        // normal .sln/.slnx/.csproj.
+        var openPath = normalizedPath;
+        var loadedPath = normalizedPath;
+        FileBasedProgramInfo? fileBasedProgram = null;
+
+        // Standalone .cs file: turn it into a real project via the SDK ("file-based program")
+        // and load that through the normal MSBuild path, so it gets the SDK's default
+        // analyzers/source generators, #:project references as source projects, and the exact
+        // references/options dotnet build would use.
+        if (PathResolver.IsStandaloneCSharpFile(normalizedPath))
+        {
+            var materialized = await FileBasedProgramProject.MaterializeAsync(
+                normalizedPath,
+                _workspaceLoadTimeout,
+                msg => LogCallback?.Invoke(msg),
+                (msg, ex) => LogErrorCallback?.Invoke(msg, ex),
+                cancellationToken);
+
+            if (materialized is null)
+            {
+                // The SDK couldn't produce a project (run-api unavailable, build error, etc.).
+                // Degrade to a framework-only ad-hoc workspace so the file still loads — its
+                // own symbols resolve and diagnostics explain anything that's missing.
+                LogCallback?.Invoke(
+                    "Could not materialize the file-based program; using a framework-only ad-hoc workspace.");
+                return await StandaloneFileWorkspace.CreateAsync(
+                    normalizedPath, _fileWriter, msg => LogCallback?.Invoke(msg), cancellationToken);
+            }
+
+            openPath = materialized.CsprojPath;
+            // Keep the .cs as the workspace identity (cache key, watch seed), not the temp csproj.
+            loadedPath = normalizedPath;
+            fileBasedProgram = new FileBasedProgramInfo(normalizedPath, materialized.DirectiveSignature);
+        }
+
+        LogCallback?.Invoke($"Creating workspace for: {openPath}");
 
         var properties = new Dictionary<string, string>
         {
@@ -142,7 +185,6 @@ public sealed class MSBuildWorkspaceProvider : IWorkspaceProvider, IDisposable
         });
 
         Solution solution;
-        var normalizedPath = PathResolver.NormalizePath(projectOrSolutionPath);
 
         // Create a linked cancellation token that includes both the caller's token and a timeout
         using var timeoutCts = new CancellationTokenSource(_workspaceLoadTimeout);
@@ -150,17 +192,17 @@ public sealed class MSBuildWorkspaceProvider : IWorkspaceProvider, IDisposable
 
         try
         {
-            if (normalizedPath.EndsWith(".sln", StringComparison.OrdinalIgnoreCase) ||
-                normalizedPath.EndsWith(".slnx", StringComparison.OrdinalIgnoreCase))
+            if (openPath.EndsWith(".sln", StringComparison.OrdinalIgnoreCase) ||
+                openPath.EndsWith(".slnx", StringComparison.OrdinalIgnoreCase))
             {
-                LogCallback?.Invoke($"Opening solution: {normalizedPath}");
-                solution = await workspace.OpenSolutionAsync(normalizedPath, cancellationToken: linkedCts.Token);
+                LogCallback?.Invoke($"Opening solution: {openPath}");
+                solution = await workspace.OpenSolutionAsync(openPath, cancellationToken: linkedCts.Token);
                 LogCallback?.Invoke($"Solution opened with {solution.ProjectIds.Count} project(s).");
             }
             else
             {
-                LogCallback?.Invoke($"Opening project: {normalizedPath}");
-                var project = await workspace.OpenProjectAsync(normalizedPath, cancellationToken: linkedCts.Token);
+                LogCallback?.Invoke($"Opening project: {openPath}");
+                var project = await workspace.OpenProjectAsync(openPath, cancellationToken: linkedCts.Token);
                 solution = project.Solution;
                 LogCallback?.Invoke($"Project opened: {project.Name}");
             }
@@ -220,10 +262,11 @@ public sealed class MSBuildWorkspaceProvider : IWorkspaceProvider, IDisposable
         await MaterializeCompilationsAsync(workspace, solution, timeoutCts, linkedCts.Token, cancellationToken);
 
         return new WorkspaceContext(
-            workspace, solution, normalizedPath, _fileWriter,
+            workspace, solution, loadedPath, _fileWriter,
             generatorLoadIssues: generatorIssues.Count == 0 ? null : generatorIssues,
             analyzerAssemblyLoader: analyzerLoader,
-            msbuildProperties: properties);
+            msbuildProperties: properties,
+            fileBasedProgram: fileBasedProgram);
     }
 
     /// <summary>

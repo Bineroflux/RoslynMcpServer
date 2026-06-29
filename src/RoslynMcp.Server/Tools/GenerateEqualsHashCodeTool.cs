@@ -44,7 +44,7 @@ public sealed class GenerateEqualsHashCodeTool : IToolHandler
             solutionPath = new
             {
                 type = "string",
-                description = "Absolute path to the .sln or .csproj file"
+                description = "Absolute path to the workspace root: a .sln, .slnx, or .csproj file, or a standalone .cs file (e.g. a .NET file-based program loaded into an ad-hoc, project-less workspace)"
             },
             sourceFile = new
             {

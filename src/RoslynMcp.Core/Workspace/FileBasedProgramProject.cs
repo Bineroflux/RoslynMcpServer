@@ -73,9 +73,10 @@ internal static class FileBasedProgramProject
             return null;
         }
 
-        // Make #:project / #:ref references absolute so the project is location-independent,
-        // then write it to a deterministic temp directory (never into the user's tree).
-        var rewritten = MakeReferencesAbsolute(projectXml, entryDir);
+        // Rewrite the SDK's project XML for our out-of-tree location: make #:project/#:ref
+        // references absolute, and redirect Directory.Build.props/.targets discovery back to
+        // the entry file's directory so the wrapper inherits the repo's MSBuild context.
+        var rewritten = RewriteProjectXml(projectXml, entryDir);
         var csprojPath = GetTempProjectPath(normalizedEntry);
         Directory.CreateDirectory(Path.GetDirectoryName(csprojPath)!);
         await File.WriteAllTextAsync(csprojPath, rewritten, cancellationToken);
@@ -187,11 +188,23 @@ internal static class FileBasedProgramProject
     }
 
     /// <summary>
-    /// Rewrites relative <c>ProjectReference</c>/<c>Reference</c> <c>Include</c> paths to
-    /// absolute, resolved against the entry file's directory (the SDK emits them relative to
-    /// it). Leaves SDK imports and already-absolute paths untouched.
+    /// Adapts the SDK's virtual-project XML for evaluation from a temp directory:
+    /// <list type="number">
+    ///   <item>Relative <c>ProjectReference</c>/<c>Reference</c> <c>Include</c> paths (the SDK
+    ///     emits <c>#:project</c> relative to the entry file's directory) are made absolute, so
+    ///     they resolve regardless of where the project file lives.</item>
+    ///   <item>The entry file's repo-level <c>Directory.Build.props</c>/<c>Directory.Build.targets</c>
+    ///     are wired in via <c>DirectoryBuildPropsPath</c>/<c>DirectoryBuildTargetsPath</c>. The SDK
+    ///     normally discovers these by walking up from <c>$(MSBuildProjectDirectory)</c> — which
+    ///     here is the temp dir, so it would miss them. Roslyn's own language server avoids this by
+    ///     evaluating the virtual project in place (at <c>&lt;entry&gt;.cs.csproj</c>) via an internal
+    ///     build-host API that takes the path and content without writing a file; we can't call that
+    ///     from the public <c>MSBuildWorkspace</c>, so we point the SDK's discovery back at the entry
+    ///     directory instead. <c>.editorconfig</c> needs no help — Roslyn resolves it per source-file
+    ///     path, and the entry file keeps its real path.</item>
+    /// </list>
     /// </summary>
-    private static string MakeReferencesAbsolute(string projectXml, string entryDir)
+    private static string RewriteProjectXml(string projectXml, string entryDir)
     {
         XDocument doc;
         try { doc = XDocument.Parse(projectXml, LoadOptions.PreserveWhitespace); }
@@ -206,7 +219,57 @@ internal static class FileBasedProgramProject
             element.SetAttributeValue("Include", absolute);
         }
 
+        // The first <PropertyGroup> precedes the Sdk.props import, so values set there are in
+        // effect when the SDK computes its Directory.Build.* import paths.
+        var firstPropertyGroup = doc.Root?.Elements("PropertyGroup").FirstOrDefault();
+        var propsInherited = false;
+        if (firstPropertyGroup is not null)
+        {
+            propsInherited |= TrySetDiscoveredPath(firstPropertyGroup, entryDir, "Directory.Build.props", "DirectoryBuildPropsPath");
+            propsInherited |= TrySetDiscoveredPath(firstPropertyGroup, entryDir, "Directory.Build.targets", "DirectoryBuildTargetsPath");
+        }
+
+        // The inherited Directory.Build.props can set ArtifactsPath (e.g. a repo that uses
+        // <UseArtifactsOutput>), which would redirect this wrapper's obj/bin into the user's
+        // repo — the opposite of keeping the project out of their tree. Re-assert run-api's
+        // own (temp, per-file) ArtifactsPath after the SDK import so build output stays
+        // isolated while the compilation settings (NoWarn, LangVersion, analyzers, …) are
+        // still inherited. Done only when we actually inherited a props file.
+        if (propsInherited)
+        {
+            var artifactsPath = firstPropertyGroup?.Element("ArtifactsPath")?.Value;
+            var sdkPropsImport = doc.Root?.Elements("Import")
+                .FirstOrDefault(e => string.Equals(e.Attribute("Project")?.Value, "Sdk.props", StringComparison.OrdinalIgnoreCase));
+            if (!string.IsNullOrEmpty(artifactsPath) && sdkPropsImport is not null)
+                sdkPropsImport.AddAfterSelf(new XElement("PropertyGroup", new XElement("ArtifactsPath", artifactsPath)));
+        }
+
         return doc.ToString(SaveOptions.DisableFormatting);
+    }
+
+    private static bool TrySetDiscoveredPath(
+        XElement propertyGroup, string entryDir, string fileName, string propertyName)
+    {
+        if (propertyGroup.Element(propertyName) is not null) return false;
+        var found = FindAncestorFile(entryDir, fileName);
+        if (found is null) return false;
+        propertyGroup.Add(new XElement(propertyName, found));
+        return true;
+    }
+
+    /// <summary>
+    /// Returns the nearest <paramref name="fileName"/> in <paramref name="startDir"/> or any
+    /// ancestor directory (the same upward search MSBuild's <c>GetPathOfFileAbove</c> performs),
+    /// or null if none exists.
+    /// </summary>
+    private static string? FindAncestorFile(string startDir, string fileName)
+    {
+        for (var dir = new DirectoryInfo(startDir); dir is not null; dir = dir.Parent)
+        {
+            var candidate = Path.Combine(dir.FullName, fileName);
+            if (File.Exists(candidate)) return PathResolver.NormalizePath(candidate);
+        }
+        return null;
     }
 
     /// <summary>

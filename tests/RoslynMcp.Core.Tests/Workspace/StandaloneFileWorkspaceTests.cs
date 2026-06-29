@@ -137,6 +137,28 @@ public sealed class StandaloneFileWorkspaceTests
     }
 
     [Fact]
+    public async Task InheritsDirectoryBuildProps_FromEntryFilesRepo()
+    {
+        // A repo-level Directory.Build.props (one directory above the entry file) defines a
+        // preprocessor symbol the file requires via #if. The wrapper project lives in a temp
+        // dir, so this only succeeds if we redirect the SDK's Directory.Build.props discovery
+        // back to the entry file's directory — i.e. the inheritance fix is working.
+        using var repo = new TempRepo();
+        repo.WriteFile("Directory.Build.props",
+            "<Project><PropertyGroup><DefineConstants>$(DefineConstants);REPO_MARKER</DefineConstants></PropertyGroup></Project>");
+        var entry = repo.WriteFile("sub/app.cs",
+            "#if !REPO_MARKER\n#error REPO_MARKER was not inherited\n#endif\nConsole.WriteLine(\"hi\");\n");
+        var ct = TestContext.Current.CancellationToken;
+
+        using var provider = new MSBuildWorkspaceProvider();
+        using var ctx = await provider.CreateContextAsync(entry, ct);
+
+        var diagnostics = await RunDiagnosticsAsync(ctx, entry, ct);
+        // The #error fires only if the repo's Directory.Build.props DefineConstants was not inherited.
+        Assert.DoesNotContain(diagnostics, d => d.Severity == DiagnosticSeverity.Error.ToString());
+    }
+
+    [Fact]
     public void ComputeDirectiveSignature_StableAcrossCodeEdits_ChangesWithDirectives()
     {
         var baseline = FileBasedProgramProject.ComputeDirectiveSignature(
@@ -207,6 +229,31 @@ public sealed class StandaloneFileWorkspaceTests
         public void Dispose()
         {
             try { if (File.Exists(Path)) File.Delete(Path); }
+            catch { /* best-effort cleanup */ }
+        }
+    }
+
+    /// <summary>A temporary directory tree (a stand-in repo), deleted on dispose.</summary>
+    private sealed class TempRepo : IDisposable
+    {
+        public string Root { get; } = PathResolver.NormalizePath(
+            System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"RoslynMcp.Repo-{Guid.NewGuid():N}"));
+
+        public TempRepo() => Directory.CreateDirectory(Root);
+
+        /// <summary>Writes <paramref name="content"/> to <paramref name="relativePath"/> under the
+        /// repo root (creating directories), and returns the absolute path.</summary>
+        public string WriteFile(string relativePath, string content)
+        {
+            var full = PathResolver.NormalizePath(System.IO.Path.Combine(Root, relativePath));
+            Directory.CreateDirectory(System.IO.Path.GetDirectoryName(full)!);
+            File.WriteAllText(full, content);
+            return full;
+        }
+
+        public void Dispose()
+        {
+            try { Directory.Delete(Root, recursive: true); }
             catch { /* best-effort cleanup */ }
         }
     }

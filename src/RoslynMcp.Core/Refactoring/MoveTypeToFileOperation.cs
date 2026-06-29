@@ -145,7 +145,7 @@ public sealed class MoveTypeToFileOperation
             throw new RefactoringException(ErrorCodes.InvalidLineNumber, "Line number must be >= 1.");
 
         // Check source != target
-        if (PathResolver.NormalizePath(@params.SourceFile) == PathResolver.NormalizePath(@params.TargetFile))
+        if (PathResolver.PathsEqual(@params.SourceFile, @params.TargetFile))
             throw new RefactoringException(ErrorCodes.SameLocation, "Source and target files are the same.");
     }
 

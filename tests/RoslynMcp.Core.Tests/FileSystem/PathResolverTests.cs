@@ -108,4 +108,67 @@ public class PathResolverTests
         var message = PathResolver.GetCSharpFileRejectionReason(path, parameterName);
         Assert.Contains(expectedFragment, message);
     }
+
+    [Fact]
+    public void PathsEqual_IdenticalPaths_True()
+    {
+        var p = WinOrUnix(@"C:\a\b\File.cs", "/a/b/File.cs");
+        Assert.True(PathResolver.PathsEqual(p, p));
+    }
+
+    [Fact]
+    public void PathsEqual_MixedSeparators_True()
+    {
+        Assert.True(PathResolver.PathsEqual(
+            WinOrUnix(@"C:\a\b\File.cs", "/a/b/File.cs"),
+            WinOrUnix("C:/a/b/File.cs", "/a/b/File.cs")));
+    }
+
+    [Fact]
+    public void PathsEqual_DotDotSegments_True()
+    {
+        // The intermediate segment need not exist; '..' collapses lexically.
+        Assert.True(PathResolver.PathsEqual(
+            WinOrUnix(@"C:\a\b\File.cs", "/a/b/File.cs"),
+            WinOrUnix(@"C:\a\x\..\b\File.cs", "/a/x/../b/File.cs")));
+    }
+
+    [Fact]
+    public void PathsEqual_DifferentFiles_False()
+    {
+        Assert.False(PathResolver.PathsEqual(
+            WinOrUnix(@"C:\a\b\File.cs", "/a/b/File.cs"),
+            WinOrUnix(@"C:\a\b\Other.cs", "/a/b/Other.cs")));
+    }
+
+    [Fact]
+    public void PathsEqual_CaseInsensitiveOnWindows_True()
+    {
+        if (!OperatingSystem.IsWindows())
+            Assert.Skip("Case-insensitive path equality is a Windows file-system behavior.");
+        Assert.True(PathResolver.PathsEqual(@"C:\a\b\File.cs", @"C:\a\b\file.cs"));
+    }
+
+    [Fact]
+    public void PathsEqual_CaseSensitiveOnNonWindows_False()
+    {
+        if (OperatingSystem.IsWindows())
+            Assert.Skip("Non-Windows file systems are treated as case-sensitive.");
+        Assert.False(PathResolver.PathsEqual("/a/b/File.cs", "/a/b/file.cs"));
+    }
+
+    [Theory]
+    [InlineData(null, null, true)]
+    [InlineData("", "", true)]
+    [InlineData(null, "", true)]
+    public void PathsEqual_BothNullOrEmpty_True(string? a, string? b, bool expected)
+    {
+        Assert.Equal(expected, PathResolver.PathsEqual(a, b));
+    }
+
+    [Fact]
+    public void PathsEqual_NullVsRealPath_False()
+    {
+        Assert.False(PathResolver.PathsEqual(null, WinOrUnix(@"C:\a\b\File.cs", "/a/b/File.cs")));
+    }
 }

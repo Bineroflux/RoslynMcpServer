@@ -57,6 +57,17 @@ public sealed class GetDiagnosticsOperation : QueryOperationBase<GetDiagnosticsP
         var severityFilter = ParseSeverityFilter(@params.SeverityFilter);
         var diagnostics = new List<DiagnosticInfo>();
 
+        // The caller's sourceFile is matched against each diagnostic's span path
+        // below. Normalize it once up front: the workspace normalizes document (and
+        // therefore span) paths at load time via PathResolver.NormalizePath, so the
+        // raw caller-supplied path has to be normalized the same way or an
+        // equivalent-but-not-byte-identical path — an 8.3 short-name component
+        // (e.g. ROBERT~1.HAE vs Robert.Haeusl), mixed '/' vs '\', or '..' segments —
+        // would match nothing and silently drop every diagnostic for the file.
+        var normalizedSourceFile = string.IsNullOrWhiteSpace(@params.SourceFile)
+            ? null
+            : PathResolver.NormalizePath(@params.SourceFile);
+
         // Surface workspace-level load issues (e.g. the Razor source generator
         // failed to load) as synthetic info-level diagnostics. Emitted whenever
         // the caller's filter would include informational results — i.e. for
@@ -158,14 +169,14 @@ public sealed class GetDiagnosticsOperation : QueryOperationBase<GetDiagnosticsP
                 var preferredSpan = mappedSpan.IsValid && mappedSpan.HasMappedPath ? mappedSpan : unmappedSpan;
 
                 // Filter by file if specified
-                if (!string.IsNullOrWhiteSpace(@params.SourceFile))
+                if (normalizedSourceFile is not null)
                 {
                     if (!hasLocation)
                         continue;
 
                     var matches =
-                        string.Equals(preferredSpan.Path, @params.SourceFile, StringComparison.OrdinalIgnoreCase) ||
-                        string.Equals(unmappedSpan.Path, @params.SourceFile, StringComparison.OrdinalIgnoreCase);
+                        SpanPathMatchesSourceFile(preferredSpan.Path, normalizedSourceFile) ||
+                        SpanPathMatchesSourceFile(unmappedSpan.Path, normalizedSourceFile);
                     if (!matches)
                         continue;
                 }
@@ -211,6 +222,26 @@ public sealed class GetDiagnosticsOperation : QueryOperationBase<GetDiagnosticsP
             return DiagnosticSeverityFilter.Warning;
 
         return Enum.Parse<DiagnosticSeverityFilter>(filter, ignoreCase: true);
+    }
+
+    /// <summary>
+    /// Whether a diagnostic span's file path refers to the same file as the
+    /// caller-supplied <paramref name="normalizedSourceFile"/> (already run through
+    /// <see cref="PathResolver.NormalizePath"/>). The span path is normalized the
+    /// same way before comparing, so equivalent-but-differently-spelled paths — 8.3
+    /// short-name components, mixed directory separators, or <c>..</c> segments —
+    /// still match. Returns false for a null/empty span path (e.g. a location with
+    /// no associated file).
+    /// </summary>
+    private static bool SpanPathMatchesSourceFile(string? spanPath, string normalizedSourceFile)
+    {
+        if (string.IsNullOrEmpty(spanPath))
+            return false;
+
+        return string.Equals(
+            PathResolver.NormalizePath(spanPath),
+            normalizedSourceFile,
+            StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool PassesSeverityFilter(DiagnosticSeverity severity, DiagnosticSeverityFilter filter)

@@ -134,7 +134,7 @@ public sealed class ExtractBaseClassOperation : RefactoringOperationBase<Extract
 
         // Apply changes
         Solution newSolution;
-        if (@params.TargetFile != null && @params.TargetFile != @params.SourceFile)
+        if (@params.TargetFile != null && !PathResolver.PathsEqual(@params.TargetFile, @params.SourceFile))
         {
             // Create new file with base class
             newSolution = await CreateBaseClassInNewFileAsync(
@@ -384,7 +384,7 @@ public sealed class ExtractBaseClassOperation : RefactoringOperationBase<Extract
         var baseClassCode = baseClass.NormalizeWhitespace().ToFullString();
 
         var targetFile = @params.TargetFile ?? @params.SourceFile;
-        var isNewFile = @params.TargetFile != null && @params.TargetFile != @params.SourceFile;
+        var isNewFile = @params.TargetFile != null && !PathResolver.PathsEqual(@params.TargetFile, @params.SourceFile);
 
         var pendingChanges = new List<PendingChange>
         {

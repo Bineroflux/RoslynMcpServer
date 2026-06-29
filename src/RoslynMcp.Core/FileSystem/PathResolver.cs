@@ -21,6 +21,27 @@ public static class PathResolver
     }
 
     /// <summary>
+    /// Whether two paths refer to the same file. Both are run through
+    /// <see cref="NormalizePath"/> (Path.GetFullPath + separator unification, and on
+    /// Windows 8.3 short-name expansion), so equivalent-but-differently-spelled paths
+    /// — short-name components (e.g. <c>ROBERT~1.HAE</c> vs <c>Robert.Haeusl</c>),
+    /// mixed <c>/</c> vs <c>\</c> separators, or <c>..</c> segments — are treated as
+    /// equal. Case is compared the way the platform's file system treats it:
+    /// case-insensitively on Windows, case-sensitively elsewhere. Two null/empty
+    /// inputs are equal; a null/empty input never equals a real path.
+    /// </summary>
+    public static bool PathsEqual(string? a, string? b)
+    {
+        if (string.IsNullOrEmpty(a) || string.IsNullOrEmpty(b))
+            return string.IsNullOrEmpty(a) && string.IsNullOrEmpty(b);
+
+        var comparison = OperatingSystem.IsWindows()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+        return string.Equals(NormalizePath(a), NormalizePath(b), comparison);
+    }
+
+    /// <summary>
     /// Makes a path relative to a base path.
     /// </summary>
     /// <param name="basePath">Base path (directory).</param>

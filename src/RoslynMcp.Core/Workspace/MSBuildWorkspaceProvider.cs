@@ -218,6 +218,14 @@ public sealed class MSBuildWorkspaceProvider : IWorkspaceProvider, IDisposable
                 ErrorCodes.SolutionLoadFailed,
                 errorMsg);
         }
+        finally
+        {
+            // For a standalone .cs file, openPath is the transient wrapper .csproj we materialized
+            // in the user's tree. Open*Async has fully read it by now, so delete it whether the
+            // open succeeded or failed — the in-memory solution no longer needs it on disk.
+            if (fileBasedProgram is not null)
+                FileBasedProgramProject.TryDeleteFile(openPath);
+        }
 
         // Tolerate per-project failures the way VS IDE does. NuGet restore problems
         // (e.g. NU1903/NU1904 vulnerability advisories) and similar surface as

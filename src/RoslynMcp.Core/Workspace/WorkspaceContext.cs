@@ -250,10 +250,16 @@ public sealed class WorkspaceContext : IDisposable
     {
         ThrowIfDisposed();
 
-        // Only an MSBuild-backed workspace can be re-evaluated. A standalone .cs file lives
-        // in an AdhocWorkspace with no project on disk, so there is nothing to reconcile —
-        // its single document is kept current via ApplyExternalTextChangeAsync instead.
+        // Only an MSBuild-backed workspace can be re-evaluated. The framework-only fallback for
+        // a standalone .cs file lives in an AdhocWorkspace with no project on disk, so there is
+        // nothing to reconcile — its single document is kept current via ApplyExternalTextChangeAsync.
         if (_workspace is not MSBuildWorkspace)
+            return false;
+
+        // A standalone file-based program's wrapper .csproj is materialized only transiently and
+        // deleted right after load; it has a fixed document set and no longer exists on disk, so
+        // it can't (and needn't) be re-evaluated. Referenced real projects still reconcile normally.
+        if (!File.Exists(projectFilePath))
             return false;
 
         var normalizedProjectPath = PathResolver.NormalizePath(projectFilePath);

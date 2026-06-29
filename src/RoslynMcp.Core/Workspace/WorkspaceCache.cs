@@ -450,6 +450,12 @@ public sealed class WorkspaceCache : IDisposable
         {
             try
             {
+                // Ignore the transient wrapper projects materialized for standalone .cs files
+                // (named <entry>.cs.csproj). They are created and deleted during a workspace load;
+                // treating them as ordinary project files would invalidate or churn the workspace.
+                if (IsFileBasedProgramWrapper(fullPath) || IsFileBasedProgramWrapper(oldFullPath))
+                    return;
+
                 var ext = Path.GetExtension(fullPath);
                 var oldExt = oldFullPath != null ? Path.GetExtension(oldFullPath) : null;
 
@@ -684,6 +690,9 @@ public sealed class WorkspaceCache : IDisposable
             }
             return false;
         }
+
+        private static bool IsFileBasedProgramWrapper(string? path)
+            => path != null && path.EndsWith(".cs.csproj", StringComparison.OrdinalIgnoreCase);
 
         private static bool IsCSharpExt(string? extension)
             => string.Equals(extension, ".cs", StringComparison.OrdinalIgnoreCase);

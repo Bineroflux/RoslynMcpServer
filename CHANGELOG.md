@@ -19,6 +19,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - Local install scripts [install-local.ps1](./install-local.ps1) for the `roslyn-mcp` dev tool and `roslyn-cli`.
 
 ### Changed
+- **Tool result JSON is now human-readable** — results are tab-indented instead of minified, and non-ASCII / HTML-sensitive characters (umlauts, `<`, `>`, `&`) are emitted verbatim instead of `\uXXXX` escapes. All 41 tool handlers share one `ToolJsonOptions.Default` instance instead of each constructing identical serializer options; the CLI's JSON output uses the same encoder and tab indentation.
 - Upgraded to **.NET 10** and **xUnit v3**.
 - Workspace load now tolerates per-project failures the way the VS IDE does — NuGet restore problems (e.g. NU1903/NU1904 advisories escalated to errors) no longer abort the whole load; it fails only when no project loads at all.
 - External file changes detected by the watcher now wait for any in-flight tool call to finish before updating the solution, so a background edit can't change the code mid-operation.

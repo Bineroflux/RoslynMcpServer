@@ -21,11 +21,7 @@ public sealed class AddNullChecksTool : IToolHandler
     public AddNullChecksTool(IWorkspaceProvider workspaceProvider)
     {
         _workspaceProvider = workspaceProvider;
-        _jsonOptions = new JsonSerializerOptions
-        {
-            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-            WriteIndented = false
-        };
+        _jsonOptions = ToolJsonOptions.Default;
     }
 
     /// <inheritdoc />

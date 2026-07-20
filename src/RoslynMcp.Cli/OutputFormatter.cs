@@ -13,9 +13,12 @@ public static class OutputFormatter
     private static readonly JsonSerializerOptions IndentedJson = new()
     {
         WriteIndented = true,
+        IndentCharacter = '\t',
+        IndentSize = 1,
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-        Converters = { new JsonStringEnumConverter() }
+        Converters = { new JsonStringEnumConverter() },
+        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
     };
 
     /// <summary>

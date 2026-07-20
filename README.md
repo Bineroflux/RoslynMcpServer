@@ -21,6 +21,7 @@ Roslyn MCP Server is a [Model Context Protocol (MCP)](https://modelcontextprotoc
 - [Configuration](#configuration)
 - [Available Tools](#available-tools)
 - [Preview Mode](#preview-mode)
+- [Analyzer Shadow Copying](#analyzer-shadow-copying)
 - [Troubleshooting](#troubleshooting)
 - [NuGet Libraries](#nuget-libraries)
 - [Contributing](#contributing)
@@ -36,6 +37,7 @@ Roslyn MCP Server is a [Model Context Protocol (MCP)](https://modelcontextprotoc
 - **Solution-wide reference updates** -- renames and moves propagate across your entire solution
 - **Single command install** -- `dotnet tool install -g RoslynMcp.Server`, no repo cloning needed
 - **Cross-platform** -- works on Windows, Linux, and macOS
+- **Build while it's connected** -- analyzers and source generators are shadow-copied (the way Visual Studio does it), so a concurrent `dotnet build` is never blocked by a locked `*.SourceGenerator.dll` (see [Analyzer Shadow Copying](#analyzer-shadow-copying))
 
 ---
 
@@ -178,6 +180,12 @@ Config file locations:
 | Windows | `%APPDATA%\Claude\claude_desktop_config.json`               |
 | macOS   | `~/Library/Application Support/Claude/claude_desktop_config.json` |
 
+### Environment Variables
+
+| Variable | Effect |
+|----------|--------|
+| `ROSLYNMCP_DISABLE_ANALYZER_SHADOW_COPY` | Set to `1` or `true` to turn off analyzer/source-generator [shadow copying](#analyzer-shadow-copying) and fall back to Roslyn's default in-place loader. Rarely needed -- leave unset. |
+
 ---
 
 ## Available Tools
@@ -300,6 +308,34 @@ Claude will call `rename_symbol` with `preview: true` and show you the affected 
 
 ---
 
+## Analyzer Shadow Copying
+
+While the server has a solution loaded, it holds that solution's analyzers and source generators in memory. Roslyn's default loader maps those assemblies **in place**, which on Windows locks the files -- so a `dotnet build` running while the server is connected can fail to overwrite a freshly built generator:
+
+```
+error MSB3021: Unable to copy file "...\obj\...\MyProject.SourceGenerator.dll"
+to "...\bin\...". The process cannot access the file because it is being used
+by another process ("RoslynMcp.Server").
+```
+
+To prevent this, the server **shadow-copies** each analyzer/source-generator assembly into a private temp directory and loads the copy -- the same approach Visual Studio and the Roslyn language server use. The on-disk build output is never locked, so your builds succeed while the server is running.
+
+Details:
+
+- **Location** -- copies live under `%TEMP%/RoslynMcp/AnalyzerShadowCopy` on Windows (the OS temp directory elsewhere), in a per-process subfolder so multiple servers (e.g. several editor sessions) never collide.
+- **Cleanup** -- copies are removed automatically: when a workspace is evicted or reloaded, when the process exits (including a crash or forced kill), and by a sweep of any leftovers on the next start. You should never need to clean the directory by hand.
+- **Rebuilds** -- if a generator assembly changes on disk, the affected workspace is reloaded on the next request so the new generator takes effect.
+
+This is on by default and needs no configuration. To disable it and use Roslyn's default in-place loader, set the environment variable:
+
+```bash
+ROSLYNMCP_DISABLE_ANALYZER_SHADOW_COPY=1
+```
+
+Disabling it re-introduces the file-locking behavior above; only do so if you suspect the shadow-copy loader is causing an analyzer to misbehave.
+
+---
+
 ## Troubleshooting
 
 ### .NET 9 SDK not found
@@ -317,6 +353,10 @@ If MSBuild cannot be located or your solution fails to load:
 1. Make sure you can build the solution from the command line first: `dotnet build /path/to/MySolution.sln`
 2. On Windows, ensure Visual Studio Build Tools or a Visual Studio installation is available
 3. Check that `solutionPath` is an absolute path to a valid `.sln`, `.slnx`, `.csproj`, or standalone `.cs` file
+
+### Build fails: a file is "being used by another process (RoslynMcp.Server)"
+
+If `dotnet build` fails with MSB3021/MSB3026/MSB3027 because a `*.SourceGenerator.dll` (or other analyzer) is locked by `RoslynMcp.Server`, the running server predates [analyzer shadow copying](#analyzer-shadow-copying). Update to the latest version and restart the server -- shadow copying loads analyzers from private copies, so the build output is never locked. (Because a running global tool locks its own binaries on Windows, stop/disconnect the server *before* `dotnet tool update`, then reconnect.) As a stop-gap you can disconnect the MCP server while you build.
 
 ### Using the diagnose tool
 

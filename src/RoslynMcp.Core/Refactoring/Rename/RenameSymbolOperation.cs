@@ -100,9 +100,15 @@ public sealed class RenameSymbolOperation : RefactoringOperationBase<RenameSymbo
             @params.NewName,
             cancellationToken);
 
-        // Handle file rename for types
+        // Handle file rename for types. The document is repointed at its new path
+        // *before* the commit, so the commit writes the renamed source straight to the
+        // new file name. That makes a pre-existing target file indistinguishable from
+        // our own output afterwards, so a collision has to be detected here — while the
+        // document still points at its original path — and not after the commit.
         string? renamedFile = null;
-        if (@params.RenameFile && symbol is INamedTypeSymbol namedType && document.FilePath != null)
+        string? fileRenameWarning = null;
+        var caseOnlyFileRename = false;
+        if (@params.RenameFile && symbol is INamedTypeSymbol && document.FilePath != null)
         {
             var fileName = Path.GetFileNameWithoutExtension(document.FilePath);
             if (fileName == symbol.Name)
@@ -110,9 +116,18 @@ public sealed class RenameSymbolOperation : RefactoringOperationBase<RenameSymbo
                 var newFileName = @params.NewName + ".cs";
                 var newFilePath = Path.Combine(Path.GetDirectoryName(document.FilePath)!, newFileName);
 
-                // Rename the document in the solution
-                var doc = newSolution.GetDocument(document.Id);
-                if (doc != null)
+                // A rename that only changes casing (Foo -> foo) targets the very same
+                // file on a case-insensitive file system; that is not a collision, and
+                // the atomic write performed by the commit applies the new spelling.
+                caseOnlyFileRename = PathResolver.PathsEqual(document.FilePath, newFilePath);
+
+                if (!caseOnlyFileRename && File.Exists(newFilePath))
+                {
+                    // Leave the document at its original path so the commit updates the
+                    // source in place instead of overwriting the unrelated target file.
+                    fileRenameWarning = $"File rename skipped: target file '{newFilePath}' already exists.";
+                }
+                else if (newSolution.GetDocument(document.Id) != null)
                 {
                     newSolution = newSolution.WithDocumentFilePath(document.Id, newFilePath);
                     renamedFile = newFilePath;
@@ -123,42 +138,67 @@ public sealed class RenameSymbolOperation : RefactoringOperationBase<RenameSymbo
         // If preview mode, return without applying
         if (@params.Preview)
         {
-            return CreatePreviewResult(operationId, symbol, @params, references.TotalReferenceCount, renamedFile);
+            return CreatePreviewResult(
+                operationId,
+                symbol,
+                @params,
+                references.TotalReferenceCount,
+                renamedFile,
+                fileRenameWarning);
         }
 
         // Commit changes
         var commitResult = await CommitChangesAsync(newSolution, cancellationToken);
 
-        // Handle physical file rename
-        string? fileRenameWarning = null;
+        // Complete the physical file rename. The commit has already written the renamed
+        // source under the new path, so all that is left is removing the stale original.
         bool fileRenameSucceeded = false;
         if (renamedFile != null && document.FilePath != null)
         {
-            try
+            if (File.Exists(renamedFile))
             {
-                if (File.Exists(document.FilePath) && !File.Exists(renamedFile))
+                fileRenameSucceeded = true;
+
+                // A case-only rename resolves to the same file, which the commit has
+                // already rewritten under its new spelling — nothing to remove.
+                if (!caseOnlyFileRename && File.Exists(document.FilePath))
+                {
+                    try
+                    {
+                        File.Delete(document.FilePath);
+                    }
+                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                    {
+                        fileRenameSucceeded = false;
+                        fileRenameWarning =
+                            $"Original file '{document.FilePath}' could not be deleted: {ex.Message}. " +
+                            $"The renamed source was written to '{renamedFile}'; delete the original manually.";
+                    }
+                }
+            }
+            else if (File.Exists(document.FilePath))
+            {
+                // Defensive fallback: the commit produced no write for this document, so
+                // move the original into place instead.
+                try
                 {
                     File.Move(document.FilePath, renamedFile);
                     fileRenameSucceeded = true;
                 }
-                else if (File.Exists(renamedFile))
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
                 {
-                    fileRenameWarning = $"File rename skipped: target file '{renamedFile}' already exists.";
+                    fileRenameWarning =
+                        $"File rename failed: {ex.Message}. Code references were updated but file was not renamed.";
+                    renamedFile = null; // Clear to indicate file was not actually renamed
                 }
-            }
-            catch (IOException ex)
-            {
-                fileRenameWarning = $"File rename failed: {ex.Message}. Code references were updated but file was not renamed.";
-                renamedFile = null; // Clear to indicate file was not actually renamed
             }
         }
 
-        var changes = new FileChanges
-        {
-            FilesModified = commitResult.FilesModified,
-            FilesCreated = fileRenameSucceeded ? commitResult.FilesCreated.Concat(new[] { renamedFile! }).ToList() : commitResult.FilesCreated,
-            FilesDeleted = fileRenameSucceeded ? commitResult.FilesDeleted.Concat(new[] { document.FilePath! }).ToList() : commitResult.FilesDeleted
-        };
+        var renameMovedFile = fileRenameSucceeded && !caseOnlyFileRename;
+        var changes = BuildFileChanges(
+            commitResult,
+            renameMovedFile ? document.FilePath : null,
+            renameMovedFile ? renamedFile : null);
 
         var result = RefactoringResult.Succeeded(
             operationId,
@@ -187,6 +227,45 @@ public sealed class RenameSymbolOperation : RefactoringOperationBase<RenameSymbo
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// Merges the commit's file lists with the outcome of the file rename. The commit
+    /// writes the renamed document under its new path, so that write is reported as a
+    /// creation plus the deletion of the original rather than as a modification of a
+    /// path that no longer exists.
+    /// </summary>
+    /// <param name="commitResult">Result of writing the solution changes.</param>
+    /// <param name="deletedFile">Original file path, or null when no file was renamed.</param>
+    /// <param name="createdFile">New file path, or null when no file was renamed.</param>
+    private static FileChanges BuildFileChanges(
+        CommitResult commitResult,
+        string? deletedFile,
+        string? createdFile)
+    {
+        if (deletedFile == null || createdFile == null)
+        {
+            return new FileChanges
+            {
+                FilesModified = commitResult.FilesModified,
+                FilesCreated = commitResult.FilesCreated,
+                FilesDeleted = commitResult.FilesDeleted
+            };
+        }
+
+        return new FileChanges
+        {
+            FilesModified = commitResult.FilesModified
+                .Where(f => !PathResolver.PathsEqual(f, createdFile))
+                .ToList(),
+            FilesCreated = commitResult.FilesCreated
+                .Where(f => !PathResolver.PathsEqual(f, createdFile))
+                .Append(createdFile)
+                .ToList(),
+            FilesDeleted = commitResult.FilesDeleted
+                .Append(deletedFile)
+                .ToList()
+        };
     }
 
     private async Task<(ISymbol Symbol, Document Document)> FindSymbolAsync(
@@ -342,7 +421,8 @@ public sealed class RenameSymbolOperation : RefactoringOperationBase<RenameSymbo
         ISymbol symbol,
         RenameSymbolParams @params,
         int referenceCount,
-        string? renamedFile)
+        string? renamedFile,
+        string? fileRenameWarning)
     {
         var pendingChanges = new List<PendingChange>
         {
@@ -374,6 +454,19 @@ public sealed class RenameSymbolOperation : RefactoringOperationBase<RenameSymbo
             });
         }
 
-        return RefactoringResult.PreviewResult(operationId, pendingChanges);
+        var preview = RefactoringResult.PreviewResult(operationId, pendingChanges);
+        if (fileRenameWarning == null)
+            return preview;
+
+        // Surface a target-file collision in preview too, so the caller learns that the
+        // file rename will not happen before applying the operation.
+        return new RefactoringResult
+        {
+            Success = true,
+            OperationId = preview.OperationId,
+            Preview = true,
+            PendingChanges = preview.PendingChanges,
+            Error = RefactoringError.Create("PARTIAL_SUCCESS", fileRenameWarning)
+        };
     }
 }

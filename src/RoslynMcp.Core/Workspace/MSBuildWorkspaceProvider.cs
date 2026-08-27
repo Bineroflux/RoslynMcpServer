@@ -264,6 +264,11 @@ public sealed class MSBuildWorkspaceProvider : IWorkspaceProvider, IDisposable
             solution = ShadowCopyAnalyzerReferences(solution, analyzerLoader);
         }
 
+        // Watch for analyzer references that resolve on disk but can't actually be
+        // loaded. Must be wired up before compilations materialize — that is what first
+        // enumerates a reference's extensions, and the outcome is cached afterwards.
+        SubscribeToAnalyzerLoadFailures(solution, generatorIssues);
+
         // Eagerly materialize compilations so the first symbol query doesn't silently pay
         // a multi-minute lazy-compilation cost. Including this in LoadWorkspaceAsync folds
         // the real cold-load cost into WorkspaceLoadMs and keeps subsequent queries cheap.
@@ -334,10 +339,127 @@ public sealed class MSBuildWorkspaceProvider : IWorkspaceProvider, IDisposable
 
     private static bool LooksLikeRazorGenerator(AnalyzerReference reference)
     {
+        // The assembly has been named several things across SDK bands: the older
+        // Microsoft.NET.Sdk.Razor.SourceGenerators, and (since .NET 8) the Razor compiler
+        // itself, shipped as Microsoft.CodeAnalysis.Razor.Compiler under the SDK's
+        // "source-generators" folder. Match both rather than only the historical name.
         var display = reference.Display ?? string.Empty;
         var fullPath = reference.FullPath ?? string.Empty;
-        return display.Contains("Razor.SourceGenerators", StringComparison.OrdinalIgnoreCase)
-            || fullPath.Contains("Razor.SourceGenerators", StringComparison.OrdinalIgnoreCase);
+        return Matches(display) || Matches(fullPath);
+
+        static bool Matches(string value) =>
+            value.Contains("Razor.SourceGenerators", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("Razor.Compiler", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Subscribes to <see cref="AnalyzerFileReference.AnalyzerLoadFailed"/> on every
+    /// file-backed analyzer reference in the solution, recording each failure into
+    /// <paramref name="issues"/> so <c>get_diagnostics</c> can explain it as an
+    /// <c>RMCP0001</c> info diagnostic.
+    /// </summary>
+    /// <remarks>
+    /// The motivating case is <c>ReferencesNewerCompiler</c>. The Razor generator shipped
+    /// with an SDK binds against the Roslyn version that SDK ships, assembly binding never
+    /// rolls backward, and an older host then gets an <em>empty</em> generator array back
+    /// from <c>GetGenerators</c> — no exception, no unresolved reference, nothing. Every
+    /// RZ diagnostic disappears, and so do the CS diagnostics from the <c>.g.cs</c> that
+    /// was never generated. Without this hook the server reports a confident zero.
+    ///
+    /// Must run before compilations are materialized: the event fires the first time a
+    /// reference's extensions are enumerated and the result is cached, so a subscriber
+    /// that arrives later sees nothing.
+    /// </remarks>
+    internal void SubscribeToAnalyzerLoadFailures(Solution solution, List<string> issues)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var projectId in solution.ProjectIds)
+        {
+            var project = solution.GetProject(projectId);
+            if (project is null) continue;
+
+            var projectName = project.Name;
+            foreach (var reference in project.AnalyzerReferences)
+            {
+                if (reference is not AnalyzerFileReference fileRef) continue;
+
+                fileRef.AnalyzerLoadFailed += (_, e) =>
+                {
+                    // NoAnalyzers only means the assembly carries no extension of the
+                    // requested kind. That is the normal state of the support libraries
+                    // sitting next to a generator, not a failure.
+                    if (e.ErrorCode == AnalyzerLoadFailureEventArgs.FailureErrorCode.NoAnalyzers)
+                        return;
+
+                    var message = DescribeAnalyzerLoadFailure(projectName, fileRef, e);
+                    lock (issues)
+                    {
+                        // Analyzer and generator enumeration each raise the event, and a
+                        // reference instance may be shared between projects.
+                        if (!seen.Add(message)) return;
+                        issues.Add(message);
+                    }
+
+                    LogErrorCallback?.Invoke(message, e.Exception);
+                };
+            }
+        }
+    }
+
+    /// <summary>
+    /// Adapts a Roslyn load-failure event to <see cref="BuildAnalyzerLoadFailureMessage"/>.
+    /// </summary>
+    private static string DescribeAnalyzerLoadFailure(
+        string projectName,
+        AnalyzerFileReference reference,
+        AnalyzerLoadFailureEventArgs e)
+    {
+        var name = string.IsNullOrEmpty(reference.FullPath)
+            ? reference.Display ?? "<unknown>"
+            : Path.GetFileNameWithoutExtension(reference.FullPath);
+
+        var detail = !string.IsNullOrWhiteSpace(e.Message)
+            ? e.Message
+            : e.Exception?.Message;
+
+        return BuildAnalyzerLoadFailureMessage(
+            projectName, name, e.ErrorCode, detail, typeof(Compilation).Assembly.GetName().Version);
+    }
+
+    /// <summary>
+    /// Builds the human-readable explanation for a failed analyzer/generator load.
+    /// </summary>
+    /// <param name="projectName">Project whose reference failed to load.</param>
+    /// <param name="analyzerName">Assembly name of the analyzer/generator.</param>
+    /// <param name="errorCode">Reason Roslyn reported.</param>
+    /// <param name="detail">Roslyn's message or exception text, when it supplied one.</param>
+    /// <param name="hostRoslynVersion">Version of Microsoft.CodeAnalysis this process hosts.</param>
+    internal static string BuildAnalyzerLoadFailureMessage(
+        string projectName,
+        string analyzerName,
+        AnalyzerLoadFailureEventArgs.FailureErrorCode errorCode,
+        string? detail,
+        Version? hostRoslynVersion)
+    {
+        if (errorCode == AnalyzerLoadFailureEventArgs.FailureErrorCode.ReferencesNewerCompiler)
+        {
+            // Roslyn supplies neither a message nor an exception for this code, so the
+            // explanation has to be written here. This is the one the user can act on:
+            // the SDK moved ahead of the server's Roslyn.
+            return
+                $"Analyzer/source generator '{analyzerName}' could not be loaded for project '{projectName}': " +
+                $"it targets a newer Roslyn than this server hosts ({hostRoslynVersion}). " +
+                "Everything it contributes is missing — for the Razor generator that means no RZ " +
+                "diagnostics for .razor/.cshtml and no CS diagnostics from @code blocks. " +
+                "Upgrade roslyn-mcp to a build whose Microsoft.CodeAnalysis version is at least the " +
+                "one shipped with your .NET SDK.";
+        }
+
+        return
+            $"Analyzer/source generator '{analyzerName}' could not be loaded for project '{projectName}' " +
+            $"({errorCode}): {detail ?? errorCode.ToString()}. " +
+            "Its diagnostics and generated code will be missing.";
     }
 
     /// <summary>

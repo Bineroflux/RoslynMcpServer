@@ -203,6 +203,29 @@ public sealed class GetDiagnosticsRazorIntegrationTests
     /// step fails so the test can skip cleanly on environments without the
     /// Razor SDK or AspNetCore shared framework.
     /// </summary>
+    [Fact]
+    public async Task GetDiagnostics_WithMatchingRoslynHost_ReportsNoGeneratorLoadIssues()
+    {
+        using var fixture = RazorFixture.TryCreate(out var skip);
+        if (skip is not null) Assert.Skip(skip);
+
+        using var provider = new MSBuildWorkspaceProvider();
+        using var ctx = await provider.CreateContextAsync(
+            fixture!.SolutionPath, TestContext.Current.CancellationToken);
+
+        // A Razor project pulls in ~15 analyzer references, most of which legitimately
+        // contribute no generators (and some no analyzers either). None of that may be
+        // mistaken for a load failure, or RMCP0001 becomes noise that hides the real one.
+        Assert.Empty(ctx.GeneratorLoadIssues);
+
+        var op = new GetDiagnosticsOperation(ctx);
+        var result = await op.ExecuteAsync(
+            new GetDiagnosticsParams(), TestContext.Current.CancellationToken);
+
+        Assert.True(result.Success);
+        Assert.DoesNotContain(result.Data!.Diagnostics, d => d.Id == "RMCP0001");
+    }
+
     private sealed class RazorFixture : IDisposable
     {
         public string RootDir { get; }

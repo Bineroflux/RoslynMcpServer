@@ -1,6 +1,7 @@
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using Microsoft.CodeAnalysis.Editing;
 using RoslynMcp.Contracts.Enums;
 using RoslynMcp.Contracts.Errors;
 using RoslynMcp.Contracts.Models;
@@ -93,6 +94,53 @@ public sealed class ImplementInterfaceOperation : RefactoringOperationBase<Imple
                 $"Interface '{@params.InterfaceName}' not found.");
         }
 
+        if (interfaceSymbol.TypeKind != TypeKind.Interface)
+        {
+            throw new RefactoringException(
+                ErrorCodes.InterfaceNotFound,
+                $"'{interfaceSymbol.ToDisplayString()}' is not an interface.");
+        }
+
+        // A type that does not list the interface yet gets it added to its base list first:
+        // otherwise implicit stubs implement nothing and explicit ones do not compile
+        // (CS0540). The members are then determined against the updated type, so members
+        // it already has that now implement the interface are not generated again.
+        var addsInterface = !typeSymbol.AllInterfaces.Contains(interfaceSymbol, SymbolEqualityComparer.Default);
+        if (addsInterface)
+        {
+            if (interfaceSymbol.IsGenericType && interfaceSymbol.Equals(interfaceSymbol.OriginalDefinition, SymbolEqualityComparer.Default))
+            {
+                throw new RefactoringException(
+                    ErrorCodes.InterfaceNotFound,
+                    $"'{interfaceSymbol.ToDisplayString()}' is generic. Add it with its type arguments to the base list of '{@params.TypeName}' first.");
+            }
+
+            var interfaceName = interfaceSymbol.ToDisplayString();
+            var tracker = new SyntaxAnnotation();
+            var withInterface = (TypeDeclarationSyntax)SyntaxGenerator.GetGenerator(document).AddInterfaceType(
+                typeDeclaration,
+                SyntaxFactory.ParseTypeName(interfaceSymbol.ToMinimalDisplayString(semanticModel, typeDeclaration.SpanStart)));
+            withInterface = withInterface
+                .WithBaseList(GeneratedCodeFormatter.Mark(withInterface.BaseList!))
+                .WithAdditionalAnnotations(tracker);
+
+            var updatedDocument = document.WithSyntaxRoot(root.ReplaceNode(typeDeclaration, withInterface));
+            root = await updatedDocument.GetSyntaxRootAsync(cancellationToken);
+            semanticModel = await updatedDocument.GetSemanticModelAsync(cancellationToken);
+            if (root == null || semanticModel == null)
+            {
+                throw new RefactoringException(ErrorCodes.RoslynError, "Could not analyze the updated type.");
+            }
+
+            typeDeclaration = root.GetAnnotatedNodes(tracker).OfType<TypeDeclarationSyntax>().Single();
+            typeSymbol = semanticModel.GetDeclaredSymbol(typeDeclaration, cancellationToken)
+                ?? throw new RefactoringException(ErrorCodes.RoslynError, "Could not resolve type symbol.");
+            interfaceSymbol = typeSymbol.AllInterfaces.FirstOrDefault(i => i.ToDisplayString() == interfaceName)
+                ?? throw new RefactoringException(
+                    ErrorCodes.InterfaceNotFound,
+                    $"Interface '{interfaceName}' is not accessible from '{@params.TypeName}'.");
+        }
+
         // Get unimplemented members
         var unimplementedMembers = MemberAnalyzer.GetUnimplementedMembers(typeSymbol, interfaceSymbol).ToList();
 
@@ -123,7 +171,7 @@ public sealed class ImplementInterfaceOperation : RefactoringOperationBase<Imple
         // If preview mode, return without applying
         if (@params.Preview)
         {
-            return CreatePreviewResult(operationId, @params, unimplementedMembers, implementations);
+            return CreatePreviewResult(operationId, @params, unimplementedMembers, implementations, addsInterface);
         }
 
         // Add implementations to type
@@ -230,9 +278,11 @@ public sealed class ImplementInterfaceOperation : RefactoringOperationBase<Imple
         Guid operationId,
         ImplementInterfaceParams @params,
         List<ISymbol> members,
-        List<MemberDeclarationSyntax> implementations)
+        List<MemberDeclarationSyntax> implementations,
+        bool addsInterface)
     {
         var memberNames = string.Join(", ", members.Select(m => m.Name));
+        var baseList = addsInterface ? $" (adds {@params.InterfaceName} to the base list of {@params.TypeName})" : "";
         var implCode = string.Join("\n\n",
             implementations.Select(i => i.NormalizeWhitespace().ToFullString()));
 
@@ -242,7 +292,7 @@ public sealed class ImplementInterfaceOperation : RefactoringOperationBase<Imple
             {
                 File = @params.SourceFile,
                 ChangeType = ChangeKind.Modify,
-                Description = $"Implement {@params.InterfaceName} members: {memberNames}",
+                Description = $"Implement {@params.InterfaceName} members: {memberNames}{baseList}",
                 BeforeSnippet = $"// End of type '{@params.TypeName}'",
                 AfterSnippet = implCode
             }

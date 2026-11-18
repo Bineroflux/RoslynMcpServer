@@ -6,7 +6,8 @@ namespace RoslynMcp.Contracts.Models;
 public sealed class FindUnusedSymbolsResult
 {
     /// <summary>
-    /// The unused symbols, ordered by file, line and column.
+    /// The unused symbols, ordered by file, line and column. A member or nested type of a listed
+    /// type is not listed separately.
     /// </summary>
     public required IReadOnlyList<UnusedSymbolEntry> Symbols { get; init; }
 

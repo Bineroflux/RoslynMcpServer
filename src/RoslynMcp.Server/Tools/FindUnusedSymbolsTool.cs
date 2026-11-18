@@ -30,7 +30,8 @@ public sealed class FindUnusedSymbolsTool : IToolHandler
     /// <inheritdoc />
     public string Description =>
         "List types and members declared in source that nothing references outside their own declaration " +
-        "(a recursive call or a type naming itself is no use). By default only symbols not visible outside their " +
+        "(a recursive call or a type naming itself is no use); the members of an unused type are not listed separately. " +
+        "By default only symbols not visible outside their " +
         "assembly, and without overrides, interface implementations, entry points, operators, parameterless " +
         "constructors and attributed members. These are candidates, not proof: reflection, serialization, " +
         "XAML/Razor bindings, strings and other assemblies are invisible to the search.";

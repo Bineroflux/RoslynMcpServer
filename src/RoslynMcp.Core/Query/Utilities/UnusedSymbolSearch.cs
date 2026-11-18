@@ -20,7 +20,8 @@ namespace RoslynMcp.Core.Query.Utilities;
 /// own documentation comment) is not a use; every other reference Roslyn finds is, a
 /// <c>nameof</c>, a <c>cref</c> and a reference from source-generated code included. A type is
 /// used when it or one of its members or nested types is referenced from outside the type, so a
-/// static class whose extension methods are called is used.
+/// static class whose extension methods are called is used. A member or nested type of a type that
+/// is reported itself is not listed separately (deleting the type removes it).
 /// </para>
 /// <para>
 /// Excluded, because something other than a reference uses them: overrides, interface
@@ -91,13 +92,28 @@ internal sealed class UnusedSymbolSearch
                 : (1, unused ? 1 : 0, candidate);
         }
 
-        var entries = verdicts.Values
-            .Where(v => v.Unused == v.Instances)
-            .Select(v => CreateEntry(v.First))
+        var reported = verdicts.Values.Where(v => v.Unused == v.Instances).Select(v => v.First).ToList();
+
+        // A member or nested type of a reported type goes when the type goes; it is not listed
+        // on its own.
+        var unusedTypes = reported.Where(c => c.Symbol is INamedTypeSymbol).Select(c => c.Key).ToHashSet(StringComparer.Ordinal);
+        var entries = reported
+            .Where(c => !ContainingTypes(c.Symbol).Any(type => unusedTypes.Contains(KeyOf(type))))
+            .Select(CreateEntry)
             .ToList();
 
         return (entries, searched.Select(c => c.Key).Distinct(StringComparer.Ordinal).Count());
     }
+
+    private static IEnumerable<INamedTypeSymbol> ContainingTypes(ISymbol symbol)
+    {
+        for (var type = symbol.ContainingType; type != null; type = type.ContainingType)
+            yield return type;
+    }
+
+    /// <summary>Identifies a symbol across the projects compiling its file.</summary>
+    private static string KeyOf(ISymbol symbol) =>
+        $"{symbol.GetDocumentationCommentId() ?? symbol.ToDisplayString()}|{symbol.ContainingAssembly?.Name}";
 
     private async Task<List<Candidate>> CollectAsync(Project project, CancellationToken cancellationToken)
     {
@@ -451,8 +467,7 @@ internal sealed class UnusedSymbolSearch
         public IReadOnlyList<SyntaxNode> Declarations { get; } = declarations;
 
         /// <summary>Identifies the symbol across the projects compiling its file.</summary>
-        public string Key { get; } =
-            $"{symbol.GetDocumentationCommentId() ?? symbol.ToDisplayString()}|{symbol.ContainingAssembly?.Name}";
+        public string Key { get; } = KeyOf(symbol);
 
         /// <summary>Whether it passes the kind and file filters.</summary>
         public required bool Reportable { get; init; }

@@ -48,10 +48,7 @@ public sealed class FindUnusedSymbolsTests
         var result = await FindAsync(ws, new FindUnusedSymbolsParams());
 
         Assert.Equal(
-            [
-                "App.Calculator._unused", "App.Calculator.Countdown(int)", "App.Calculator.Helper()",
-                "App.Orphan", "App.Orphan.Create()", "App.Program2", "App.Program2.Run()"
-            ],
+            ["App.Calculator._unused", "App.Calculator.Countdown(int)", "App.Calculator.Helper()", "App.Orphan", "App.Program2"],
             result.Symbols.Select(s => s.FullyQualifiedName));
 
         var countdown = result.Symbols.Single(s => s.Name == "Countdown");
@@ -89,7 +86,7 @@ public sealed class FindUnusedSymbolsTests
         var result = await FindAsync(ws, new FindUnusedSymbolsParams());
 
         // Documented's only reference is its own documentation comment.
-        Assert.Equal(["App.Documented", "App.Consumer", "App.Consumer.Use()"], result.Symbols.Select(s => s.FullyQualifiedName));
+        Assert.Equal(["App.Documented", "App.Consumer"], result.Symbols.Select(s => s.FullyQualifiedName));
     }
 
     [Fact]
@@ -137,18 +134,17 @@ public sealed class FindUnusedSymbolsTests
         using var ws = TestWorkspace.Create(("Api.cs", source));
 
         var byDefault = await FindAsync(ws, new FindUnusedSymbolsParams());
+        var methods = await FindAsync(ws, new FindUnusedSymbolsParams { KindFilter = "Method" });
         var all = await FindAsync(ws, new FindUnusedSymbolsParams { IncludePublic = true });
+        var allMethods = await FindAsync(ws, new FindUnusedSymbolsParams { IncludePublic = true, KindFilter = "Method" });
 
+        Assert.Equal(["App.Api.Hidden()", "App.Internal"], byDefault.Symbols.Select(s => s.FullyQualifiedName));
+        Assert.Equal(["App.Api.Hidden()", "App.Internal.LooksPublic()"], methods.Symbols.Select(s => s.FullyQualifiedName));
+        Assert.Equal("public", methods.Symbols.Single(s => s.Name == "LooksPublic").Accessibility);
+        Assert.Equal(["App.Api", "App.Internal", "App.Sealed"], all.Symbols.Select(s => s.FullyQualifiedName));
         Assert.Equal(
-            ["App.Api.Hidden()", "App.Internal", "App.Internal.LooksPublic()"],
-            byDefault.Symbols.Select(s => s.FullyQualifiedName));
-        Assert.Equal("public", byDefault.Symbols.Single(s => s.Name == "LooksPublic").Accessibility);
-        Assert.Equal(
-            [
-                "App.Api", "App.Api.Exposed()", "App.Api.ForDerived()", "App.Api.Hidden()",
-                "App.Internal", "App.Internal.LooksPublic()", "App.Sealed", "App.Sealed.Run()"
-            ],
-            all.Symbols.Select(s => s.FullyQualifiedName));
+            ["App.Api.Exposed()", "App.Api.ForDerived()", "App.Api.Hidden()", "App.Internal.LooksPublic()", "App.Sealed.Run()"],
+            allMethods.Symbols.Select(s => s.FullyQualifiedName));
     }
 
     [Fact]
@@ -211,9 +207,9 @@ public sealed class FindUnusedSymbolsTests
 
         // Square.Changed is an implementation (IShape.Changed is never raised or subscribed to),
         // Draw and Reset are never called, Deprecated's [Obsolete] does not count as an attribute,
-        // and in a library Main is an ordinary method.
+        // and in a library Main is an ordinary method (it goes with its unused type).
         Assert.Equal(
-            ["App.IShape.Changed", "App.Base.Draw()", "App.Base.Reset()", "App.Square.Deprecated()", "App.Entry", "App.Entry.Main()"],
+            ["App.IShape.Changed", "App.Base.Draw()", "App.Base.Reset()", "App.Square.Deprecated()", "App.Entry"],
             result.Symbols.Select(s => s.FullyQualifiedName));
 
         var attributed = await FindAsync(ws, new FindUnusedSymbolsParams { IncludeAttributed = true });
@@ -267,7 +263,7 @@ public sealed class FindUnusedSymbolsTests
 
         var result = await FindAsync(ws, new FindUnusedSymbolsParams());
 
-        Assert.Equal(["App.IStore.Save()", "App.Use", "App.Use.Run(App.IStore)"], result.Symbols.Select(s => s.FullyQualifiedName));
+        Assert.Equal(["App.IStore.Save()", "App.Use"], result.Symbols.Select(s => s.FullyQualifiedName));
     }
 
     [Fact]
@@ -324,13 +320,18 @@ public sealed class FindUnusedSymbolsTests
                         public static int Use() => Modern();
                     #endif
                     }
+
+                    public static class Api
+                    {
+                        public static System.Type HelperType => typeof(Helpers);
+                    }
                     """)],
                 TargetFrameworks: ["net8_0", "net9_0"]));
 
         var result = await FindAsync(ws, new FindUnusedSymbolsParams());
 
         // Use exists in one framework and is unused there; Modern is used there.
-        Assert.Equal(["Lib.Helpers", "Lib.Helpers.Never()", "Lib.Helpers.Use()"], result.Symbols.Select(s => s.FullyQualifiedName));
+        Assert.Equal(["Lib.Helpers.Never()", "Lib.Helpers.Use()"], result.Symbols.Select(s => s.FullyQualifiedName));
     }
 
     [Fact]
@@ -349,8 +350,8 @@ public sealed class FindUnusedSymbolsTests
     public async Task KindFilterSourceFileAndMaxResults_NarrowTheReport_TotalCountCountsAll()
     {
         using var ws = TestWorkspace.Create(
-            ("A.cs", "namespace App;\n\ninternal class A\n{\n    private int _a;\n    private void M1() { }\n    private void M2() { }\n}\n"),
-            ("B.cs", "namespace App;\n\ninternal class B\n{\n    private void M3() { }\n}\n"));
+            ("A.cs", "namespace App;\n\npublic class A\n{\n    private int _a;\n    private void M1() { }\n    private void M2() { }\n}\n"),
+            ("B.cs", "namespace App;\n\npublic class B\n{\n    private void M3() { }\n}\n"));
 
         var methods = await FindAsync(ws, new FindUnusedSymbolsParams { KindFilter = "method" });
         var inB = await FindAsync(ws, new FindUnusedSymbolsParams { SourceFile = ws.PathOf("B.cs") });
@@ -358,9 +359,9 @@ public sealed class FindUnusedSymbolsTests
         var again = await FindAsync(ws, new FindUnusedSymbolsParams { MaxResults = 2 });
 
         Assert.Equal(["App.A.M1()", "App.A.M2()", "App.B.M3()"], methods.Symbols.Select(s => s.FullyQualifiedName));
-        Assert.Equal(["App.B", "App.B.M3()"], inB.Symbols.Select(s => s.FullyQualifiedName));
-        Assert.Equal(["App.A", "App.A._a"], firstTwo.Symbols.Select(s => s.FullyQualifiedName));
-        Assert.Equal(6, firstTwo.TotalCount);
+        Assert.Equal(["App.B.M3()"], inB.Symbols.Select(s => s.FullyQualifiedName));
+        Assert.Equal(["App.A._a", "App.A.M1()"], firstTwo.Symbols.Select(s => s.FullyQualifiedName));
+        Assert.Equal(4, firstTwo.TotalCount);
         Assert.True(firstTwo.Truncated);
         Assert.Equal(firstTwo.Symbols.Select(s => s.FullyQualifiedName), again.Symbols.Select(s => s.FullyQualifiedName));
     }
@@ -401,6 +402,27 @@ public sealed class FindUnusedSymbolsTests
         var classes = await FindAsync(ws, new FindUnusedSymbolsParams { KindFilter = "Class" });
 
         Assert.Equal(["App.Use", "App.Other"], classes.Symbols.Select(s => s.FullyQualifiedName));
+    }
+
+    [Fact]
+    public async Task TheMembersOfAnUnusedType_AreNotListedSeparately_UnlessTypesAreFilteredOut()
+    {
+        using var ws = TestWorkspace.Create(
+            ("Orphan.cs", "namespace App;\n\ninternal class OrphanType\n{\n    public void Work() { }\n\n    internal class Inner { public int X; }\n}\n"),
+            ("Part1.cs", "namespace App;\n\ninternal partial class PartialThing\n{\n    public int A;\n}\n"),
+            ("Part2.cs", "namespace App;\n\ninternal partial class PartialThing\n{\n    public int B;\n}\n"));
+
+        var all = await FindAsync(ws, new FindUnusedSymbolsParams());
+        var fields = await FindAsync(ws, new FindUnusedSymbolsParams { KindFilter = "Field" });
+        var inPart2 = await FindAsync(ws, new FindUnusedSymbolsParams { SourceFile = ws.PathOf("Part2.cs") });
+
+        Assert.Equal(["App.OrphanType", "App.PartialThing"], all.Symbols.Select(s => s.FullyQualifiedName));
+        Assert.Equal(2, all.TotalCount);
+        Assert.Equal(
+            ["App.OrphanType.Inner.X", "App.PartialThing.A", "App.PartialThing.B"],
+            fields.Symbols.Select(s => s.FullyQualifiedName));
+        Assert.Equal(["App.PartialThing"], inPart2.Symbols.Select(s => s.FullyQualifiedName));
+        Assert.Equal(ws.PathOf("Part2.cs"), inPart2.Symbols[0].File);
     }
 
     [Theory]

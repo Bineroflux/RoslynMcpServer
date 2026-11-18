@@ -1,5 +1,6 @@
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using RoslynMcp.Core.Refactoring.Utilities;
 
 namespace RoslynMcp.Core.Resolution;
 
@@ -27,14 +28,21 @@ public static class MemberAnalyzer
     /// </summary>
     /// <param name="type">The type to check.</param>
     /// <param name="iface">The interface to check against.</param>
-    /// <returns>Unimplemented interface members.</returns>
+    /// <returns>Unimplemented members of the interface and of the interfaces it extends.</returns>
+    /// <remarks>
+    /// Property, indexer and event accessors are not returned on their own: they are
+    /// implemented as part of their property, indexer or event (as standalone methods they
+    /// would be emitted as e.g. a bogus <c>get_Item</c> method). Members that need no
+    /// implementation (non-virtual static or sealed members, fields, nested types) are
+    /// skipped too.
+    /// </remarks>
     public static IEnumerable<ISymbol> GetUnimplementedMembers(INamedTypeSymbol type, INamedTypeSymbol iface)
     {
-        var implemented = new HashSet<ISymbol>(type.GetMembers(), SymbolEqualityComparer.Default);
-
-        foreach (var member in iface.GetMembers())
+        foreach (var member in iface.AllInterfaces.Prepend(iface).SelectMany(i => i.GetMembers()))
         {
             if (member.IsImplicitlyDeclared) continue;
+            if (member is not (IMethodSymbol { MethodKind: MethodKind.Ordinary } or IPropertySymbol or IEventSymbol)) continue;
+            if (!member.IsAbstract && !member.IsVirtual) continue;
 
             var implementation = type.FindImplementationForInterfaceMember(member);
             if (implementation == null)
@@ -45,42 +53,38 @@ public static class MemberAnalyzer
     }
 
     /// <summary>
-    /// Gets virtual/abstract members from base classes that can be overridden.
+    /// Gets virtual/abstract members from base classes (up to and including
+    /// <see cref="object"/>) that can be overridden.
     /// </summary>
     /// <param name="type">The type to analyze.</param>
-    /// <returns>Overridable members from base classes.</returns>
+    /// <returns>Overridable members from base classes, each signature at most once.</returns>
+    /// <remarks>
+    /// The base chain is walked from the nearest base outwards and only the most derived
+    /// declaration of a signature counts: once the type itself or a nearer base declares,
+    /// overrides or hides a member, the same member further up must not be offered again,
+    /// or it would be emitted twice (CS0111). Members the type cannot access (internal
+    /// members of another assembly) cannot be overridden from it and are skipped.
+    /// </remarks>
     public static IEnumerable<ISymbol> GetOverridableMembers(INamedTypeSymbol type)
     {
-        var baseType = type.BaseType;
-        var alreadyOverridden = new HashSet<string>(
+        // The type's own members (overrides or not) already occupy their signatures.
+        var seen = new HashSet<string>(
             type.GetMembers()
-                .Where(m => m is IMethodSymbol { IsOverride: true } or IPropertySymbol { IsOverride: true })
+                .Where(m => m is IMethodSymbol { MethodKind: MethodKind.Ordinary } or IPropertySymbol)
                 .Select(m => GetMemberSignature(m)));
 
-        while (baseType != null && baseType.SpecialType != SpecialType.System_Object)
+        for (var baseType = type.BaseType; baseType != null; baseType = baseType.BaseType)
         {
             foreach (var member in baseType.GetMembers())
             {
                 if (member.IsImplicitlyDeclared) continue;
-                if (!IsOverridable(member)) continue;
+                if (member is not (IMethodSymbol { MethodKind: MethodKind.Ordinary } or IPropertySymbol)) continue;
+                if (!seen.Add(GetMemberSignature(member))) continue;
 
-                var signature = GetMemberSignature(member);
-                if (!alreadyOverridden.Contains(signature))
+                if (IsOverridable(member) && SyntaxGenerationHelper.IsOverridableFrom(member, type))
                 {
                     yield return member;
                 }
-            }
-
-            baseType = baseType.BaseType;
-        }
-
-        // Also include Object methods that can be overridden
-        foreach (var member in GetObjectOverrides())
-        {
-            var signature = GetMemberSignature(member);
-            if (!alreadyOverridden.Contains(signature))
-            {
-                yield return member;
             }
         }
     }
@@ -184,16 +188,10 @@ public static class MemberAnalyzer
         return member switch
         {
             IMethodSymbol method => $"{method.Name}({string.Join(",", method.Parameters.Select(p => p.Type.ToDisplayString()))})",
+            IPropertySymbol { IsIndexer: true } indexer => $"this[{string.Join(",", indexer.Parameters.Select(p => p.Type.ToDisplayString()))}]",
             IPropertySymbol prop => prop.Name,
             _ => member.Name
         };
-    }
-
-    private static IEnumerable<ISymbol> GetObjectOverrides()
-    {
-        // Return placeholder symbols for ToString, Equals, GetHashCode
-        // These are handled specially in generate_overrides
-        yield break;
     }
 }
 

@@ -186,6 +186,10 @@ public sealed class ImplementInterfaceOperation : RefactoringOperationBase<Imple
                     explicitImplementation,
                     callBase: false,
                     throwNotImplemented),
+                IPropertySymbol { IsIndexer: true } indexer => SyntaxGenerationHelper.CreateIndexerStub(
+                    indexer,
+                    explicitImplementation,
+                    throwNotImplemented),
                 IPropertySymbol property => SyntaxGenerationHelper.CreatePropertyStub(
                     property,
                     explicitImplementation,

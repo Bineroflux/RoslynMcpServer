@@ -83,12 +83,8 @@ public sealed class GenerateOverridesOperation : RefactoringOperationBase<Genera
             // Sealed classes can still override, just can't be inherited from
         }
 
-        // Get overridable members from base classes
+        // Get overridable members from base classes, System.Object's included
         var overridableMembers = MemberAnalyzer.GetOverridableMembers(typeSymbol).ToList();
-
-        // Add Object methods (ToString, Equals, GetHashCode)
-        var objectOverrides = GetObjectMethodsToOverride(typeSymbol);
-        overridableMembers.AddRange(objectOverrides);
 
         // Filter to requested members if specified
         List<ISymbol> membersToOverride;
@@ -121,7 +117,7 @@ public sealed class GenerateOverridesOperation : RefactoringOperationBase<Genera
         }
 
         // Generate overrides
-        var overrides = GenerateOverrideMembers(membersToOverride, @params.CallBase);
+        var overrides = GenerateOverrideMembers(membersToOverride, @params.CallBase, typeSymbol);
 
         // If preview mode, return without applying
         if (@params.Preview)
@@ -157,62 +153,37 @@ public sealed class GenerateOverridesOperation : RefactoringOperationBase<Genera
             0);
     }
 
-    private static List<ISymbol> GetObjectMethodsToOverride(INamedTypeSymbol typeSymbol)
-    {
-        var result = new List<ISymbol>();
-        var existingOverrides = typeSymbol.GetMembers()
-            .OfType<IMethodSymbol>()
-            .Where(m => m.IsOverride)
-            .Select(m => m.Name)
-            .ToHashSet();
-
-        // Find Object type
-        var objectType = typeSymbol.BaseType;
-        while (objectType != null && objectType.SpecialType != SpecialType.System_Object)
-        {
-            objectType = objectType.BaseType;
-        }
-
-        if (objectType == null) return result;
-
-        // Get ToString, Equals, GetHashCode from Object
-        foreach (var member in objectType.GetMembers())
-        {
-            if (member is IMethodSymbol method &&
-                (method.Name == "ToString" || method.Name == "Equals" || method.Name == "GetHashCode") &&
-                method.IsVirtual &&
-                !existingOverrides.Contains(method.Name))
-            {
-                // Skip Equals(object, object) static method
-                if (method.Name == "Equals" && method.Parameters.Length != 1)
-                    continue;
-
-                result.Add(method);
-            }
-        }
-
-        return result;
-    }
-
     private static List<MemberDeclarationSyntax> GenerateOverrideMembers(
         List<ISymbol> members,
-        bool callBase)
+        bool callBase,
+        INamedTypeSymbol emittingType)
     {
         var overrides = new List<MemberDeclarationSyntax>();
 
         foreach (var member in members)
         {
+            // Abstract members throw; non-abstract ones call base when requested (for
+            // properties and indexers too) or return a default value.
             MemberDeclarationSyntax? impl = member switch
             {
                 IMethodSymbol method => SyntaxGenerationHelper.CreateMethodStub(
                     method,
                     explicitInterface: false,
                     callBase: callBase && !method.IsAbstract,
-                    throwNotImplemented: method.IsAbstract),
+                    throwNotImplemented: method.IsAbstract,
+                    emittingType),
+                IPropertySymbol { IsIndexer: true } indexer => SyntaxGenerationHelper.CreateIndexerStub(
+                    indexer,
+                    explicitInterface: false,
+                    throwNotImplemented: indexer.IsAbstract,
+                    callBase: callBase && !indexer.IsAbstract,
+                    emittingType),
                 IPropertySymbol property => SyntaxGenerationHelper.CreatePropertyStub(
                     property,
                     explicitInterface: false,
-                    throwNotImplemented: property.IsAbstract),
+                    throwNotImplemented: property.IsAbstract,
+                    callBase: callBase && !property.IsAbstract,
+                    emittingType),
                 _ => null
             };
 

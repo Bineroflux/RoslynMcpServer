@@ -7,6 +7,7 @@ using RoslynMcp.Contracts.Errors;
 using RoslynMcp.Contracts.Models;
 using RoslynMcp.Core.FileSystem;
 using RoslynMcp.Core.Refactoring.Base;
+using RoslynMcp.Core.Refactoring.Utilities;
 using RoslynMcp.Core.Workspace;
 
 namespace RoslynMcp.Core.Refactoring.Extract;
@@ -41,18 +42,23 @@ public sealed class ExtractVariableOperation : RefactoringOperationBase<ExtractV
         if (!File.Exists(@params.SourceFile))
             throw new RefactoringException(ErrorCodes.SourceFileNotFound, $"Source file not found: {@params.SourceFile}");
 
-        if (@params.StartLine < 1)
-            throw new RefactoringException(ErrorCodes.InvalidLineNumber, "startLine must be >= 1.");
+        if (@params.StartLine < 1 || @params.EndLine < 1)
+            throw new RefactoringException(ErrorCodes.InvalidLineNumber, "Line numbers must be >= 1.");
 
-        if (@params.StartColumn < 1)
-            throw new RefactoringException(ErrorCodes.InvalidColumnNumber, "startColumn must be >= 1.");
+        if (@params.StartColumn < 1 || @params.EndColumn < 1)
+            throw new RefactoringException(ErrorCodes.InvalidColumnNumber, "Column numbers must be >= 1.");
 
-        if (@params.EndLine < @params.StartLine ||
-            (@params.EndLine == @params.StartLine && @params.EndColumn < @params.StartColumn))
-            throw new RefactoringException(ErrorCodes.InvalidSelectionRange, "End must be after start.");
+        if (@params.StartLine > @params.EndLine ||
+            (@params.StartLine == @params.EndLine && @params.StartColumn >= @params.EndColumn))
+            throw new RefactoringException(ErrorCodes.InvalidSelectionRange, "Selection start must be before end.");
 
         if (!IsValidIdentifier(@params.VariableName))
             throw new RefactoringException(ErrorCodes.InvalidSymbolName, $"Invalid variable name: {@params.VariableName}");
+
+        // "_" is a legal identifier, but a local named "_" captures every later discard in
+        // its scope: `_ = Log(v)` and `out _` would assign the new local instead.
+        if (@params.VariableName == "_")
+            throw new RefactoringException(ErrorCodes.InvalidSymbolName, "'_' is not a valid variable name: later discards (_ = ... / out _) would bind to the new local.");
     }
 
     /// <inheritdoc />
@@ -72,8 +78,8 @@ public sealed class ExtractVariableOperation : RefactoringOperationBase<ExtractV
 
         // Get text span from line/column
         var sourceText = await document.GetTextAsync(cancellationToken);
-        var startPosition = sourceText.Lines[@params.StartLine - 1].Start + @params.StartColumn - 1;
-        var endPosition = sourceText.Lines[@params.EndLine - 1].Start + @params.EndColumn - 1;
+        var startPosition = TextPositionHelper.GetPosition(sourceText, @params.StartLine, @params.StartColumn);
+        var endPosition = TextPositionHelper.GetPosition(sourceText, @params.EndLine, @params.EndColumn);
         var span = TextSpan.FromBounds(startPosition, endPosition);
 
         // Find expression at span
@@ -145,7 +151,10 @@ public sealed class ExtractVariableOperation : RefactoringOperationBase<ExtractV
             SyntaxFactory.VariableDeclaration(typeSyntax.WithTrailingTrivia(SyntaxFactory.Space))
                 .WithVariables(SyntaxFactory.SingletonSeparatedList(
                     SyntaxFactory.VariableDeclarator(@params.VariableName)
-                        .WithInitializer(SyntaxFactory.EqualsValueClause(expression)))));
+                        .WithInitializer(SyntaxFactory.EqualsValueClause(
+                            // The reference below keeps the expression's trivia; don't
+                            // copy it (and any comments in it) into the declaration too.
+                            expression.WithoutTrivia())))));
 
         // Create variable reference
         var variableRef = SyntaxFactory.IdentifierName(@params.VariableName);
@@ -163,8 +172,9 @@ public sealed class ExtractVariableOperation : RefactoringOperationBase<ExtractV
         newStatements.Add(variableDeclaration.NormalizeWhitespace()
             .WithTrailingTrivia(SyntaxFactory.CarriageReturnLineFeed));
 
-        // Modify original statement to use variable
-        var newStatement = containingStatement.ReplaceNode(expression, variableRef);
+        // Modify original statement to use variable. Keep the expression's trivia so a
+        // following keyword (`x is T`, `x as T`, `x switch`, `x with`) stays separated.
+        var newStatement = containingStatement.ReplaceNode(expression, variableRef.WithTriviaFrom(expression));
         newStatements.Add(newStatement);
 
         // Replace the containing statement with new statements

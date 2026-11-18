@@ -7,6 +7,7 @@ using RoslynMcp.Contracts.Errors;
 using RoslynMcp.Contracts.Models;
 using RoslynMcp.Core.FileSystem;
 using RoslynMcp.Core.Refactoring.Base;
+using RoslynMcp.Core.Refactoring.Utilities;
 using RoslynMcp.Core.Workspace;
 
 namespace RoslynMcp.Core.Refactoring.Extract;
@@ -46,14 +47,23 @@ public sealed class ExtractConstantOperation : RefactoringOperationBase<ExtractC
         if (!File.Exists(@params.SourceFile))
             throw new RefactoringException(ErrorCodes.SourceFileNotFound, $"Source file not found: {@params.SourceFile}");
 
-        if (@params.StartLine < 1)
-            throw new RefactoringException(ErrorCodes.InvalidLineNumber, "startLine must be >= 1.");
+        if (@params.StartLine < 1 || @params.EndLine < 1)
+            throw new RefactoringException(ErrorCodes.InvalidLineNumber, "Line numbers must be >= 1.");
 
-        if (@params.StartColumn < 1)
-            throw new RefactoringException(ErrorCodes.InvalidColumnNumber, "startColumn must be >= 1.");
+        if (@params.StartColumn < 1 || @params.EndColumn < 1)
+            throw new RefactoringException(ErrorCodes.InvalidColumnNumber, "Column numbers must be >= 1.");
+
+        if (@params.StartLine > @params.EndLine ||
+            (@params.StartLine == @params.EndLine && @params.StartColumn >= @params.EndColumn))
+            throw new RefactoringException(ErrorCodes.InvalidSelectionRange, "Selection start must be before end.");
 
         if (!IsValidIdentifier(@params.ConstantName))
             throw new RefactoringException(ErrorCodes.InvalidSymbolName, $"Invalid constant name: {@params.ConstantName}");
+
+        // "_" is a legal identifier, but a constant named "_" captures every discard in the
+        // type: `_ = Log(v)` and `out _` would target the constant.
+        if (@params.ConstantName == "_")
+            throw new RefactoringException(ErrorCodes.InvalidSymbolName, "'_' is not a valid constant name: existing discards (_ = ... / out _) would bind to the new constant.");
 
         if (!ValidVisibilities.Contains(@params.Visibility))
             throw new RefactoringException(ErrorCodes.InvalidVisibility, $"Invalid visibility: {@params.Visibility}");
@@ -76,8 +86,8 @@ public sealed class ExtractConstantOperation : RefactoringOperationBase<ExtractC
 
         // Get text span from line/column
         var sourceText = await document.GetTextAsync(cancellationToken);
-        var startPosition = sourceText.Lines[@params.StartLine - 1].Start + @params.StartColumn - 1;
-        var endPosition = sourceText.Lines[@params.EndLine - 1].Start + @params.EndColumn - 1;
+        var startPosition = TextPositionHelper.GetPosition(sourceText, @params.StartLine, @params.StartColumn);
+        var endPosition = TextPositionHelper.GetPosition(sourceText, @params.EndLine, @params.EndColumn);
         var span = TextSpan.FromBounds(startPosition, endPosition);
 
         // Find literal at span

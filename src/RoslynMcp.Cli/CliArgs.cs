@@ -109,7 +109,10 @@ public static class CliArgs
                 continue;
             }
 
-            if (key.Equals("format", StringComparison.OrdinalIgnoreCase))
+            // --format json|text picks the output format; any other value is a tool option
+            // (generate-tostring's --format interpolated|stringbuilder).
+            if (key.Equals("format", StringComparison.OrdinalIgnoreCase)
+                && (i + 1 >= args.Length || args[i + 1].StartsWith("--") || IsOutputFormat(args[i + 1])))
             {
                 if (i + 1 < args.Length && !args[i + 1].StartsWith("--"))
                 {
@@ -139,6 +142,10 @@ public static class CliArgs
         arg.Equals("-h", StringComparison.OrdinalIgnoreCase) ||
         arg == "-?" ||
         arg.Equals("help", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsOutputFormat(string value) =>
+        value.Equals("json", StringComparison.OrdinalIgnoreCase) ||
+        value.Equals("text", StringComparison.OrdinalIgnoreCase);
 
     private static bool LooksLikeFilePath(string value) =>
         value.EndsWith(".sln", StringComparison.OrdinalIgnoreCase) ||

@@ -72,6 +72,16 @@ public class CliArgsTests
         Assert.Equal("Error", result.Options["severity-filter"]);
     }
 
+    [Fact]
+    public void FormatWithAToolValue_IsPassedToTheTool()
+    {
+        // generate-tostring has its own --format (interpolated|stringbuilder); only json/text
+        // select the output format.
+        var result = CliArgs.Parse(["My.sln", "generate-tostring", "--format", "stringbuilder", "--format", "text"]);
+        Assert.Equal("text", result.Format);
+        Assert.Equal("stringbuilder", result.Options["format"]);
+    }
+
     [Theory]
     [InlineData("My.sln")]
     [InlineData("My.slnx")]

@@ -130,16 +130,36 @@ internal sealed class TestWorkspace : IDisposable
     public IReadOnlyList<string> GetDiskCompilationWarningsAndErrors() =>
         GetDiskCompilationDiagnostics(DiagnosticSeverity.Warning);
 
-    private IReadOnlyList<string> GetDiskCompilationDiagnostics(DiagnosticSeverity minimum)
+    /// <summary>
+    /// Compiles the <c>.cs</c> files currently on disk into an assembly image, so a test can
+    /// load it and run the generated code.
+    /// </summary>
+    public byte[] EmitDiskAssembly()
     {
-        var trees = System.IO.Directory.GetFiles(Directory, "*.cs", SearchOption.AllDirectories)
-            .Select(path => CSharpSyntaxTree.ParseText(File.ReadAllText(path), ParseOptions, path));
+        using var stream = new MemoryStream();
+        var emit = CreateDiskCompilation().Emit(stream);
+        if (!emit.Success)
+        {
+            throw new InvalidOperationException(
+                "Files on disk do not compile: " + string.Join("; ", emit.Diagnostics));
+        }
 
-        return CSharpCompilation.Create("DiskCheck", trees, _references, CompilationOptions)
+        return stream.ToArray();
+    }
+
+    private IReadOnlyList<string> GetDiskCompilationDiagnostics(DiagnosticSeverity minimum) =>
+        CreateDiskCompilation()
             .GetDiagnostics()
             .Where(d => d.Severity >= minimum)
             .Select(d => d.ToString())
             .ToList();
+
+    private CSharpCompilation CreateDiskCompilation()
+    {
+        var trees = System.IO.Directory.GetFiles(Directory, "*.cs", SearchOption.AllDirectories)
+            .Select(path => CSharpSyntaxTree.ParseText(File.ReadAllText(path), ParseOptions, path));
+
+        return CSharpCompilation.Create("DiskCheck", trees, _references, CompilationOptions);
     }
 
     public void Dispose()

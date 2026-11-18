@@ -58,6 +58,9 @@ public static class ErrorCodes
     /// <summary>Selection range is empty.</summary>
     public const string EmptySelection = "1016";
 
+    /// <summary>A parameter has a value outside the set the tool supports.</summary>
+    public const string InvalidParameterValue = "1017";
+
     // ============================================
     // Resource Errors (2xxx)
     // ============================================

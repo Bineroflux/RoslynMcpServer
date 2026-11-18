@@ -1,6 +1,7 @@
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using Microsoft.CodeAnalysis.Simplification;
 using RoslynMcp.Contracts.Errors;
 using RoslynMcp.Contracts.Models;
 using RoslynMcp.Core.FileSystem;
@@ -11,10 +12,15 @@ using RoslynMcp.Core.Workspace;
 namespace RoslynMcp.Core.Refactoring.Generate;
 
 /// <summary>
-/// Generates a ToString() override for a type.
+/// Generates a ToString() override for a type, as an interpolated string (the default) or
+/// built with a <see cref="System.Text.StringBuilder"/>. Both produce
+/// <c>TypeName { Member1 = value1, Member2 = value2 }</c>.
 /// </summary>
 public sealed class GenerateToStringOperation : RefactoringOperationBase<GenerateToStringParams>
 {
+    private const string InterpolatedFormat = "interpolated";
+    private const string StringBuilderFormat = "stringbuilder";
+
     /// <inheritdoc />
     public GenerateToStringOperation(WorkspaceContext context) : base(context)
     {
@@ -34,6 +40,15 @@ public sealed class GenerateToStringOperation : RefactoringOperationBase<Generat
 
         if (!PathResolver.IsValidCSharpFilePath(@params.SourceFile))
             throw new RefactoringException(ErrorCodes.InvalidSourcePath, PathResolver.GetCSharpFileRejectionReason(@params.SourceFile));
+
+        if (@params.Format != null
+            && !@params.Format.Equals(InterpolatedFormat, StringComparison.OrdinalIgnoreCase)
+            && !@params.Format.Equals(StringBuilderFormat, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new RefactoringException(
+                ErrorCodes.InvalidParameterValue,
+                $"Invalid format '{@params.Format}'. Valid values: {InterpolatedFormat}, {StringBuilderFormat}.");
+        }
 
         if (!File.Exists(@params.SourceFile))
             throw new RefactoringException(ErrorCodes.SourceFileNotFound, $"Source file not found: {@params.SourceFile}");
@@ -70,7 +85,9 @@ public sealed class GenerateToStringOperation : RefactoringOperationBase<Generat
         if (members.Count == 0)
             throw new RefactoringException(ErrorCodes.NoMembersToGenerate, "No fields or properties available for ToString generation.");
 
-        var toStringMethod = GenerateToString(@params.TypeName, members);
+        var toStringMethod = StringBuilderFormat.Equals(@params.Format, StringComparison.OrdinalIgnoreCase)
+            ? GenerateStringBuilderToString(@params.TypeName, members)
+            : GenerateInterpolatedToString(@params.TypeName, members);
 
         if (@params.Preview)
         {
@@ -103,7 +120,7 @@ public sealed class GenerateToStringOperation : RefactoringOperationBase<Generat
             0, 0);
     }
 
-    private static MethodDeclarationSyntax GenerateToString(string typeName, List<ISymbol> members)
+    private static MethodDeclarationSyntax GenerateInterpolatedToString(string typeName, List<ISymbol> members)
     {
         // $"TypeName {{ Field1 = {Field1}, Field2 = {Field2} }}"
         // Each run of literal text goes into a single text token: adjacent text tokens get
@@ -125,15 +142,74 @@ public sealed class GenerateToStringOperation : RefactoringOperationBase<Generat
             SyntaxFactory.Token(SyntaxKind.InterpolatedStringStartToken),
             SyntaxFactory.List(parts));
 
-        return SyntaxFactory.MethodDeclaration(
+        return CreateToStringMethod(SyntaxFactory.Block(SyntaxFactory.ReturnStatement(interpolatedString)));
+    }
+
+    /// <summary>
+    /// Builds the same text as <see cref="GenerateInterpolatedToString"/> with a
+    /// <c>StringBuilder</c>: one <c>Append</c> per run of literal text and per member. The
+    /// local is named so that it cannot shadow a member it appends.
+    /// </summary>
+    private static MethodDeclarationSyntax GenerateStringBuilderToString(string typeName, List<ISymbol> members)
+    {
+        var builder = "builder";
+        for (var suffix = 1; members.Any(m => m.Name == builder); suffix++)
+            builder = "builder" + suffix;
+
+        // global:: so a namespace or type named System in the user's code cannot capture
+        // the name; the simplifier shortens it to what the file's usings allow.
+        var builderType = SyntaxFactory.ParseTypeName("global::System.Text.StringBuilder")
+            .WithAdditionalAnnotations(Simplifier.Annotation);
+
+        var statements = new List<StatementSyntax>
+        {
+            SyntaxFactory.LocalDeclarationStatement(
+                SyntaxFactory.VariableDeclaration(SyntaxFactory.IdentifierName("var"))
+                    .WithVariables(SyntaxFactory.SingletonSeparatedList(
+                        SyntaxFactory.VariableDeclarator(builder)
+                            .WithInitializer(SyntaxFactory.EqualsValueClause(
+                                SyntaxFactory.ObjectCreationExpression(builderType)
+                                    .WithArgumentList(SyntaxFactory.ArgumentList()))))))
+        };
+
+        var text = typeName + " { ";
+        for (int i = 0; i < members.Count; i++)
+        {
+            text += (i == 0 ? "" : ", ") + members[i].Name + " = ";
+            statements.Add(Append(builder, SyntaxFactory.LiteralExpression(
+                SyntaxKind.StringLiteralExpression, SyntaxFactory.Literal(text))));
+            statements.Add(Append(builder, SyntaxFactory.IdentifierName(members[i].Name)));
+            text = "";
+        }
+
+        statements.Add(Append(builder, SyntaxFactory.LiteralExpression(
+            SyntaxKind.StringLiteralExpression, SyntaxFactory.Literal(" }"))));
+        statements.Add(SyntaxFactory.ReturnStatement(Invoke(builder, "ToString")));
+
+        return CreateToStringMethod(SyntaxFactory.Block(statements));
+    }
+
+    private static ExpressionStatementSyntax Append(string builder, ExpressionSyntax argument) =>
+        SyntaxFactory.ExpressionStatement(Invoke(builder, "Append", argument));
+
+    private static InvocationExpressionSyntax Invoke(string target, string method, params ExpressionSyntax[] arguments) =>
+        SyntaxFactory.InvocationExpression(
+                SyntaxFactory.MemberAccessExpression(
+                    SyntaxKind.SimpleMemberAccessExpression,
+                    SyntaxFactory.IdentifierName(target),
+                    SyntaxFactory.IdentifierName(method)))
+            .WithArgumentList(SyntaxFactory.ArgumentList(
+                SyntaxFactory.SeparatedList(arguments.Select(SyntaxFactory.Argument))));
+
+    private static MethodDeclarationSyntax CreateToStringMethod(BlockSyntax body) =>
+        SyntaxFactory.MethodDeclaration(
                 SyntaxFactory.PredefinedType(SyntaxFactory.Token(SyntaxKind.StringKeyword)),
                 "ToString")
             .WithModifiers(SyntaxFactory.TokenList(
                 SyntaxFactory.Token(SyntaxKind.PublicKeyword),
                 SyntaxFactory.Token(SyntaxKind.OverrideKeyword)))
-            .WithBody(SyntaxFactory.Block(SyntaxFactory.ReturnStatement(interpolatedString)))
+            .WithBody(body)
             .NormalizeWhitespace();
-    }
 
     /// <summary>
     /// Literal text of an interpolated string. <paramref name="text"/> is source text, so

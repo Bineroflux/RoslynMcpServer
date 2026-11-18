@@ -91,6 +91,15 @@ public class FindReferencesToolTests
         Assert.True(properties.TryGetProperty("maxResults", out _));
     }
 
+    [Theory]
+    [InlineData("includeDeclaration", "boolean")]
+    [InlineData("referenceFile", "string")]
+    [InlineData("projectPath", "string")]
+    public void GetDefinition_HasScopingParameters(string name, string type)
+    {
+        SchemaAssert.HasOptionalProperty(_tool, name, type);
+    }
+
     #endregion
 
     #region ExecuteAsync Argument Validation Tests

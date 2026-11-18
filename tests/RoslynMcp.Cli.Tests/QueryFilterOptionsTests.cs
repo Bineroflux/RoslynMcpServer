@@ -23,6 +23,9 @@ public class QueryFilterOptionsTests
     [InlineData("search-symbols", "--project-path")]
     [InlineData("search-symbols", "--namespace-filter")]
     [InlineData("search-symbols", "--source-file")]
+    [InlineData("find-references", "--include-declaration")]
+    [InlineData("find-references", "--reference-file")]
+    [InlineData("find-references", "--project-path")]
     public void ToolHelp_ListsTheOption(string toolName, string option)
     {
         var tool = ToolRegistry.BuildDefault().GetTool(toolName)!;

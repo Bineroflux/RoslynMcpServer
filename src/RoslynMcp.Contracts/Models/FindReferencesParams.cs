@@ -29,4 +29,20 @@ public sealed class FindReferencesParams
     /// Maximum number of references to return.
     /// </summary>
     public int? MaxResults { get; init; }
+
+    /// <summary>
+    /// Whether the symbol's declarations are included. Default: true; false returns usages only.
+    /// </summary>
+    public bool? IncludeDeclaration { get; init; }
+
+    /// <summary>
+    /// Absolute path to a source file. Only references located in it.
+    /// </summary>
+    public string? ReferenceFile { get; init; }
+
+    /// <summary>
+    /// Absolute path to a project file of the solution. Only references located in that
+    /// project (every target framework of it).
+    /// </summary>
+    public string? ProjectPath { get; init; }
 }

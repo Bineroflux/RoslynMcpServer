@@ -4,6 +4,7 @@ using RoslynMcp.Contracts.Errors;
 using RoslynMcp.Contracts.Models;
 using RoslynMcp.Core.FileSystem;
 using RoslynMcp.Core.Query.Base;
+using RoslynMcp.Core.Query.Utilities;
 using RoslynMcp.Core.Refactoring;
 using RoslynMcp.Core.Workspace;
 
@@ -46,6 +47,9 @@ public sealed class FindReferencesOperation : QueryOperationBase<FindReferencesP
 
         if (@params.MaxResults.HasValue && @params.MaxResults.Value < 1)
             throw new RefactoringException(ErrorCodes.MissingRequiredParam, "maxResults must be >= 1.");
+
+        QueryScope.ValidateFilePath(@params.ReferenceFile, "referenceFile");
+        QueryScope.ValidateProjectPath(@params.ProjectPath);
     }
 
     /// <inheritdoc />
@@ -69,11 +73,23 @@ public sealed class FindReferencesOperation : QueryOperationBase<FindReferencesP
         var seen = new HashSet<(string file, int line, int col)>();
         var totalCount = 0;
         var maxResults = @params.MaxResults ?? int.MaxValue;
+        var includeDeclaration = @params.IncludeDeclaration ?? true;
+
+        // The scopes filter every location before it is counted, so totalCount and
+        // truncated describe the filtered set. They also narrow the documents searched.
+        var fileScope = QueryScope.ResolveFile(Context.Solution, @params.ReferenceFile, "referenceFile");
+        var projectScope = QueryScope.ResolveProject(Context.Solution, @params.ProjectPath);
+        var searchDocuments = await QueryScope.GetSearchDocumentsAsync(fileScope, projectScope, cancellationToken);
+
+        bool InScope(Document? document, string path) =>
+            (fileScope is null || fileScope.ContainsFile(path)) &&
+            (projectScope is null || projectScope.Contains(document, path));
 
         foreach (var searchSymbol in symbolsToSearch)
         {
-            var referencedSymbols = await SymbolFinder.FindReferencesAsync(
-                searchSymbol, Context.Solution, cancellationToken);
+            var referencedSymbols = searchDocuments is null
+                ? await SymbolFinder.FindReferencesAsync(searchSymbol, Context.Solution, cancellationToken)
+                : await SymbolFinder.FindReferencesAsync(searchSymbol, Context.Solution, searchDocuments, cancellationToken);
 
             foreach (var referencedSymbol in referencedSymbols)
             {
@@ -82,7 +98,12 @@ public sealed class FindReferencesOperation : QueryOperationBase<FindReferencesP
                 {
                     var lineSpan = defLocation.GetLineSpan();
                     var key = (lineSpan.Path, lineSpan.StartLinePosition.Line, lineSpan.StartLinePosition.Character);
+                    if (!InScope(Context.Solution.GetDocument(defLocation.SourceTree), lineSpan.Path)) continue;
                     if (!seen.Add(key)) continue;
+
+                    // Without declarations the position stays seen, so the result is exactly
+                    // the usages a full search reports (isDefinition: false).
+                    if (!includeDeclaration) continue;
                     totalCount++;
                     if (locations.Count < maxResults)
                     {
@@ -106,6 +127,7 @@ public sealed class FindReferencesOperation : QueryOperationBase<FindReferencesP
                     var span = refLocation.Location.GetLineSpan();
                     var file = refLocation.Document.FilePath ?? span.Path;
                     var key = (file, span.StartLinePosition.Line, span.StartLinePosition.Character);
+                    if (!InScope(refLocation.Document, file)) continue;
                     if (!seen.Add(key)) continue;
                     totalCount++;
 

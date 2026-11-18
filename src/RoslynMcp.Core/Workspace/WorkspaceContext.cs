@@ -65,6 +65,13 @@ public sealed class WorkspaceContext : IDisposable
     public IReadOnlyList<string> GeneratorLoadIssues { get; }
 
     /// <summary>
+    /// Whether a <see cref="GeneratorLoadIssues"/> entry is about the project named
+    /// <paramref name="projectName"/>: the messages name their project ("... for project 'X'").
+    /// </summary>
+    public static bool IssueConcernsProject(string issue, string projectName) =>
+        issue.Contains($"project '{projectName}'", StringComparison.Ordinal);
+
+    /// <summary>
     /// Diagnostics the workspace reported while loading (and while re-evaluating projects
     /// since). Empty for workspaces not loaded through MSBuild.
     /// </summary>

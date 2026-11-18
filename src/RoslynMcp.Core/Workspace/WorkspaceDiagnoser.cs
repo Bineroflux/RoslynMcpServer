@@ -129,9 +129,8 @@ public static class WorkspaceDiagnoser
         TargetFramework = TargetFrameworkOf(project),
         DocumentCount = project.DocumentIds.Count,
         AnalyzerReferences = project.AnalyzerReferences.Select(DescribeAnalyzerReference).ToList(),
-        // The load-failure messages name their project ("... for project 'X'").
         AnalyzerLoadFailures = analyzerIssues
-            .Where(issue => issue.Contains($"project '{project.Name}'", StringComparison.Ordinal))
+            .Where(issue => WorkspaceContext.IssueConcernsProject(issue, project.Name))
             .ToList()
     };
 

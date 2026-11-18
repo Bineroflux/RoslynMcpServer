@@ -35,11 +35,16 @@ public static class PathResolver
         if (string.IsNullOrEmpty(a) || string.IsNullOrEmpty(b))
             return string.IsNullOrEmpty(a) && string.IsNullOrEmpty(b);
 
-        var comparison = OperatingSystem.IsWindows()
-            ? StringComparison.OrdinalIgnoreCase
-            : StringComparison.Ordinal;
-        return string.Equals(NormalizePath(a), NormalizePath(b), comparison);
+        return PathComparer.Equals(NormalizePath(a), NormalizePath(b));
     }
+
+    /// <summary>
+    /// Compares paths already run through <see cref="NormalizePath"/> the way
+    /// <see cref="PathsEqual"/> does: case-insensitively on Windows, case-sensitively
+    /// elsewhere. For sets and dictionaries keyed by normalized paths.
+    /// </summary>
+    public static StringComparer PathComparer { get; } =
+        OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
 
     /// <summary>
     /// Makes a path relative to a base path.

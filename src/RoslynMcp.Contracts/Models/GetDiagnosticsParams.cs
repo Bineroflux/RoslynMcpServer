@@ -15,4 +15,30 @@ public sealed class GetDiagnosticsParams
     /// Valid values: Error, Warning, Info, Hidden, All.
     /// </summary>
     public string? SeverityFilter { get; init; }
+
+    /// <summary>
+    /// Absolute path to a project file of the solution. Only that project (every target
+    /// framework of it) is compiled and reported. If null, the whole solution is.
+    /// </summary>
+    public string? ProjectPath { get; init; }
+
+    /// <summary>
+    /// Diagnostic IDs to include (e.g. CS0168), case-insensitive. If null or empty, all IDs.
+    /// </summary>
+    public IReadOnlyList<string>? DiagnosticIds { get; init; }
+
+    /// <summary>
+    /// Diagnostic IDs to leave out, case-insensitive. Wins over <see cref="DiagnosticIds"/>.
+    /// </summary>
+    public IReadOnlyList<string>? ExcludeDiagnosticIds { get; init; }
+
+    /// <summary>
+    /// Case-insensitive substring the diagnostic message must contain.
+    /// </summary>
+    public string? MessageFilter { get; init; }
+
+    /// <summary>
+    /// Maximum number of diagnostics to return. If null, all of them.
+    /// </summary>
+    public int? MaxResults { get; init; }
 }

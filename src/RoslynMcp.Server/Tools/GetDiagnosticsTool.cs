@@ -52,6 +52,34 @@ public sealed class GetDiagnosticsTool : IToolHandler
                 type = "string",
                 description = "Minimum severity: Error, Warning (default), Info, Hidden, or All",
                 @default = "Warning"
+            },
+            projectPath = new
+            {
+                type = "string",
+                description = "Absolute path to a project file of the solution. Compiles and reports only that project (all its target frameworks)."
+            },
+            diagnosticIds = new
+            {
+                type = "array",
+                items = new { type = "string" },
+                description = "Only these diagnostic IDs (e.g. CS0168), case-insensitive"
+            },
+            excludeDiagnosticIds = new
+            {
+                type = "array",
+                items = new { type = "string" },
+                description = "Leave out these diagnostic IDs, case-insensitive. Wins over diagnosticIds."
+            },
+            messageFilter = new
+            {
+                type = "string",
+                description = "Only diagnostics whose message contains this text (case-insensitive substring)"
+            },
+            maxResults = new
+            {
+                type = "integer",
+                description = "Maximum number of diagnostics to return (default: all). totalCount still counts every match.",
+                minimum = 1
             }
         },
         additionalProperties = false
@@ -75,7 +103,12 @@ public sealed class GetDiagnosticsTool : IToolHandler
             var @params = new GetDiagnosticsParams
             {
                 SourceFile = args.SourceFile,
-                SeverityFilter = args.SeverityFilter
+                SeverityFilter = args.SeverityFilter,
+                ProjectPath = args.ProjectPath,
+                DiagnosticIds = args.DiagnosticIds,
+                ExcludeDiagnosticIds = args.ExcludeDiagnosticIds,
+                MessageFilter = args.MessageFilter,
+                MaxResults = args.MaxResults
             };
 
             var result = await operation.ExecuteAsync(@params, cancellationToken);
@@ -104,5 +137,10 @@ public sealed class GetDiagnosticsTool : IToolHandler
         public string SolutionPath { get; init; } = "";
         public string? SourceFile { get; init; }
         public string? SeverityFilter { get; init; }
+        public string? ProjectPath { get; init; }
+        public IReadOnlyList<string>? DiagnosticIds { get; init; }
+        public IReadOnlyList<string>? ExcludeDiagnosticIds { get; init; }
+        public string? MessageFilter { get; init; }
+        public int? MaxResults { get; init; }
     }
 }

@@ -7,6 +7,7 @@ using RoslynMcp.Contracts.Errors;
 using RoslynMcp.Contracts.Models;
 using RoslynMcp.Core.FileSystem;
 using RoslynMcp.Core.Query.Base;
+using RoslynMcp.Core.Query.Utilities;
 using RoslynMcp.Core.Refactoring;
 using RoslynMcp.Core.Workspace;
 
@@ -46,6 +47,11 @@ public sealed class GetDiagnosticsOperation : QueryOperationBase<GetDiagnosticsP
             var valid = string.Join(", ", Enum.GetNames<DiagnosticSeverityFilter>());
             throw new RefactoringException(ErrorCodes.MissingRequiredParam, $"Invalid severityFilter. Valid values: {valid}");
         }
+
+        QueryScope.ValidateProjectPath(@params.ProjectPath);
+
+        if (@params.MaxResults.HasValue && @params.MaxResults.Value < 1)
+            throw new RefactoringException(ErrorCodes.MissingRequiredParam, "maxResults must be >= 1.");
     }
 
     /// <inheritdoc />
@@ -55,6 +61,8 @@ public sealed class GetDiagnosticsOperation : QueryOperationBase<GetDiagnosticsP
         CancellationToken cancellationToken)
     {
         var severityFilter = ParseSeverityFilter(@params.SeverityFilter);
+        var projectScope = QueryScope.ResolveProject(Context.Solution, @params.ProjectPath);
+        var contentFilter = new DiagnosticContentFilter(@params);
         var diagnostics = new List<DiagnosticInfo>();
 
         // The caller's sourceFile is matched against each diagnostic's span path
@@ -72,11 +80,25 @@ public sealed class GetDiagnosticsOperation : QueryOperationBase<GetDiagnosticsP
         // failed to load) as synthetic info-level diagnostics. Emitted whenever
         // the caller's filter would include informational results — i.e. for
         // anything except an explicit Errors-only request, because the message
-        // explains why their .razor query came back empty.
+        // explains why their .razor query came back empty. A projectPath keeps
+        // only the issues of its project.
         if (severityFilter != DiagnosticSeverityFilter.Error)
         {
-            foreach (var issue in Context.GeneratorLoadIssues)
+            List<string> issues;
+            lock (Context.GeneratorLoadIssues)
             {
+                // The list grows when an analyzer fails to load later; it is locked while it does.
+                issues = Context.GeneratorLoadIssues.ToList();
+            }
+
+            foreach (var issue in issues)
+            {
+                if (projectScope is not null &&
+                    !projectScope.Projects.Any(p => WorkspaceContext.IssueConcernsProject(issue, p.Name)))
+                {
+                    continue;
+                }
+
                 diagnostics.Add(new DiagnosticInfo
                 {
                     Id = "RMCP0001",
@@ -90,7 +112,9 @@ public sealed class GetDiagnosticsOperation : QueryOperationBase<GetDiagnosticsP
             }
         }
 
-        foreach (var project in Context.Solution.Projects)
+        // A projectPath compiles only its own project(s), which is what makes it cheaper.
+        var projects = projectScope?.Projects ?? Context.Solution.Projects;
+        foreach (var project in projects)
         {
             // Roslyn's compilation tracker eagerly enumerates generators across
             // every AnalyzerReference while building the final compilation
@@ -207,10 +231,16 @@ public sealed class GetDiagnosticsOperation : QueryOperationBase<GetDiagnosticsP
             }
         }
 
+        // Filter before truncating, so totalCount counts every match.
+        var matching = diagnostics.Where(contentFilter.Matches).ToList();
+        var maxResults = @params.MaxResults ?? int.MaxValue;
+        var returned = matching.Count > maxResults ? matching.Take(maxResults).ToList() : matching;
+
         var result = new GetDiagnosticsResult
         {
-            Diagnostics = diagnostics,
-            TotalCount = diagnostics.Count
+            Diagnostics = returned,
+            TotalCount = matching.Count,
+            Truncated = matching.Count > returned.Count
         };
 
         return QueryResult<GetDiagnosticsResult>.Succeeded(operationId, result);
@@ -364,6 +394,42 @@ public sealed class GetDiagnosticsOperation : QueryOperationBase<GetDiagnosticsP
         }
 
         return toRemove.Count == 0 ? compilation : compilation.RemoveSyntaxTrees(toRemove);
+    }
+
+    /// <summary>
+    /// The ID and message filters. They apply to every diagnostic, the synthetic
+    /// RMCP0001/RMCP0002 and generator-reported (e.g. RZ) ones included.
+    /// </summary>
+    private sealed class DiagnosticContentFilter
+    {
+        private readonly HashSet<string>? _include;
+        private readonly HashSet<string> _exclude;
+        private readonly string? _message;
+
+        public DiagnosticContentFilter(GetDiagnosticsParams @params)
+        {
+            var include = ToIdSet(@params.DiagnosticIds);
+            _include = include.Count > 0 ? include : null;
+            _exclude = ToIdSet(@params.ExcludeDiagnosticIds);
+            _message = string.IsNullOrEmpty(@params.MessageFilter) ? null : @params.MessageFilter;
+        }
+
+        public bool Matches(DiagnosticInfo diagnostic)
+        {
+            if (_exclude.Contains(diagnostic.Id))
+                return false;
+
+            if (_include is not null && !_include.Contains(diagnostic.Id))
+                return false;
+
+            return _message is null || diagnostic.Message.Contains(_message, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static HashSet<string> ToIdSet(IReadOnlyList<string>? ids) =>
+            (ids ?? [])
+                .Where(id => !string.IsNullOrWhiteSpace(id))
+                .Select(id => id.Trim())
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
     }
 
     private sealed class ProjectAdditionalText : AdditionalText

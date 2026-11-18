@@ -125,6 +125,9 @@ public static class ErrorCodes
     /// <summary>Symbol kind not valid for requested query.</summary>
     public const string InvalidSymbolKind = "2020";
 
+    /// <summary>Project file not part of loaded solution.</summary>
+    public const string ProjectNotInWorkspace = "2021";
+
     // ============================================
     // Semantic Errors (3xxx)
     // ============================================

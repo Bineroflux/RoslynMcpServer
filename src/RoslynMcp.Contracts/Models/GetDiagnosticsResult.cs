@@ -11,9 +11,14 @@ public sealed class GetDiagnosticsResult
     public required IReadOnlyList<DiagnosticInfo> Diagnostics { get; init; }
 
     /// <summary>
-    /// Total count of diagnostics.
+    /// Total count of diagnostics matching the filters (may exceed Diagnostics.Count if truncated).
     /// </summary>
     public required int TotalCount { get; init; }
+
+    /// <summary>
+    /// Whether the result was truncated due to maxResults.
+    /// </summary>
+    public bool Truncated { get; init; }
 }
 
 /// <summary>

@@ -275,7 +275,7 @@ These tools analyze your code without making changes. Use them to understand cod
 
 | Tool | Description | Key Parameters |
 |------|-------------|----------------|
-| `get_diagnostics` | Retrieve compiler diagnostics (errors, warnings, info) filtered by severity and optionally by file. | `sourceFile`, `severityFilter` |
+| `get_diagnostics` | Retrieve compiler diagnostics (errors, warnings, info) filtered by severity and optionally by file, project, ID or message. | `sourceFile`, `severityFilter`, `projectPath`, `diagnosticIds`, `excludeDiagnosticIds`, `messageFilter`, `maxResults` |
 | `get_code_metrics` | Calculate code metrics: cyclomatic complexity, lines of code, maintainability index, class coupling, depth of inheritance. | `sourceFile`, `symbolName`, `line` |
 | `analyze_control_flow` | Analyze control flow for a code region: start/end point reachability, return statements, and exit points. | `sourceFile`, `startLine`, `endLine` |
 | `analyze_data_flow` | Analyze data flow for a code region: variables read/written inside, data flowing in/out, captured variables. | `sourceFile`, `startLine`, `endLine` |

@@ -95,6 +95,113 @@ internal sealed class TestWorkspace : IDisposable
         return new TestWorkspace(directory, new WorkspaceContext(workspace, solution, directory), references);
     }
 
+    /// <summary>A project of a <see cref="CreateSolution"/> workspace.</summary>
+    /// <param name="Name">Project name. Its files live in a directory of that name, next to <c>Name.csproj</c>.</param>
+    /// <param name="Files">Source files, relative to the project directory.</param>
+    /// <param name="References">Names of the projects it references.</param>
+    /// <param name="TargetFrameworks">
+    /// When set, the project is loaded once per framework and named <c>Name(tfm)</c>, all sharing
+    /// one project file and one set of source files, like a multi-targeted MSBuild project. Each
+    /// instance defines the framework, upper-cased, as a preprocessor symbol.
+    /// </param>
+    public sealed record ProjectSpec(
+        string Name,
+        (string Name, string Text)[] Files,
+        string[]? References = null,
+        string[]? TargetFrameworks = null);
+
+    /// <summary>
+    /// A multi-project workspace. Unlike <see cref="Create(ValueTuple{string, string}[])"/>, the
+    /// project files exist on disk (as empty SDK projects), so <c>projectPath</c> arguments resolve.
+    /// </summary>
+    public static TestWorkspace CreateSolution(params ProjectSpec[] projects) =>
+        CreateSolution(projects, generatorLoadIssues: null);
+
+    /// <inheritdoc cref="CreateSolution(ProjectSpec[])"/>
+    /// <param name="projects">The projects.</param>
+    /// <param name="generatorLoadIssues">What the workspace reports as generator load issues.</param>
+    public static TestWorkspace CreateSolution(
+        IReadOnlyList<ProjectSpec> projects, IReadOnlyList<string>? generatorLoadIssues)
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"RoslynMcpServer.TestWorkspace-{Guid.NewGuid():N}");
+        System.IO.Directory.CreateDirectory(directory);
+
+        var references = FrameworkReferences.Value;
+        var workspace = new AdhocWorkspace();
+        var solution = workspace.CurrentSolution;
+        var instances = new Dictionary<string, List<ProjectId>>(StringComparer.Ordinal);
+
+        foreach (var spec in projects)
+        {
+            var projectDirectory = Path.Combine(directory, spec.Name);
+            System.IO.Directory.CreateDirectory(projectDirectory);
+            var projectFile = Path.Combine(projectDirectory, spec.Name + ".csproj");
+            File.WriteAllText(projectFile, "<Project Sdk=\"Microsoft.NET.Sdk\" />");
+
+            foreach (var (name, text) in spec.Files)
+            {
+                var path = Path.Combine(projectDirectory, name);
+                System.IO.Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                File.WriteAllText(path, text);
+            }
+
+            var frameworks = spec.TargetFrameworks is { Length: > 0 } tfms ? tfms : new string?[] { null };
+
+            var ids = new List<ProjectId>();
+            foreach (var framework in frameworks)
+            {
+                var projectName = framework is null ? spec.Name : $"{spec.Name}({framework})";
+                var parseOptions = framework is null
+                    ? ParseOptions
+                    : ParseOptions.WithPreprocessorSymbols(framework.ToUpperInvariant());
+
+                var projectId = ProjectId.CreateNewId();
+                ids.Add(projectId);
+                solution = solution.AddProject(ProjectInfo.Create(
+                    projectId,
+                    VersionStamp.Default,
+                    name: projectName,
+                    assemblyName: spec.Name,
+                    language: LanguageNames.CSharp,
+                    filePath: projectFile,
+                    compilationOptions: CompilationOptions,
+                    parseOptions: parseOptions,
+                    metadataReferences: references));
+
+                foreach (var (name, text) in spec.Files)
+                {
+                    solution = solution.AddDocument(
+                        DocumentId.CreateNewId(projectId),
+                        name,
+                        SourceText.From(text),
+                        filePath: Path.Combine(projectDirectory, name));
+                }
+            }
+
+            instances[spec.Name] = ids;
+        }
+
+        foreach (var spec in projects)
+        {
+            foreach (var referenced in spec.References ?? [])
+            {
+                foreach (var projectId in instances[spec.Name])
+                {
+                    solution = solution.AddProjectReference(projectId, new ProjectReference(instances[referenced][0]));
+                }
+            }
+        }
+
+        var context = new WorkspaceContext(workspace, solution, directory, generatorLoadIssues: generatorLoadIssues);
+        return new TestWorkspace(directory, context, references);
+    }
+
+    /// <summary>Path of a <see cref="CreateSolution"/> project's file.</summary>
+    public string ProjectPathOf(string projectName) => Path.Combine(Directory, projectName, projectName + ".csproj");
+
+    /// <summary>Path of a file of a <see cref="CreateSolution"/> project.</summary>
+    public string PathOf(string projectName, string fileName) => Path.Combine(Directory, projectName, fileName);
+
     /// <summary>Compiles <paramref name="source"/> into an in-memory assembly reference.</summary>
     public static MetadataReference CompileLibrary(string assemblyName, string source)
     {

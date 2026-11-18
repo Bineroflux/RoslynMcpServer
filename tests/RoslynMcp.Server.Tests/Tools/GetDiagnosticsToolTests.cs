@@ -71,6 +71,34 @@ public class GetDiagnosticsToolTests
         Assert.True(properties.TryGetProperty("severityFilter", out _));
     }
 
+    [Theory]
+    [InlineData("projectPath", "string")]
+    [InlineData("diagnosticIds", "array")]
+    [InlineData("excludeDiagnosticIds", "array")]
+    [InlineData("messageFilter", "string")]
+    [InlineData("maxResults", "integer")]
+    public void GetDefinition_HasFilteringParameters(string name, string type)
+    {
+        var json = JsonSerializer.Serialize(_tool.InputSchema);
+        var properties = JsonDocument.Parse(json).RootElement.GetProperty("properties");
+
+        var property = properties.GetProperty(name);
+        Assert.Equal(type, property.GetProperty("type").GetString());
+        Assert.False(string.IsNullOrWhiteSpace(property.GetProperty("description").GetString()));
+        if (type == "array")
+            Assert.Equal("string", property.GetProperty("items").GetProperty("type").GetString());
+    }
+
+    [Fact]
+    public void GetDefinition_FilteringParametersAreOptional()
+    {
+        var json = JsonSerializer.Serialize(_tool.InputSchema);
+        var required = JsonDocument.Parse(json).RootElement.GetProperty("required")
+            .EnumerateArray().Select(e => e.GetString()).ToList();
+
+        Assert.Equal(["solutionPath"], required);
+    }
+
     [Fact]
     public async Task ExecuteAsync_NullArguments_ReturnsError()
     {

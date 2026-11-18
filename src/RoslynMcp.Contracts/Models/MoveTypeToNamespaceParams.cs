@@ -26,7 +26,9 @@ public sealed class MoveTypeToNamespaceParams
     public required string TargetNamespace { get; init; }
 
     /// <summary>
-    /// Also move file to match namespace folder structure. Default: false.
+    /// Also move the file into the folder that matches the target namespace relative to the
+    /// project's root namespace, when that is safe; otherwise the file stays and the result
+    /// reports <c>PARTIAL_SUCCESS</c> with the reason. Default: false.
     /// </summary>
     public bool UpdateFileLocation { get; init; }
 

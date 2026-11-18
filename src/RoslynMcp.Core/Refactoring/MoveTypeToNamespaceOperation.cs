@@ -8,13 +8,16 @@ using RoslynMcp.Contracts.Enums;
 using RoslynMcp.Contracts.Errors;
 using RoslynMcp.Contracts.Models;
 using RoslynMcp.Core.FileSystem;
+using RoslynMcp.Core.Refactoring.Utilities;
 using RoslynMcp.Core.Resolution;
 using RoslynMcp.Core.Workspace;
 
 namespace RoslynMcp.Core.Refactoring;
 
 /// <summary>
-/// Changes the namespace of a type, updating all references across the solution.
+/// Changes the namespace of a type, updating all references across the solution, and with
+/// <c>updateFileLocation</c> moves its file into the matching folder when that is safe
+/// (see <see cref="NamespaceFolderMove.Plan"/>).
 /// </summary>
 public sealed class MoveTypeToNamespaceOperation
 {
@@ -77,13 +80,18 @@ public sealed class MoveTypeToNamespaceOperation
                 references,
                 cancellationToken);
 
+            var move = @params.UpdateFileLocation
+                ? NamespaceFolderMove.Plan(resolution.Document, resolution.Declaration, @params.TargetNamespace, _context.Solution)
+                : null;
+
             // If preview mode, return without applying
             if (@params.Preview)
             {
-                return CreatePreviewResult(operationId, @params, resolution, changeStats);
+                return CreatePreviewResult(operationId, @params, resolution, changeStats, move);
             }
 
-            // Commit changes
+            // Commit changes. The namespace change is written in place, so the file keeps its
+            // encoding; the move below is a plain file system move.
             var commitResult = await _context.CommitChangesAsync(newSolution, cancellationToken);
 
             if (!commitResult.Success)
@@ -91,6 +99,46 @@ public sealed class MoveTypeToNamespaceOperation
                 throw new RefactoringException(
                     ErrorCodes.FilesystemError,
                     $"Failed to write files: {commitResult.Error}");
+            }
+
+            var sourcePath = resolution.Document.FilePath!;
+            var filesModified = commitResult.FilesModified.ToList();
+            var filesCreated = commitResult.FilesCreated.ToList();
+            var filesDeleted = commitResult.FilesDeleted.ToList();
+            var skipReason = move?.SkipReason;
+            string? movedTo = null;
+            if (move?.TargetPath is { } targetPath)
+            {
+                try
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
+                    File.Move(sourcePath, targetPath);
+                    movedTo = targetPath;
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    skipReason = $"moving it to '{targetPath}' failed: {ex.Message}";
+                }
+            }
+
+            if (movedTo != null)
+            {
+                // Repoint the cached document, so the solution matches disk without waiting
+                // for the file watcher (which then finds the document already in place).
+                // A multi-targeted project holds the file once per target framework.
+                var solution = _context.Solution;
+                foreach (var documentId in solution.GetDocumentIdsWithFilePath(sourcePath))
+                {
+                    solution = solution
+                        .WithDocumentFilePath(documentId, movedTo)
+                        .WithDocumentFolders(documentId, move!.Folders);
+                }
+
+                _context.UpdateSolution(solution);
+
+                filesModified.RemoveAll(f => PathResolver.PathsEqual(f, sourcePath));
+                filesCreated.Add(movedTo);
+                filesDeleted.Add(sourcePath);
             }
 
             stopwatch.Stop();
@@ -101,15 +149,16 @@ public sealed class MoveTypeToNamespaceOperation
                 OperationId = operationId,
                 Changes = new FileChanges
                 {
-                    FilesModified = commitResult.FilesModified,
-                    FilesCreated = commitResult.FilesCreated,
-                    FilesDeleted = commitResult.FilesDeleted
+                    FilesModified = filesModified,
+                    FilesCreated = filesCreated,
+                    FilesDeleted = filesDeleted
                 },
-                Symbol = CreateSymbolInfo(resolution, @params.TargetNamespace),
+                Symbol = CreateSymbolInfo(resolution, @params.TargetNamespace, movedTo),
                 ReferencesUpdated = references.TotalReferenceCount,
                 UsingDirectivesAdded = changeStats.UsingsAdded,
                 UsingDirectivesRemoved = changeStats.UsingsRemoved,
-                ExecutionTimeMs = stopwatch.ElapsedMilliseconds
+                ExecutionTimeMs = stopwatch.ElapsedMilliseconds,
+                Error = FileNotMovedWarning(skipReason)
             };
         }
         catch (RefactoringException)
@@ -298,6 +347,8 @@ public sealed class MoveTypeToNamespaceOperation
         var compilationUnit = root as CompilationUnitSyntax;
         if (compilationUnit == null) return (document, 0, 0);
 
+        var lineEnding = await LineEndings.GetAsync(document, cancellationToken);
+
         var usings = compilationUnit.Usings.ToList();
         var hasOldUsing = usings.Any(u => u.Name?.ToString() == oldNamespace);
         var hasNewUsing = usings.Any(u => u.Name?.ToString() == newNamespace);
@@ -305,12 +356,13 @@ public sealed class MoveTypeToNamespaceOperation
         var added = 0;
         var removed = 0;
 
-        // Add using for new namespace if not present
+        // Add using for new namespace if not present, ending in the file's line ending; a
+        // file without usings gets a blank line between the new using and its code.
         if (!hasNewUsing)
         {
             var newUsing = SyntaxFactory.UsingDirective(
                     SyntaxFactory.ParseName(newNamespace).WithLeadingTrivia(SyntaxFactory.Space))
-                .WithTrailingTrivia(SyntaxFactory.CarriageReturnLineFeed);
+                .WithTrailingTrivia(Enumerable.Repeat(SyntaxFactory.EndOfLine(lineEnding), usings.Count == 0 ? 2 : 1));
             usings.Add(newUsing);
             added = 1;
         }
@@ -324,7 +376,14 @@ public sealed class MoveTypeToNamespaceOperation
         return (newDoc, added, removed);
     }
 
-    private Contracts.Models.SymbolInfo CreateSymbolInfo(SymbolResolutionResult resolution, string newNamespace)
+    private static RefactoringError? FileNotMovedWarning(string? skipReason) =>
+        skipReason == null
+            ? null
+            : RefactoringError.Create(
+                "PARTIAL_SUCCESS",
+                $"The namespace was changed, but the file was not moved: {skipReason}.");
+
+    private Contracts.Models.SymbolInfo CreateSymbolInfo(SymbolResolutionResult resolution, string newNamespace, string? movedTo = null)
     {
         var oldNamespace = resolution.Symbol.ContainingNamespace.ToDisplayString();
         var location = resolution.Declaration.GetLocation().GetLineSpan();
@@ -341,7 +400,15 @@ public sealed class MoveTypeToNamespaceOperation
                 File = resolution.Document.FilePath!,
                 Line = location.StartLinePosition.Line + 1,
                 Column = location.StartLinePosition.Character + 1
-            }
+            },
+            NewLocation = movedTo == null
+                ? null
+                : new SymbolLocation
+                {
+                    File = movedTo,
+                    Line = location.StartLinePosition.Line + 1,
+                    Column = location.StartLinePosition.Character + 1
+                }
         };
     }
 
@@ -363,7 +430,8 @@ public sealed class MoveTypeToNamespaceOperation
         Guid operationId,
         MoveTypeToNamespaceParams @params,
         SymbolResolutionResult resolution,
-        ChangeStats stats)
+        ChangeStats stats,
+        NamespaceFolderMove? move)
     {
         var pendingChanges = new List<PendingChange>
         {
@@ -385,7 +453,33 @@ public sealed class MoveTypeToNamespaceOperation
             });
         }
 
-        return RefactoringResult.PreviewResult(operationId, pendingChanges);
+        if (move?.TargetPath != null)
+        {
+            pendingChanges.Add(new PendingChange
+            {
+                File = move.TargetPath,
+                ChangeType = ChangeKind.Create,
+                Description = $"Move {Path.GetFileName(resolution.Document.FilePath)} here (namespace folder)"
+            });
+            pendingChanges.Add(new PendingChange
+            {
+                File = resolution.Document.FilePath!,
+                ChangeType = ChangeKind.Delete,
+                Description = $"Moved to {move.TargetPath}"
+            });
+        }
+
+        var preview = RefactoringResult.PreviewResult(operationId, pendingChanges);
+        return move?.SkipReason == null
+            ? preview
+            : new RefactoringResult
+            {
+                Success = true,
+                OperationId = preview.OperationId,
+                Preview = true,
+                PendingChanges = preview.PendingChanges,
+                Error = FileNotMovedWarning(move.SkipReason)
+            };
     }
 
     private sealed class ChangeStats

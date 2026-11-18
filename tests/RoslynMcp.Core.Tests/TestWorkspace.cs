@@ -48,10 +48,12 @@ internal sealed class TestWorkspace : IDisposable
     /// <param name="files">Source files, written to disk exactly as given.</param>
     /// <param name="extraReferences">References besides the framework.</param>
     /// <param name="editorConfig">Content of an <c>.editorconfig</c> next to the files, if any.</param>
+    /// <param name="defaultNamespace">The project's root namespace (<c>RootNamespace</c>), if any.</param>
     public static TestWorkspace Create(
         IEnumerable<(string Name, string Text)> files,
         IEnumerable<MetadataReference> extraReferences,
-        string? editorConfig = null)
+        string? editorConfig = null,
+        string? defaultNamespace = null)
     {
         var directory = Path.Combine(Path.GetTempPath(), $"RoslynMcpServer.TestWorkspace-{Guid.NewGuid():N}");
         System.IO.Directory.CreateDirectory(directory);
@@ -68,7 +70,7 @@ internal sealed class TestWorkspace : IDisposable
             filePath: Path.Combine(directory, "TestProject.csproj"),
             compilationOptions: CompilationOptions,
             parseOptions: ParseOptions,
-            metadataReferences: references));
+            metadataReferences: references).WithDefaultNamespace(defaultNamespace));
 
         if (editorConfig != null)
         {
@@ -112,6 +114,9 @@ internal sealed class TestWorkspace : IDisposable
 
         return MetadataReference.CreateFromImage(stream.ToArray());
     }
+
+    /// <summary>Path of the project file the workspace's project claims (not created on disk).</summary>
+    public string ProjectFilePath => Path.Combine(Directory, "TestProject.csproj");
 
     public string PathOf(string name) => Path.Combine(Directory, name);
 

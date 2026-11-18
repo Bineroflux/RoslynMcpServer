@@ -65,7 +65,7 @@ public sealed class MoveTypeToNamespaceTool : IToolHandler
             updateFileLocation = new
             {
                 type = "boolean",
-                description = "Also move file to match namespace folder structure",
+                description = "Also move the file into the folder that matches the new namespace below the project's root namespace (RootNamespace App, App.Services.Auth -> <projectDir>/Services/Auth/). Only done when safe: SDK-style project with default compile items, no <Compile> item that treats the old and new path differently, the file holds only this type, and the target is free. Otherwise the file stays and the result explains why (PARTIAL_SUCCESS).",
                 @default = false
             },
             preview = new

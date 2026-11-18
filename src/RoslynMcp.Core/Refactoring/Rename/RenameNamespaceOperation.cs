@@ -159,6 +159,14 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
                 filesCreated.Add(outcome.MovedTo);
                 filesDeleted.Add(outcome.SourcePath);
                 emptied.Add((Path.GetDirectoryName(outcome.SourcePath)!, Path.GetDirectoryName(plans[i].ProjectFile)!));
+
+                // The compiler errors were found before the move; name the file where it is now.
+                var movedFrom = outcome.SourcePath + "(";
+                for (var w = 0; w < warnings.Count; w++)
+                {
+                    if (warnings[w].StartsWith(movedFrom, StringComparison.OrdinalIgnoreCase))
+                        warnings[w] = outcome.MovedTo + warnings[w][outcome.SourcePath.Length..];
+                }
             }
 
             DeleteEmptiedFolders(emptied);

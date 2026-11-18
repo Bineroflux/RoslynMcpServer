@@ -393,7 +393,7 @@ public sealed class WorkspaceCacheBehaviorTests
     }
 
     [Fact]
-    public async Task ApplyExternalTextChangeAsync_WhileOperationHoldsLease_DoesNotMutateSolution()
+    public async Task SyncDocumentFromDiskAsync_WhileOperationHoldsLease_DoesNotMutateSolution()
     {
         if (!ModuleInitializer.MsBuildAvailable)
         {
@@ -424,10 +424,11 @@ public sealed class WorkspaceCacheBehaviorTests
                 await TypeExistsInWorkspaceAsync(holder, markerClassName, ct),
                 $"Marker type '{markerClassName}' unexpectedly exists before the update.");
 
-            // Start the file update. EnterFileUpdateAsync increments the pending
-            // counter synchronously before the first await, so the gate has
+            // Edit the file, then start the file update. EnterFileUpdateAsync increments
+            // the pending counter synchronously before the first await, so the gate has
             // registered the pending update by the time the call returns.
-            var updateTask = holder.ApplyExternalTextChangeAsync(modelsPath, newText, ct);
+            await File.WriteAllTextAsync(modelsPath, newText, ct);
+            var updateTask = holder.SyncDocumentFromDiskAsync(modelsPath, ct);
 
             // Give the update generous time to (incorrectly) apply if the gate
             // failed. A single 100 ms quantum is long enough for the state
@@ -459,7 +460,7 @@ public sealed class WorkspaceCacheBehaviorTests
     }
 
     [Fact]
-    public async Task ApplyExternalTextChangeAsync_WhenOperationsRaceForLease_UpdatesWinPriority()
+    public async Task SyncDocumentFromDiskAsync_WhenOperationsRaceForLease_UpdatesWinPriority()
     {
         if (!ModuleInitializer.MsBuildAvailable)
         {
@@ -488,8 +489,9 @@ public sealed class WorkspaceCacheBehaviorTests
         var blocker = await provider.CreateContextAsync(working.SolutionPath, ct);
         try
         {
-            // 2. Queue the file update. It waits because `blocker` is active.
-            var updateTask = blocker.ApplyExternalTextChangeAsync(modelsPath, newText, ct);
+            // 2. Edit the file and queue the file update. It waits because `blocker` is active.
+            await File.WriteAllTextAsync(modelsPath, newText, ct);
+            var updateTask = blocker.SyncDocumentFromDiskAsync(modelsPath, ct);
 
             // 3. Fan out contending operations. Each one records whether the
             //    marker class was visible the instant it acquired its lease.

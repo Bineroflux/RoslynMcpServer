@@ -150,7 +150,7 @@ public sealed class WorkspaceContext : IDisposable
     /// code-only edit can still be applied incrementally. Always false for ordinary
     /// project/solution-backed workspaces.
     /// </summary>
-    internal bool ShouldReloadOnSourceChange(string filePath, string newText)
+    internal bool ShouldReloadOnSourceChange(string filePath, SourceText newText)
     {
         if (_fileBasedProgram is null) return false;
         if (!string.Equals(
@@ -159,7 +159,7 @@ public sealed class WorkspaceContext : IDisposable
                 StringComparison.OrdinalIgnoreCase))
             return false;
 
-        var newSignature = FileBasedProgramProject.ComputeDirectiveSignature(newText);
+        var newSignature = FileBasedProgramProject.ComputeDirectiveSignature(newText.ToString());
         return !string.Equals(newSignature, _fileBasedProgram.DirectiveSignature, StringComparison.Ordinal);
     }
 
@@ -190,35 +190,57 @@ public sealed class WorkspaceContext : IDisposable
     internal void ExitOperation() => _gate.ExitOperation();
 
     /// <summary>
-    /// Applies an external text change to the in-memory solution snapshot.
+    /// Completes once a filesystem-driven update (<see cref="SyncDocumentFromDiskAsync"/> or
+    /// <see cref="ReconcileProjectDocumentsAsync"/>) is waiting for, or holding, its exclusive
+    /// lease. For tests that order an update against an operation deterministically.
+    /// </summary>
+    internal Task WaitUntilFileUpdateQueuedAsync(CancellationToken cancellationToken)
+        => _gate.WaitUntilFileUpdateQueuedAsync(cancellationToken);
+
+    /// <summary>
+    /// Brings the documents at <paramref name="filePath"/> in line with the file on disk.
     /// Called by the cache in response to filesystem change events.
     /// </summary>
     /// <returns>
-    /// True if at least one document in the solution matched <paramref name="filePath"/>
-    /// and was updated; false if the path is not (yet) part of the workspace — which the
-    /// caller uses to tell "edit to a known file" (apply incrementally) apart from "a
-    /// brand-new file appeared" (needs a reload so MSBuild can place it).
+    /// What the file and the solution looked like while the lease was held; see
+    /// <see cref="DiskSyncOutcome"/>. The caller uses <see cref="DiskSyncOutcome.NotTracked"/>
+    /// to tell "edit to a known file" apart from "a brand-new file appeared" (which needs a
+    /// project re-evaluation so MSBuild can place it).
     /// </returns>
     /// <remarks>
-    /// Waits for the exclusive file-update lease so the mutation only runs
-    /// when no operation is active; once queued, the gate prioritises it over
-    /// newly arriving operations.
+    /// The file is read only once the exclusive file-update lease is held. An operation writes
+    /// its files and updates <see cref="Solution"/> within its own lease, so while this lease
+    /// is held no operation is active and the disk holds every edit committed so far: the text
+    /// applied here is never older than the solution's. Reading the file before waiting for the
+    /// lease let an operation commit a newer edit in between, which the older text then
+    /// overwrote — and the next operation wrote that older text back to disk. A document whose
+    /// text already matches the disk is left alone, so its compilation stays cached. Once
+    /// queued, the gate prioritises this update over newly arriving operations.
     /// </remarks>
-    internal async Task<bool> ApplyExternalTextChangeAsync(
+    internal async Task<DiskSyncOutcome> SyncDocumentFromDiskAsync(
         string filePath,
-        string newText,
         CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
 
-        await _gate.EnterFileUpdateAsync(cancellationToken);
+        await _gate.EnterFileUpdateAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            if (_disposed) return false;
+            ThrowIfDisposed();
+
+            var text = await TryReadSourceTextAsync(filePath, cancellationToken).ConfigureAwait(false);
+            if (text == null)
+                return DiskSyncOutcome.Missing;
+
+            // A file-based program whose #: directives changed has to be rebuilt; leave the
+            // solution as it is for the caller to invalidate.
+            if (ShouldReloadOnSourceChange(filePath, text))
+                return DiskSyncOutcome.ReloadRequired;
+
             var normalized = PathResolver.NormalizePath(filePath);
             var sol = _solution;
-            var sourceText = SourceText.From(newText);
-            var updated = false;
+            var tracked = false;
+            var changed = false;
             foreach (var project in sol.Projects)
             {
                 foreach (var doc in project.Documents)
@@ -227,13 +249,23 @@ public sealed class WorkspaceContext : IDisposable
                     if (!PathResolver.PathComparer.Equals(PathResolver.NormalizePath(doc.FilePath), normalized))
                         continue;
 
-                    sol = sol.WithDocumentText(doc.Id, sourceText, PreservationMode.PreserveIdentity);
-                    updated = true;
+                    tracked = true;
+                    var current = await doc.GetTextAsync(cancellationToken).ConfigureAwait(false);
+                    if (current.ContentEquals(text))
+                        continue;
+
+                    sol = sol.WithDocumentText(doc.Id, text, PreservationMode.PreserveIdentity);
+                    changed = true;
                 }
             }
-            if (updated)
-                _solution = sol;
-            return updated;
+
+            if (!tracked)
+                return DiskSyncOutcome.NotTracked;
+            if (!changed)
+                return DiskSyncOutcome.Unchanged;
+
+            _solution = sol;
+            return DiskSyncOutcome.Updated;
         }
         finally
         {
@@ -846,6 +878,30 @@ public sealed class WorkspaceContext : IDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
     }
+}
+
+/// <summary>
+/// Outcome of <see cref="WorkspaceContext.SyncDocumentFromDiskAsync"/>.
+/// </summary>
+internal enum DiskSyncOutcome
+{
+    /// <summary>The file is tracked and differed from the solution, which now holds its text.</summary>
+    Updated,
+
+    /// <summary>The file is tracked and the solution already held its text; nothing changed.</summary>
+    Unchanged,
+
+    /// <summary>The file is on disk, but no document in the solution has its path.</summary>
+    NotTracked,
+
+    /// <summary>The file is absent (or stayed unreadable); the solution is untouched.</summary>
+    Missing,
+
+    /// <summary>
+    /// A file-based program's <c>#:</c> directives changed, so the workspace has to be rebuilt;
+    /// the solution is untouched.
+    /// </summary>
+    ReloadRequired,
 }
 
 /// <summary>

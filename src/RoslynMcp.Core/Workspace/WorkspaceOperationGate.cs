@@ -137,6 +137,27 @@ internal sealed class WorkspaceOperationGate
         }
     }
 
+    /// <summary>
+    /// Completes once a file update is waiting for, or holding, the exclusive lease. Lets a
+    /// test order its steps without timing guesses: start a reconciliation while holding an
+    /// operation lease, wait here until it has queued, then act as an operation would before
+    /// releasing the lease.
+    /// </summary>
+    internal async Task WaitUntilFileUpdateQueuedAsync(CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            Task wait;
+            lock (_sync)
+            {
+                if (_pendingFileUpdates > 0 || _fileUpdateActive)
+                    return;
+                wait = _stateChanged.Task;
+            }
+            await wait.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+    }
+
     private void SignalStateChange()
     {
         // Called under _sync. RunContinuationsAsynchronously ensures continuations

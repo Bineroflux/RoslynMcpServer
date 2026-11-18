@@ -14,8 +14,10 @@ namespace RoslynMcp.Core.Workspace;
 /// - Acquire is lock-free (CAS on ref count) and tombstone-aware.
 /// - Cache-miss loads are de-duplicated per path via a <see cref="SemaphoreSlim"/>,
 ///   so ten parallel calls against a cold workspace pay the MSBuild cost once.
-/// - Text updates are applied under <see cref="WorkspaceContext"/>'s commit lock,
-///   so they never race with an in-flight refactoring commit.
+/// - Watcher-driven updates run under <see cref="WorkspaceContext"/>'s exclusive
+///   file-update lease, which no operation holds at the same time, and read the disk only
+///   inside it — so they never race with an in-flight refactoring commit, nor apply text
+///   older than one that committed while they waited.
 /// - Project-file changes (<c>.csproj</c>, <c>.sln</c>, etc.) invalidate the entry
 ///   rather than attempting an incremental reload.
 /// </remarks>
@@ -536,43 +538,47 @@ public sealed class WorkspaceCache : IDisposable
 
             try
             {
-                var text = await TryReadAllTextAsync(filePath);
-                if (text != null)
+                // The context reads the file itself, inside its exclusive file-update lease.
+                // Text read here, before that lease, could predate an edit that an operation
+                // commits while this update waits — and would then overwrite it.
+                var outcome = await Context.SyncDocumentFromDiskAsync(filePath).ConfigureAwait(false);
+                if (outcome == DiskSyncOutcome.Missing)
                 {
-                    // A standalone file-based program whose #: directives changed must be
-                    // rebuilt from scratch — the resolved references/SDK/properties may now
-                    // differ, which an in-place text update can't capture. A code-only edit
-                    // falls through to the normal incremental update.
-                    if (Context.ShouldReloadOnSourceChange(filePath, text))
+                    // Not readable right now. An atomic save deletes then renames into place,
+                    // so confirm the file is really gone before treating it as a deletion.
+                    if (await StillMissingAsync(filePath).ConfigureAwait(false))
                     {
-                        _cache.LogCallback?.Invoke(
-                            $"File-based program directives changed in '{filePath}'; invalidating '{_key}' to rebuild.");
-                        _cache.Invalidate(_key);
+                        if (IsTombstoned(Volatile.Read(ref _state))) return;
+                        // Only a file the workspace actually tracks warrants a re-evaluation;
+                        // a stray deletion elsewhere under the project cone is irrelevant. The
+                        // re-evaluation checks the disk again under the lease, so a stale
+                        // answer here costs at most a redundant evaluation.
+                        if (Context.GetDocumentByPath(filePath) != null)
+                            ScheduleOwningProjectReeval(filePath);
                         return;
                     }
 
-                    var applied = await Context.ApplyExternalTextChangeAsync(filePath, text);
-                    if (!applied && looksNew && !IsUnderIntermediateOutput(filePath))
-                        ScheduleOwningProjectReeval(filePath);
-                    return;
+                    // Reappeared — the atomic write landed; sync again (under the lease, so
+                    // whatever has been written since is what gets applied).
+                    outcome = await Context.SyncDocumentFromDiskAsync(filePath).ConfigureAwait(false);
                 }
 
-                // Not readable right now. An atomic save deletes then renames into place,
-                // so confirm the file is really gone before treating it as a deletion.
-                if (await StillMissingAsync(filePath))
+                // Updated / Unchanged: done. NotTracked after a mere content change: not ours.
+                // Missing again right after reappearing: the event for its next change settles it.
+                switch (outcome)
                 {
-                    if (IsTombstoned(Volatile.Read(ref _state))) return;
-                    // Only a file the workspace actually tracks warrants a re-evaluation;
-                    // a stray deletion elsewhere under the project cone is irrelevant.
-                    if (Context.GetDocumentByPath(filePath) != null)
+                    case DiskSyncOutcome.ReloadRequired:
+                        // A standalone file-based program whose #: directives changed must be
+                        // rebuilt from scratch — the resolved references/SDK/properties may now
+                        // differ, which an in-place text update can't capture.
+                        _cache.LogCallback?.Invoke(
+                            $"File-based program directives changed in '{filePath}'; invalidating '{_key}' to rebuild.");
+                        _cache.Invalidate(_key);
+                        break;
+
+                    case DiskSyncOutcome.NotTracked when looksNew && !IsUnderIntermediateOutput(filePath):
                         ScheduleOwningProjectReeval(filePath);
-                }
-                else
-                {
-                    // Reappeared — the atomic write landed; pick up the new content.
-                    var reread = await TryReadAllTextAsync(filePath);
-                    if (reread != null)
-                        await Context.ApplyExternalTextChangeAsync(filePath, reread);
+                        break;
                 }
             }
             catch (ObjectDisposedException)
@@ -637,31 +643,6 @@ public sealed class WorkspaceCache : IDisposable
             var sep = Path.DirectorySeparatorChar;
             return normalized.Contains($"{sep}obj{sep}", StringComparison.OrdinalIgnoreCase)
                 || normalized.Contains($"{sep}bin{sep}", StringComparison.OrdinalIgnoreCase);
-        }
-
-        /// <summary>
-        /// Reads a file's text, retrying briefly on IO contention (editors touch a file
-        /// several times during save). Returns null if the file is absent or unreadable.
-        /// </summary>
-        private static async Task<string?> TryReadAllTextAsync(string filePath)
-        {
-            const int maxAttempts = 4;
-            for (var attempt = 1; attempt <= maxAttempts; attempt++)
-            {
-                try
-                {
-                    // Read via a shared stream so editors holding the file open don't block us.
-                    using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read,
-                        FileShare.ReadWrite | FileShare.Delete);
-                    using var reader = new StreamReader(fs);
-                    return await reader.ReadToEndAsync();
-                }
-                catch (FileNotFoundException) { return null; }
-                catch (DirectoryNotFoundException) { return null; }
-                catch (IOException) when (attempt < maxAttempts) { await Task.Delay(50 * attempt); }
-                catch (UnauthorizedAccessException) when (attempt < maxAttempts) { await Task.Delay(50 * attempt); }
-            }
-            return null;
         }
 
         /// <summary>

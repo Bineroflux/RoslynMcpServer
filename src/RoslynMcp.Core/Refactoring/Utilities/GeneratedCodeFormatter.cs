@@ -8,8 +8,8 @@ namespace RoslynMcp.Core.Refactoring.Utilities;
 /// Lays out code that operations generate. Generated syntax is built at column 0, so it is
 /// marked with <see cref="Formatter.Annotation"/> and only the marked nodes (plus the
 /// whitespace right around them) are formatted before the commit: they get the
-/// indentation and line breaks of their surroundings while the rest of the file stays
-/// exactly as it was.
+/// indentation, line breaks and line ending of their surroundings while the rest of the
+/// file stays exactly as it was.
 /// </summary>
 internal static class GeneratedCodeFormatter
 {
@@ -33,21 +33,46 @@ internal static class GeneratedCodeFormatter
             .WithTrailingTrivia(SyntaxFactory.ElasticCarriageReturnLineFeed));
 
     /// <summary>
-    /// Formats the marked nodes of one document of <paramref name="solution"/>.
+    /// Formats the marked nodes of <paramref name="originalDocument"/>'s counterpart in
+    /// <paramref name="solution"/>, using the line ending of the original document.
     /// </summary>
     public static async Task<Solution> FormatAsync(
         Solution solution,
-        DocumentId documentId,
+        Document originalDocument,
         CancellationToken cancellationToken)
     {
-        var document = solution.GetDocument(documentId);
+        var document = solution.GetDocument(originalDocument.Id);
         if (document == null)
         {
             return solution;
         }
 
-        var formatted = await Formatter.FormatAsync(
-            document, Formatter.Annotation, cancellationToken: cancellationToken);
-        return formatted.Project.Solution;
+        var lineEnding = await LineEndings.GetAsync(originalDocument, cancellationToken);
+        document = await Formatter.FormatAsync(document, Formatter.Annotation, cancellationToken: cancellationToken);
+
+        // Generated nodes carry NormalizeWhitespace's CRLFs and the formatter writes its own
+        // NewLine; give every line break it may have touched (inside the marked nodes and
+        // between them and their neighbouring tokens) the document's line ending.
+        var root = await document.GetSyntaxRootAsync(cancellationToken);
+        if (root == null)
+        {
+            return document.Project.Solution;
+        }
+
+        var lineBreaks = root.GetAnnotatedNodes(Formatter.Annotation)
+            .SelectMany(node => node.DescendantTrivia()
+                .Concat(node.GetFirstToken().GetPreviousToken().TrailingTrivia)
+                .Concat(node.GetLastToken().GetNextToken().LeadingTrivia))
+            .Where(trivia => trivia.IsKind(SyntaxKind.EndOfLineTrivia) && trivia.ToString() != lineEnding)
+            .Distinct()
+            .ToList();
+
+        if (lineBreaks.Count > 0)
+        {
+            root = root.ReplaceTrivia(lineBreaks, (_, _) => SyntaxFactory.EndOfLine(lineEnding));
+            document = document.WithSyntaxRoot(root);
+        }
+
+        return document.Project.Solution;
     }
 }

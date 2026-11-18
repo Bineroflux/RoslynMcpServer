@@ -212,7 +212,7 @@ public sealed class EncapsulateFieldOperation : RefactoringOperationBase<Encapsu
             }
         }
 
-        newSolution = await GeneratedCodeFormatter.FormatAsync(newSolution, document.Id, cancellationToken);
+        newSolution = await GeneratedCodeFormatter.FormatAsync(newSolution, document, cancellationToken);
 
         // Commit changes
         var commitResult = await CommitChangesAsync(newSolution, cancellationToken);

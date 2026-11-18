@@ -115,7 +115,7 @@ public sealed class AddNullChecksOperation : RefactoringOperationBase<AddNullChe
         var newRoot = root.ReplaceNode(methodNode, newMethodNode);
         var newDocument = document.WithSyntaxRoot(newRoot);
         var newSolution = await GeneratedCodeFormatter.FormatAsync(
-            newDocument.Project.Solution, document.Id, cancellationToken);
+            newDocument.Project.Solution, document, cancellationToken);
         var commitResult = await CommitChangesAsync(newSolution, cancellationToken);
 
         return RefactoringResult.Succeeded(operationId,

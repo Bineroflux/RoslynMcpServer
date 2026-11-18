@@ -2,6 +2,7 @@ using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.Editing;
+using Microsoft.CodeAnalysis.Text;
 using RoslynMcp.Contracts.Enums;
 using RoslynMcp.Contracts.Errors;
 using RoslynMcp.Contracts.Models;
@@ -189,7 +190,7 @@ public sealed class ExtractBaseClassOperation : RefactoringOperationBase<Extract
             }
         }
 
-        newSolution = await GeneratedCodeFormatter.FormatAsync(newSolution, document.Id, cancellationToken);
+        newSolution = await GeneratedCodeFormatter.FormatAsync(newSolution, document, cancellationToken);
 
         // Commit changes
         var commitResult = await CommitChangesAsync(newSolution, cancellationToken);
@@ -309,7 +310,7 @@ public sealed class ExtractBaseClassOperation : RefactoringOperationBase<Extract
         return member;
     }
 
-    private Task<Solution> CreateBaseClassInNewFileAsync(
+    private static async Task<Solution> CreateBaseClassInNewFileAsync(
         Solution solution,
         Project project,
         string targetFile,
@@ -335,18 +336,20 @@ public sealed class ExtractBaseClassOperation : RefactoringOperationBase<Extract
             wrappedClass = baseClass;
         }
 
+        // Create the new document empty first: its line ending can only come from its
+        // .editorconfig (or the platform default) since there is no text to go by.
+        var newDoc = project.AddDocument(
+            Path.GetFileName(targetFile),
+            SourceText.From(string.Empty),
+            filePath: targetFile);
+        var lineEnding = await LineEndings.GetAsync(newDoc, cancellationToken);
+
         var compilationUnit = SyntaxFactory.CompilationUnit()
             .WithUsings(SyntaxFactory.List(usings))
             .WithMembers(SyntaxFactory.SingletonList(wrappedClass))
-            .NormalizeWhitespace();
+            .NormalizeWhitespace(eol: lineEnding);
 
-        // Create new document
-        var newDoc = project.AddDocument(
-            Path.GetFileName(targetFile),
-            compilationUnit,
-            filePath: targetFile);
-
-        return Task.FromResult(newDoc.Project.Solution);
+        return newDoc.WithSyntaxRoot(compilationUnit).Project.Solution;
     }
 
     private static Solution AddBaseClassToSameFile(

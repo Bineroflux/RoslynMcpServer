@@ -7,6 +7,7 @@ using RoslynMcp.Contracts.Models;
 using RoslynMcp.Core.FileSystem;
 using RoslynMcp.Core.Refactoring.Base;
 using RoslynMcp.Core.Refactoring.Organize.Utilities;
+using RoslynMcp.Core.Refactoring.Utilities;
 using RoslynMcp.Core.Workspace;
 
 namespace RoslynMcp.Core.Refactoring.Organize;
@@ -169,18 +170,8 @@ public sealed class AddMissingUsingsOperation : RefactoringOperationBase<AddMiss
         }
 
         // Add the using directives
-        var newUsingDirectives = newUsings
-            .Select(n => SyntaxFactory.UsingDirective(
-                    SyntaxFactory.ParseName(n).WithLeadingTrivia(SyntaxFactory.Space))
-                .WithTrailingTrivia(SyntaxFactory.CarriageReturnLineFeed))
-            .ToList();
-
-        var allUsings = root.Usings.AddRange(newUsingDirectives);
-
-        // Sort all usings using the standardized sorter
-        var sortedUsings = UsingDirectiveSorter.Sort(allUsings);
-
-        var newRoot = root.WithUsings(SyntaxFactory.List(sortedUsings));
+        var lineEnding = await LineEndings.GetAsync(document, cancellationToken);
+        var newRoot = AddUsings(root, newUsings, lineEnding);
         var newDocument = document.WithSyntaxRoot(newRoot);
         var newSolution = newDocument.Project.Solution;
 
@@ -285,20 +276,11 @@ public sealed class AddMissingUsingsOperation : RefactoringOperationBase<AddMiss
                 continue;
             }
 
-            // Add the using directives
-            var newUsingDirectives = newUsings
-                .Select(n => SyntaxFactory.UsingDirective(
-                        SyntaxFactory.ParseName(n).WithLeadingTrivia(SyntaxFactory.Space))
-                    .WithTrailingTrivia(SyntaxFactory.CarriageReturnLineFeed))
-                .ToList();
-
-            var allUsingsForFile = root.Usings.AddRange(newUsingDirectives);
-            var sortedUsings = UsingDirectiveSorter.Sort(allUsingsForFile);
-
-            // Accumulate locally and commit once at the end: pushing each edit into the
-            // context here would make the final commit diff the solution against itself
-            // and write nothing.
-            var newRoot = root.WithUsings(SyntaxFactory.List(sortedUsings));
+            // Add the using directives. Accumulate locally and commit once at the end:
+            // pushing each edit into the context here would make the final commit diff the
+            // solution against itself and write nothing.
+            var lineEnding = await LineEndings.GetAsync(document, cancellationToken);
+            var newRoot = AddUsings(root, newUsings, lineEnding);
             newSolution = newSolution.WithDocumentSyntaxRoot(document.Id, newRoot);
 
             totalUsingsAdded += newUsings.Count;
@@ -348,6 +330,24 @@ public sealed class AddMissingUsingsOperation : RefactoringOperationBase<AddMiss
             null,
             0,
             0);
+    }
+
+    /// <summary>
+    /// Adds using directives for <paramref name="namespaces"/>, each ending in the
+    /// document's <paramref name="lineEnding"/>, and re-sorts the file's usings.
+    /// </summary>
+    private static CompilationUnitSyntax AddUsings(
+        CompilationUnitSyntax root,
+        IEnumerable<string> namespaces,
+        string lineEnding)
+    {
+        var newUsingDirectives = namespaces
+            .Select(n => SyntaxFactory.UsingDirective(
+                    SyntaxFactory.ParseName(n).WithLeadingTrivia(SyntaxFactory.Space))
+                .WithTrailingTrivia(SyntaxFactory.EndOfLine(lineEnding)));
+
+        var sortedUsings = UsingDirectiveSorter.Sort(root.Usings.AddRange(newUsingDirectives));
+        return root.WithUsings(SyntaxFactory.List(sortedUsings));
     }
 
     private static string? GetTypeName(SyntaxNode node)

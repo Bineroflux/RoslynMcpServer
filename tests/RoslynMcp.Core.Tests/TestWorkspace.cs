@@ -45,9 +45,13 @@ internal sealed class TestWorkspace : IDisposable
     public static TestWorkspace Create(params (string Name, string Text)[] files) =>
         Create(files, []);
 
+    /// <param name="files">Source files, written to disk exactly as given.</param>
+    /// <param name="extraReferences">References besides the framework.</param>
+    /// <param name="editorConfig">Content of an <c>.editorconfig</c> next to the files, if any.</param>
     public static TestWorkspace Create(
         IEnumerable<(string Name, string Text)> files,
-        IEnumerable<MetadataReference> extraReferences)
+        IEnumerable<MetadataReference> extraReferences,
+        string? editorConfig = null)
     {
         var directory = Path.Combine(Path.GetTempPath(), $"RoslynMcpServer.TestWorkspace-{Guid.NewGuid():N}");
         System.IO.Directory.CreateDirectory(directory);
@@ -65,6 +69,14 @@ internal sealed class TestWorkspace : IDisposable
             compilationOptions: CompilationOptions,
             parseOptions: ParseOptions,
             metadataReferences: references));
+
+        if (editorConfig != null)
+        {
+            var path = Path.Combine(directory, ".editorconfig");
+            File.WriteAllText(path, editorConfig);
+            solution = solution.AddAnalyzerConfigDocument(
+                DocumentId.CreateNewId(projectId), ".editorconfig", SourceText.From(editorConfig), filePath: path);
+        }
 
         foreach (var (name, text) in files)
         {

@@ -99,7 +99,7 @@ public sealed class GenerateEqualsHashCodeOperation : RefactoringOperationBase<G
         var newRoot = root.ReplaceNode(typeDecl, newTypeDecl);
         var newDocument = document.WithSyntaxRoot(newRoot);
         var newSolution = await GeneratedCodeFormatter.FormatAsync(
-            newDocument.Project.Solution, document.Id, cancellationToken);
+            newDocument.Project.Solution, document, cancellationToken);
         var commitResult = await CommitChangesAsync(newSolution, cancellationToken);
 
         return RefactoringResult.Succeeded(operationId,

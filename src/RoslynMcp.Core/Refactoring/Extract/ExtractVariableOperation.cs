@@ -200,7 +200,7 @@ public sealed class ExtractVariableOperation : RefactoringOperationBase<ExtractV
 
         var newDocument = document.WithSyntaxRoot(newRoot);
         var newSolution = await GeneratedCodeFormatter.FormatAsync(
-            newDocument.Project.Solution, document.Id, cancellationToken);
+            newDocument.Project.Solution, document, cancellationToken);
 
         // Commit changes
         var commitResult = await CommitChangesAsync(newSolution, cancellationToken);

@@ -46,6 +46,28 @@ public sealed class GetDocumentOutlineTool : IToolHandler
             {
                 type = "string",
                 description = "Absolute path to the source file"
+            },
+            maxDepth = new
+            {
+                type = "integer",
+                description = "Maximum nesting depth; namespaces don't count. 1 = top-level types only, 2 = plus their members.",
+                minimum = 1
+            },
+            kindFilter = new
+            {
+                type = "string",
+                description = "Only entries of this kind, with their containing namespaces/types: Class, Struct, Interface, Enum, Record, Delegate, Method (incl. constructors), Property, Field, Event, Constant (incl. enum members), Namespace"
+            },
+            nameFilter = new
+            {
+                type = "string",
+                description = "Only entries whose name contains this text (case-insensitive substring), with their containing namespaces/types"
+            },
+            maxResults = new
+            {
+                type = "integer",
+                description = "Maximum number of entries, counted depth-first with parents first; totalCount and truncated report the rest",
+                minimum = 1
             }
         },
         additionalProperties = false
@@ -68,7 +90,11 @@ public sealed class GetDocumentOutlineTool : IToolHandler
             var operation = new GetDocumentOutlineOperation(context);
             var @params = new GetDocumentOutlineParams
             {
-                SourceFile = args.SourceFile
+                SourceFile = args.SourceFile,
+                MaxDepth = args.MaxDepth,
+                KindFilter = args.KindFilter,
+                NameFilter = args.NameFilter,
+                MaxResults = args.MaxResults
             };
 
             var result = await operation.ExecuteAsync(@params, cancellationToken);
@@ -96,5 +122,9 @@ public sealed class GetDocumentOutlineTool : IToolHandler
     {
         public string SolutionPath { get; init; } = "";
         public string SourceFile { get; init; } = "";
+        public int? MaxDepth { get; init; }
+        public string? KindFilter { get; init; }
+        public string? NameFilter { get; init; }
+        public int? MaxResults { get; init; }
     }
 }

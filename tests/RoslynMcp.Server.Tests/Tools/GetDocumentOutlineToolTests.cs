@@ -58,6 +58,16 @@ public class GetDocumentOutlineToolTests
         Assert.Contains("sourceFile", requiredFields);
     }
 
+    [Theory]
+    [InlineData("maxDepth", "integer")]
+    [InlineData("kindFilter", "string")]
+    [InlineData("nameFilter", "string")]
+    [InlineData("maxResults", "integer")]
+    public void GetDefinition_HasFilteringParameters(string name, string type)
+    {
+        SchemaAssert.HasOptionalProperty(_tool, name, type);
+    }
+
     [Fact]
     public async Task ExecuteAsync_NullArguments_ReturnsError()
     {

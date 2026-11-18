@@ -5,6 +5,7 @@ using RoslynMcp.Contracts.Errors;
 using RoslynMcp.Contracts.Models;
 using RoslynMcp.Core.FileSystem;
 using RoslynMcp.Core.Query.Base;
+using RoslynMcp.Core.Query.Utilities;
 using RoslynMcp.Core.Refactoring;
 using RoslynMcp.Core.Workspace;
 
@@ -35,6 +36,14 @@ public sealed class GetDocumentOutlineOperation : QueryOperationBase<GetDocument
 
         if (!File.Exists(@params.SourceFile))
             throw new RefactoringException(ErrorCodes.SourceFileNotFound, $"Source file not found: {@params.SourceFile}");
+
+        if (@params.MaxDepth.HasValue && @params.MaxDepth.Value < 1)
+            throw new RefactoringException(ErrorCodes.MissingRequiredParam, "maxDepth must be >= 1.");
+
+        if (@params.MaxResults.HasValue && @params.MaxResults.Value < 1)
+            throw new RefactoringException(ErrorCodes.MissingRequiredParam, "maxResults must be >= 1.");
+
+        SymbolKindFilter.Parse(@params.KindFilter);
     }
 
     /// <inheritdoc />
@@ -81,11 +90,24 @@ public sealed class GetDocumentOutlineOperation : QueryOperationBase<GetDocument
                 del.GetLocation(), GetAccessibility(del.Modifiers), del.ReturnType.ToString()));
         }
 
+        var truncated = false;
+        if (@params.MaxDepth.HasValue || @params.MaxResults.HasValue ||
+            !string.IsNullOrWhiteSpace(@params.KindFilter) || !string.IsNullOrEmpty(@params.NameFilter))
+        {
+            var filtered = new OutlineFilter(@params).Apply(entries, depth: 0);
+            totalCount = OutlineFilter.Count(filtered);
+
+            var budget = @params.MaxResults ?? int.MaxValue;
+            entries = OutlineFilter.TakePreorder(filtered, ref budget);
+            truncated = totalCount > OutlineFilter.Count(entries);
+        }
+
         var result = new GetDocumentOutlineResult
         {
             File = @params.SourceFile,
             Entries = entries,
-            TotalCount = totalCount
+            TotalCount = totalCount,
+            Truncated = truncated
         };
 
         return QueryResult<GetDocumentOutlineResult>.Succeeded(operationId, result);
@@ -250,6 +272,107 @@ public sealed class GetDocumentOutlineOperation : QueryOperationBase<GetDocument
             Column = lineSpan.StartLinePosition.Character + 1,
             Accessibility = accessibility,
             ReturnType = returnType
+        };
+    }
+
+    /// <summary>
+    /// The maxDepth, kindFilter and nameFilter options, applied to the built outline.
+    /// </summary>
+    private sealed class OutlineFilter
+    {
+        private readonly int _maxDepth;
+        private readonly Contracts.Enums.SymbolKind? _kind;
+        private readonly string? _name;
+
+        public OutlineFilter(GetDocumentOutlineParams @params)
+        {
+            _maxDepth = @params.MaxDepth ?? int.MaxValue;
+            _kind = SymbolKindFilter.Parse(@params.KindFilter);
+            _name = string.IsNullOrEmpty(@params.NameFilter) ? null : @params.NameFilter;
+        }
+
+        /// <summary>
+        /// The entries within maxDepth that match the kind and name filters, each with the
+        /// containing entries that lead to it. Without those filters, everything within
+        /// maxDepth. <paramref name="depth"/> is the nesting depth of the entries' parent;
+        /// namespaces don't add to it.
+        /// </summary>
+        public List<OutlineEntry> Apply(IReadOnlyList<OutlineEntry> entries, int depth)
+        {
+            var filtering = _kind.HasValue || _name is not null;
+            var kept = new List<OutlineEntry>();
+            foreach (var entry in entries)
+            {
+                var entryDepth = entry.Kind == "Namespace" ? depth : depth + 1;
+                if (entryDepth > _maxDepth)
+                    continue;
+
+                var children = entry.Children is null ? [] : Apply(entry.Children, entryDepth);
+                if (!filtering || Matches(entry) || children.Count > 0)
+                    kept.Add(WithChildren(entry, children));
+            }
+
+            return kept;
+        }
+
+        /// <summary>Counts the entries of a tree.</summary>
+        public static int Count(IReadOnlyList<OutlineEntry> entries) =>
+            entries.Sum(e => 1 + (e.Children is null ? 0 : Count(e.Children)));
+
+        /// <summary>
+        /// The first <paramref name="budget"/> entries in depth-first preorder, so every
+        /// entry returned comes with its parents.
+        /// </summary>
+        public static List<OutlineEntry> TakePreorder(IReadOnlyList<OutlineEntry> entries, ref int budget)
+        {
+            var taken = new List<OutlineEntry>();
+            foreach (var entry in entries)
+            {
+                if (budget == 0)
+                    break;
+
+                budget--;
+                var children = entry.Children is null ? [] : TakePreorder(entry.Children, ref budget);
+                taken.Add(WithChildren(entry, children));
+            }
+
+            return taken;
+        }
+
+        private bool Matches(OutlineEntry entry) =>
+            (!_kind.HasValue || KindOf(entry.Kind) == _kind.Value) &&
+            (_name is null || entry.Name.Contains(_name, StringComparison.OrdinalIgnoreCase));
+
+        /// <summary>
+        /// An outline kind as the symbol kind kindFilter names, the way SymbolKindMapper maps
+        /// symbols: a constructor is a Method, an enum member a Constant.
+        /// </summary>
+        private static Contracts.Enums.SymbolKind? KindOf(string outlineKind) => outlineKind switch
+        {
+            "Namespace" => Contracts.Enums.SymbolKind.Namespace,
+            "Class" => Contracts.Enums.SymbolKind.Class,
+            "Interface" => Contracts.Enums.SymbolKind.Interface,
+            "Struct" => Contracts.Enums.SymbolKind.Struct,
+            "Record" => Contracts.Enums.SymbolKind.Record,
+            "Enum" => Contracts.Enums.SymbolKind.Enum,
+            "Delegate" => Contracts.Enums.SymbolKind.Delegate,
+            "Constructor" or "Method" => Contracts.Enums.SymbolKind.Method,
+            "Property" => Contracts.Enums.SymbolKind.Property,
+            "Field" => Contracts.Enums.SymbolKind.Field,
+            "Constant" or "EnumMember" => Contracts.Enums.SymbolKind.Constant,
+            "Event" => Contracts.Enums.SymbolKind.Event,
+            _ => null
+        };
+
+        private static OutlineEntry WithChildren(OutlineEntry entry, List<OutlineEntry> children) => new()
+        {
+            Name = entry.Name,
+            Kind = entry.Kind,
+            Line = entry.Line,
+            Column = entry.Column,
+            Accessibility = entry.Accessibility,
+            ReturnType = entry.ReturnType,
+            Children = children.Count > 0 ? children : null
         };
     }
 

@@ -281,7 +281,7 @@ These tools analyze your code without making changes. Use them to understand cod
 | `analyze_data_flow` | Analyze data flow for a code region: variables read/written inside, data flowing in/out, captured variables. | `sourceFile`, `startLine`, `endLine` |
 | `find_callers` | Find all callers of a symbol across the entire solution, or within one file or project. | `sourceFile`, `symbolName`, `line`, `column`, `maxResults`, `callerFile`, `projectPath` |
 | `get_type_hierarchy` | Retrieve the type hierarchy (base types and/or derived types, all or only direct ones) for a given type. | `sourceFile`, `symbolName`, `line`, `column`, `direction`, `transitive`, `maxResults` |
-| `get_document_outline` | Get a hierarchical outline of all symbols in a file (namespaces, types, members). | `sourceFile` |
+| `get_document_outline` | Get a hierarchical outline of all symbols in a file (namespaces, types, members), optionally limited by depth, kind or name. | `sourceFile`, `maxDepth`, `kindFilter`, `nameFilter`, `maxResults` |
 
 ### Code Generation
 

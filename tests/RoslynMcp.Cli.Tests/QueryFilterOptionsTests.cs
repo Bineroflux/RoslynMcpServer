@@ -31,6 +31,10 @@ public class QueryFilterOptionsTests
     [InlineData("find-implementations", "--transitive")]
     [InlineData("get-type-hierarchy", "--transitive")]
     [InlineData("get-type-hierarchy", "--max-results")]
+    [InlineData("get-document-outline", "--max-depth")]
+    [InlineData("get-document-outline", "--kind-filter")]
+    [InlineData("get-document-outline", "--name-filter")]
+    [InlineData("get-document-outline", "--max-results")]
     public void ToolHelp_ListsTheOption(string toolName, string option)
     {
         var tool = ToolRegistry.BuildDefault().GetTool(toolName)!;

@@ -16,9 +16,15 @@ public sealed class GetDocumentOutlineResult
     public required IReadOnlyList<OutlineEntry> Entries { get; init; }
 
     /// <summary>
-    /// Total count of symbols in the outline.
+    /// Total count of entries in the outline after the filters, the containing namespaces and
+    /// types kept for them included (may exceed the entries returned if truncated).
     /// </summary>
     public required int TotalCount { get; init; }
+
+    /// <summary>
+    /// Whether the outline was truncated due to maxResults.
+    /// </summary>
+    public bool Truncated { get; init; }
 }
 
 /// <summary>

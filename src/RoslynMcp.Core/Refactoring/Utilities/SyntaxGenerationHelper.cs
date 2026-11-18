@@ -70,13 +70,17 @@ public static class SyntaxGenerationHelper
             .WithParameterList(CreateParameterList(method.Parameters, nullableAnnotations))
             .WithBody(body);
 
-        // Add type parameters if generic
+        // Add type parameters if generic. Overrides and explicit implementations inherit
+        // their constraints; an implicit implementation has to restate them.
         if (method.TypeParameters.Length > 0)
         {
             var typeParams = method.TypeParameters.Select(tp =>
                 SyntaxFactory.TypeParameter(tp.Name));
-            methodDecl = methodDecl.WithTypeParameterList(
-                SyntaxFactory.TypeParameterList(SyntaxFactory.SeparatedList(typeParams)));
+            var inheritsConstraints = IsExplicit(method, explicitInterface)
+                || method.ContainingType?.TypeKind != TypeKind.Interface;
+            methodDecl = methodDecl
+                .WithTypeParameterList(SyntaxFactory.TypeParameterList(SyntaxFactory.SeparatedList(typeParams)))
+                .WithConstraintClauses(CreateConstraintClauses(method, inheritsConstraints, nullableAnnotations));
         }
 
         return methodDecl.NormalizeWhitespace();
@@ -304,8 +308,9 @@ public static class SyntaxGenerationHelper
         {
             var typeParams = method.TypeParameters.Select(tp =>
                 SyntaxFactory.TypeParameter(tp.Name));
-            methodDecl = methodDecl.WithTypeParameterList(
-                SyntaxFactory.TypeParameterList(SyntaxFactory.SeparatedList(typeParams)));
+            methodDecl = methodDecl
+                .WithTypeParameterList(SyntaxFactory.TypeParameterList(SyntaxFactory.SeparatedList(typeParams)))
+                .WithConstraintClauses(CreateConstraintClauses(method, inheritsConstraints: false, nullableAnnotations));
         }
 
         return methodDecl;
@@ -354,6 +359,112 @@ public static class SyntaxGenerationHelper
         return SyntaxFactory.EventDeclaration(CreateTypeSyntax(eventSymbol.Type, nullableAnnotations), eventSymbol.Name)
             .WithSemicolonToken(SyntaxFactory.Token(SyntaxKind.SemicolonToken));
     }
+
+    /// <summary>
+    /// Constraint clauses for a generated generic method. A method that declares its own
+    /// constraints (an interface method or an implicit implementation) must repeat all of
+    /// them (CS0425). An override or explicit implementation inherits them and may only
+    /// restate <c>class</c>/<c>struct</c> (CS0460), plus <c>default</c> for an unconstrained
+    /// type parameter it writes as <c>T?</c>, which would otherwise mean <c>Nullable&lt;T&gt;</c>.
+    /// </summary>
+    private static SyntaxList<TypeParameterConstraintClauseSyntax> CreateConstraintClauses(
+        IMethodSymbol method,
+        bool inheritsConstraints,
+        bool nullableAnnotations)
+    {
+        var clauses = new List<TypeParameterConstraintClauseSyntax>();
+
+        foreach (var typeParameter in method.TypeParameters)
+        {
+            var constraints = inheritsConstraints
+                ? InheritedConstraints(method, typeParameter, nullableAnnotations)
+                : DeclaredConstraints(typeParameter, nullableAnnotations);
+
+            if (constraints.Count > 0)
+            {
+                clauses.Add(SyntaxFactory.TypeParameterConstraintClause(
+                    SyntaxFactory.IdentifierName(typeParameter.Name),
+                    SyntaxFactory.SeparatedList(constraints)));
+            }
+        }
+
+        return SyntaxFactory.List(clauses);
+    }
+
+    private static List<TypeParameterConstraintSyntax> DeclaredConstraints(
+        ITypeParameterSymbol typeParameter,
+        bool nullableAnnotations)
+    {
+        var constraints = new List<TypeParameterConstraintSyntax>();
+
+        if (typeParameter.HasReferenceTypeConstraint)
+        {
+            var classConstraint = SyntaxFactory.ClassOrStructConstraint(SyntaxKind.ClassConstraint);
+            constraints.Add(nullableAnnotations && typeParameter.ReferenceTypeConstraintNullableAnnotation == NullableAnnotation.Annotated
+                ? classConstraint.WithQuestionToken(SyntaxFactory.Token(SyntaxKind.QuestionToken))
+                : classConstraint);
+        }
+        else if (typeParameter.HasUnmanagedTypeConstraint)
+        {
+            constraints.Add(SyntaxFactory.TypeConstraint(SyntaxFactory.IdentifierName("unmanaged")));
+        }
+        else if (typeParameter.HasValueTypeConstraint)
+        {
+            constraints.Add(SyntaxFactory.ClassOrStructConstraint(SyntaxKind.StructConstraint));
+        }
+        else if (typeParameter.HasNotNullConstraint && nullableAnnotations)
+        {
+            constraints.Add(SyntaxFactory.TypeConstraint(SyntaxFactory.IdentifierName("notnull")));
+        }
+
+        constraints.AddRange(typeParameter.ConstraintTypes.Select(type =>
+            SyntaxFactory.TypeConstraint(CreateTypeSyntax(type, nullableAnnotations))));
+
+        if (typeParameter.HasConstructorConstraint)
+        {
+            constraints.Add(SyntaxFactory.ConstructorConstraint());
+        }
+
+        if (typeParameter.AllowsRefLikeType)
+        {
+            constraints.Add(SyntaxFactory.AllowsConstraintClause(
+                SyntaxFactory.SingletonSeparatedList<AllowsConstraintSyntax>(SyntaxFactory.RefStructConstraint())));
+        }
+
+        return constraints;
+    }
+
+    private static List<TypeParameterConstraintSyntax> InheritedConstraints(
+        IMethodSymbol method,
+        ITypeParameterSymbol typeParameter,
+        bool nullableAnnotations)
+    {
+        if (typeParameter.HasReferenceTypeConstraint)
+        {
+            return [SyntaxFactory.ClassOrStructConstraint(SyntaxKind.ClassConstraint)];
+        }
+
+        if (typeParameter.HasValueTypeConstraint)
+        {
+            return [SyntaxFactory.ClassOrStructConstraint(SyntaxKind.StructConstraint)];
+        }
+
+        var writesNullable = nullableAnnotations
+            && method.Parameters.Select(p => p.Type).Prepend(method.ReturnType)
+                .Any(type => MentionsAnnotated(type, typeParameter));
+
+        return writesNullable ? [SyntaxFactory.DefaultConstraint()] : [];
+    }
+
+    private static bool MentionsAnnotated(ITypeSymbol type, ITypeParameterSymbol typeParameter) =>
+        type switch
+        {
+            ITypeParameterSymbol candidate => candidate.NullableAnnotation == NullableAnnotation.Annotated
+                && SymbolEqualityComparer.Default.Equals(candidate, typeParameter),
+            IArrayTypeSymbol array => MentionsAnnotated(array.ElementType, typeParameter),
+            INamedTypeSymbol named => named.TypeArguments.Any(argument => MentionsAnnotated(argument, typeParameter)),
+            _ => false
+        };
 
     private static SyntaxTokenList CreateModifiers(
         ISymbol member,

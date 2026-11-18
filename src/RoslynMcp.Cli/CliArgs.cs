@@ -1,3 +1,5 @@
+using RoslynMcp.Core;
+
 namespace RoslynMcp.Cli;
 
 /// <summary>
@@ -20,6 +22,9 @@ public sealed class ParsedArgs
     /// <summary>Whether tool-specific help was requested.</summary>
     public bool ShowToolHelp { get; init; }
 
+    /// <summary>Whether the version was requested (<c>--version</c> or <c>-v</c> first).</summary>
+    public bool ShowVersion { get; init; }
+
     /// <summary>Output format: "json" (default) or "text".</summary>
     public string Format { get; init; } = "json";
 
@@ -37,6 +42,7 @@ public static class CliArgs
     /// </summary>
     /// <remarks>
     /// Syntax: roslyn-cli [--help]
+    ///         roslyn-cli --version
     ///         roslyn-cli &lt;tool-name&gt; --help
     ///         roslyn-cli &lt;solution-path&gt; &lt;tool-name&gt; [--option value ...]
     ///         roslyn-cli &lt;tool-name&gt; [--option value ...]  (tools that need no solution)
@@ -45,6 +51,10 @@ public static class CliArgs
     {
         if (args.Length == 0 || (args.Length == 1 && IsHelpFlag(args[0])))
             return new ParsedArgs { ShowHelp = true };
+
+        // Only as the first argument: later ones may be option values.
+        if (ProductVersion.IsVersionFlag(args[0]))
+            return new ParsedArgs { ShowVersion = true };
 
         // Detect: roslyn-cli <tool-name> --help
         if (args.Length == 2 && IsHelpFlag(args[1]) && !args[0].StartsWith("--"))

@@ -22,11 +22,13 @@ public static class HelpGenerator
         sb.AppendLine("  roslyn-cli <solution-path> <tool-name> [--option value ...]");
         sb.AppendLine("  roslyn-cli <tool-name> --help");
         sb.AppendLine("  roslyn-cli --help");
+        sb.AppendLine("  roslyn-cli --version");
         sb.AppendLine();
         sb.AppendLine("GLOBAL OPTIONS:");
         sb.AppendLine("  --format <json|text>  Output format (default: json)");
         sb.AppendLine("  --verbose             Show detailed output");
         sb.AppendLine("  --help, -h            Show this help");
+        sb.AppendLine("  --version, -v         Print the version and exit");
         sb.AppendLine();
 
         var grouped = tools.GroupBy(t => t.Category).OrderBy(g => g.Key);

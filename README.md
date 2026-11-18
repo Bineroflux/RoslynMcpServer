@@ -64,6 +64,7 @@ The output should be `11.0.x` or higher.
 
 ```bash
 dotnet tool install -g RoslynMcp.Server
+roslyn-mcp --version   # prints the installed version, e.g. 0.6.0
 ```
 
 ### 2. Configure
@@ -118,6 +119,7 @@ dotnet tool install -g RoslynMcp.Cli
 roslyn-cli <solution-path> <tool-name> [--option value ...]
 roslyn-cli <tool-name> --help
 roslyn-cli --help
+roslyn-cli --version
 ```
 
 ### Examples

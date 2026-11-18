@@ -50,6 +50,35 @@ public sealed class StdioServerProcessTests
         }
     }
 
+    [Fact]
+    public async Task VersionFlag_PrintsTheVersionInitializeReports_AndExits()
+    {
+        var ct = TestContext.Current.CancellationToken;
+
+        foreach (var flag in new[] { "--version", "-v" })
+        {
+            using var process = Process.Start(ServerProcess.CreateStartInfo(flag))
+                ?? throw new InvalidOperationException("Server did not start.");
+            var stdout = await process.StandardOutput.ReadToEndAsync(ct);
+            await process.WaitForExitAsync(ct);
+
+            Assert.Equal(0, process.ExitCode);
+            Assert.Equal(McpRequestDispatcher.ServerVersion + Environment.NewLine, stdout);
+        }
+
+        Assert.Matches(@"^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$", McpRequestDispatcher.ServerVersion);
+
+        await using var server = ServerProcess.Start();
+        var response = await server.RequestAsync("initialize", new JsonObject
+        {
+            ["protocolVersion"] = "2024-11-05",
+            ["capabilities"] = new JsonObject(),
+            ["clientInfo"] = new JsonObject { ["name"] = "e2e-test", ["version"] = "1.0" },
+        }, ct);
+
+        Assert.Equal(McpRequestDispatcher.ServerVersion, response["result"]?["serverInfo"]?["version"]?.GetValue<string>());
+    }
+
     /// <summary>The server built next to this test assembly, driven over its stdio.</summary>
     private sealed class ServerProcess : IAsyncDisposable
     {
@@ -60,6 +89,15 @@ public sealed class StdioServerProcessTests
 
         public static ServerProcess Start()
         {
+            var process = Process.Start(CreateStartInfo()) ?? throw new InvalidOperationException("Server did not start.");
+            process.ErrorDataReceived += (_, _) => { }; // drain so a full stderr pipe can't block it
+            process.BeginErrorReadLine();
+            return new ServerProcess(process);
+        }
+
+        /// <summary>Runs the server with <paramref name="arguments"/>, all stdio redirected.</summary>
+        public static ProcessStartInfo CreateStartInfo(params string[] arguments)
+        {
             var psi = new ProcessStartInfo("dotnet")
             {
                 RedirectStandardInput = true,
@@ -69,11 +107,10 @@ public sealed class StdioServerProcessTests
                 CreateNoWindow = true,
             };
             psi.ArgumentList.Add(Path.Combine(AppContext.BaseDirectory, "RoslynMcp.Server.dll"));
+            foreach (var argument in arguments)
+                psi.ArgumentList.Add(argument);
 
-            var process = Process.Start(psi) ?? throw new InvalidOperationException("Server did not start.");
-            process.ErrorDataReceived += (_, _) => { }; // drain so a full stderr pipe can't block it
-            process.BeginErrorReadLine();
-            return new ServerProcess(process);
+            return psi;
         }
 
         public async Task NotifyAsync(string method, CancellationToken ct)

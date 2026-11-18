@@ -1,4 +1,5 @@
 using System.Text.Json;
+using RoslynMcp.Core;
 using RoslynMcp.Core.Workspace;
 using RoslynMcp.Server.Logging;
 using RoslynMcp.Server.Tools;
@@ -15,6 +16,12 @@ public sealed class McpRequestDispatcher
 {
     private readonly ToolRegistry _toolRegistry;
     private readonly JsonSerializerOptions _jsonOptions;
+
+    /// <summary>
+    /// The server's version, as <c>roslyn-mcp --version</c> prints it and the
+    /// <c>initialize</c> response reports it in <c>serverInfo.version</c>.
+    /// </summary>
+    public static string ServerVersion { get; } = ProductVersion.Of(typeof(McpRequestDispatcher).Assembly);
 
     /// <summary>
     /// Creates a new dispatcher and registers every tool against the given workspace provider.
@@ -117,7 +124,7 @@ public sealed class McpRequestDispatcher
             serverInfo = new
             {
                 name = "roslyn-mcp",
-                version = typeof(McpRequestDispatcher).Assembly.GetName().Version?.ToString(3) ?? "0.0.0"
+                version = ServerVersion
             }
         });
     }

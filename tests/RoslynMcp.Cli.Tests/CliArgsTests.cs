@@ -177,4 +177,24 @@ public class CliArgsTests
         Assert.Equal(absolute, CliArgs.ResolveSolutionPath(absolute));
         Assert.Null(CliArgs.ResolveSolutionPath(null));
     }
+
+    [Theory]
+    [InlineData("--version")]
+    [InlineData("-v")]
+    [InlineData("--Version")]
+    [InlineData("-V")]
+    public void VersionFlagFirst_ShowsVersion(string flag)
+    {
+        Assert.True(CliArgs.Parse([flag]).ShowVersion);
+        Assert.True(CliArgs.Parse([flag, "--format", "text"]).ShowVersion);
+    }
+
+    [Fact]
+    public void VersionFlagAsOptionValue_IsAnOptionValue()
+    {
+        var result = CliArgs.Parse(["My.sln", "search-symbols", "--query", "-v"]);
+
+        Assert.False(result.ShowVersion);
+        Assert.Equal("-v", result.Options["query"]);
+    }
 }

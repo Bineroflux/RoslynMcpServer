@@ -1,5 +1,6 @@
 using RoslynMcp.Cli;
 using RoslynMcp.Contracts.Models;
+using RoslynMcp.Core;
 using RoslynMcp.Core.Workspace;
 
 // Exit codes
@@ -8,13 +9,20 @@ const int ExitToolError = 1;
 const int ExitCliError = 2;
 const int ExitEnvironmentError = 3;
 
+// Parse args
+var parsed = CliArgs.Parse(args);
+
+// ── Version (before anything else is set up) ─────────────────────
+if (parsed.ShowVersion)
+{
+    Console.WriteLine(ProductVersion.Of(typeof(CliArgs).Assembly));
+    return ExitSuccess;
+}
+
 // Wire MSBuild logging to stderr so it doesn't pollute stdout
 MSBuildWorkspaceProvider.LogCallback = msg => Console.Error.WriteLine($"[info] {msg}");
 MSBuildWorkspaceProvider.LogErrorCallback = (msg, ex) =>
     Console.Error.WriteLine($"[error] {msg}{(ex is not null ? $": {ex.Message}" : "")}");
-
-// Parse args
-var parsed = CliArgs.Parse(args);
 
 // Build registry
 var registry = ToolRegistry.BuildDefault();

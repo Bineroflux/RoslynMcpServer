@@ -1,6 +1,15 @@
+using RoslynMcp.Core;
 using RoslynMcp.Core.Workspace;
 using RoslynMcp.Server;
 using RoslynMcp.Server.Logging;
+
+// --version / -v prints the version and exits before anything else runs: no log entry,
+// no MSBuild registration, and in stdio mode nothing else on stdout, the protocol channel.
+if (args.Any(ProductVersion.IsVersionFlag))
+{
+    Console.WriteLine(McpRequestDispatcher.ServerVersion);
+    return;
+}
 
 // Parse CLI args / env for transport selection.
 // Defaults to stdio (backwards compatible).

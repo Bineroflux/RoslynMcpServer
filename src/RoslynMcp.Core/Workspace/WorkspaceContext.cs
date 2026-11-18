@@ -288,8 +288,10 @@ public sealed class WorkspaceContext : IDisposable
     /// heuristic — decide membership (globs, <c>&lt;Compile Remove&gt;</c>, links,
     /// multi-targeting), so the result matches a full reload while costing a single
     /// project evaluation. The evaluation runs outside the file-update gate (it is
-    /// comparatively slow); only the snapshot edit is gated. Throws if the evaluation
-    /// fails, so the caller can fall back to a full reload.
+    /// comparatively slow); only the snapshot edit is gated. Operations may create, move or
+    /// delete files between the two, so the edit decides against the disk as it is under the
+    /// lease: it adds only files it can read and removes only files that are gone. Throws if
+    /// the evaluation fails, so the caller can fall back to a full reload.
     /// </remarks>
     internal async Task<bool> ReconcileProjectDocumentsAsync(
         string projectFilePath,
@@ -333,14 +335,22 @@ public sealed class WorkspaceContext : IDisposable
                 foreach (var d in fresh.Documents)
                     if (d.FilePath != null) freshDocs[PathResolver.NormalizePath(d.FilePath)] = d;
 
-                var existingDocs = new Dictionary<string, DocumentId>(PathResolver.PathComparer);
+                var existingDocs = new Dictionary<string, Document>(PathResolver.PathComparer);
                 foreach (var d in existing.Documents)
-                    if (d.FilePath != null) existingDocs[PathResolver.NormalizePath(d.FilePath)] = d.Id;
+                    if (d.FilePath != null) existingDocs[PathResolver.NormalizePath(d.FilePath)] = d;
 
-                // Remove documents that are no longer part of the evaluated project.
+                // Remove documents that are no longer part of the evaluated project, once their
+                // file is gone from disk (checked now, under the lease). The evaluation ran
+                // before the lease was taken, so a file an operation created or moved in between
+                // — writing the file and the solution within its own lease — is missing from it
+                // although the project compiles it. Removing it dropped it from the solution, for
+                // good once its own watcher event had already found it tracked. Within a cache entry
+                // the project files don't change (an edit to one invalidates the entry), so
+                // membership only changes as files appear and disappear: a tracked file that
+                // still exists is still a member.
                 var toRemove = existingDocs
-                    .Where(kv => !freshDocs.ContainsKey(kv.Key))
-                    .Select(kv => kv.Value)
+                    .Where(kv => !freshDocs.ContainsKey(kv.Key) && !File.Exists(kv.Value.FilePath))
+                    .Select(kv => kv.Value.Id)
                     .ToImmutableArray();
                 if (toRemove.Length > 0)
                 {

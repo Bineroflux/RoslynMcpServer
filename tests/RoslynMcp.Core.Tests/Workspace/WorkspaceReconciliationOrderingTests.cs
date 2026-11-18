@@ -1,6 +1,8 @@
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.MSBuild;
 using Microsoft.CodeAnalysis.Text;
 using RoslynMcp.Core.FileSystem;
+using RoslynMcp.Core.Tests.Refactoring.Rename;
 using RoslynMcp.Core.Workspace;
 using Xunit;
 
@@ -138,5 +140,107 @@ public sealed class WorkspaceReconciliationOrderingTests
         {
             try { Directory.Delete(directory, recursive: true); } catch { /* best effort */ }
         }
+    }
+
+    [Fact]
+    public async Task ReconcileProjectDocumentsAsync_EvaluatedBeforeAnOperationCreatesAndMovesFiles_KeepsThem()
+    {
+        if (!ModuleInitializer.MsBuildAvailable)
+        {
+            Assert.Skip($"MSBuild not available: {ModuleInitializer.MsBuildError}");
+        }
+
+        var ct = TestContext.Current.CancellationToken;
+        using var working = RenameTempSolution.Create();
+        var projectFile = Path.Combine(working.ProjectDir, "TestProject.csproj");
+        using var ctx = await OpenProjectAsync(projectFile, ct);
+
+        var created = Path.Combine(working.ProjectDir, "Created.cs");
+        var moveFrom = Path.Combine(working.ProjectDir, "Models.cs");
+        var moveTo = Path.Combine(working.ProjectDir, "Domain", "Models.cs");
+        Assert.NotNull(ctx.GetDocumentByPath(moveFrom));
+
+        await ctx.EnterOperationAsync(ct);
+        Task<bool> reconcile;
+        try
+        {
+            // A re-evaluation (scheduled by some earlier event) evaluates the project now, then
+            // waits for the lease the operation holds.
+            reconcile = ctx.ReconcileProjectDocumentsAsync(projectFile, ct);
+            await Task.WhenAny(ctx.WaitUntilFileUpdateQueuedAsync(ct), reconcile);
+            Assert.False(reconcile.IsCompleted, "The re-evaluation must wait for the operation's lease.");
+
+            // The operation creates a file (a commit writes disk and solution) ...
+            var solution = ctx.Solution;
+            var projectId = solution.ProjectIds.Single();
+            var commit = await ctx.CommitChangesAsync(
+                solution.AddDocument(
+                    DocumentId.CreateNewId(projectId),
+                    "Created.cs",
+                    SourceText.From("namespace TestProject;\n\ninternal sealed class Created\n{\n}\n"),
+                    filePath: created),
+                ct);
+            Assert.True(commit.Success, commit.Error);
+
+            // ... and moves another one, repointing its document (what a namespace move does).
+            Directory.CreateDirectory(Path.GetDirectoryName(moveTo)!);
+            File.Move(moveFrom, moveTo);
+            solution = ctx.Solution;
+            foreach (var documentId in solution.GetDocumentIdsWithFilePath(moveFrom))
+                solution = solution.WithDocumentFilePath(documentId, moveTo);
+            ctx.UpdateSolution(solution);
+        }
+        finally
+        {
+            ctx.ExitOperation();
+        }
+
+        // The evaluation predates both files; they exist, so the project still compiles them.
+        Assert.False(await reconcile);
+        Assert.NotNull(ctx.GetDocumentByPath(created));
+        Assert.NotNull(ctx.GetDocumentByPath(moveTo));
+        Assert.Null(ctx.GetDocumentByPath(moveFrom));
+
+        // A fresh evaluation agrees.
+        Assert.False(await ctx.ReconcileProjectDocumentsAsync(projectFile, ct));
+    }
+
+    [Fact]
+    public async Task ReconcileProjectDocumentsAsync_TrackedFileDeletedExternally_RemovesIt()
+    {
+        if (!ModuleInitializer.MsBuildAvailable)
+        {
+            Assert.Skip($"MSBuild not available: {ModuleInitializer.MsBuildError}");
+        }
+
+        var ct = TestContext.Current.CancellationToken;
+        using var working = RenameTempSolution.Create();
+        var projectFile = Path.Combine(working.ProjectDir, "TestProject.csproj");
+        using var ctx = await OpenProjectAsync(projectFile, ct);
+
+        // No operation knows about this deletion: the evaluation omits the file and it is
+        // gone from disk, so the document goes.
+        var deleted = Path.Combine(working.ProjectDir, "Models.cs");
+        File.Delete(deleted);
+        Assert.True(await ctx.ReconcileProjectDocumentsAsync(projectFile, ct));
+        Assert.Null(ctx.GetDocumentByPath(deleted));
+    }
+
+    /// <summary>
+    /// Loads <paramref name="projectFile"/> with MSBuild into an uncached context: the
+    /// re-evaluation needs an MSBuild workspace, and without the cache no watcher reacts to
+    /// the files a test writes.
+    /// </summary>
+    private static async Task<WorkspaceContext> OpenProjectAsync(string projectFile, CancellationToken ct)
+    {
+        var properties = new Dictionary<string, string>
+        {
+            ["CheckForSystemRuntimeDependency"] = "true",
+            ["DesignTimeBuild"] = "true",
+            ["BuildingInsideVisualStudio"] = "true",
+        };
+        var workspace = MSBuildWorkspace.Create(properties);
+        var project = await workspace.OpenProjectAsync(projectFile, cancellationToken: ct);
+        return new WorkspaceContext(workspace, project.Solution, projectFile, msbuildProperties: properties);
     }
 }

@@ -225,6 +225,72 @@ public sealed class MoveTypeToNamespaceFileLocationTests
             Path.Combine(working.ProjectDir, "TestProject.csproj"), ct));
     }
 
+    [Fact]
+    public async Task MsBuildWorkspace_MoveIntoAFolderAnImportExcludes_IsUndone()
+    {
+        if (!ModuleInitializer.MsBuildAvailable)
+        {
+            Assert.Skip($"MSBuild not available: {ModuleInitializer.MsBuildError}");
+        }
+
+        // The project files the move checks up front do not show this: an imported props
+        // file removes the target folder from compilation. Only MSBuild can tell.
+        using var working = RenameTempSolution.Create();
+        var ct = TestContext.Current.CancellationToken;
+        var projectFile = Path.Combine(working.ProjectDir, "TestProject.csproj");
+        File.WriteAllText(Path.Combine(working.ProjectDir, "Shared.props"), """
+            <Project>
+              <ItemGroup>
+                <Compile Remove="Billing/**" />
+              </ItemGroup>
+            </Project>
+            """);
+        File.WriteAllText(projectFile, File.ReadAllText(projectFile)
+            .Replace("</Project>", """  <Import Project="Shared.props" />""" + Environment.NewLine + "</Project>"));
+        using var provider = new MSBuildWorkspaceProvider();
+        var source = Path.Combine(working.ProjectDir, "Services", "OrderService.cs");
+        var targetFolder = Path.Combine(working.ProjectDir, "Billing");
+
+        RefactoringResult result;
+        using (var ctx = await provider.CreateContextAsync(working.SolutionPath, ct))
+        {
+            result = await new MoveTypeToNamespaceOperation(ctx).ExecuteAsync(
+                new MoveTypeToNamespaceParams
+                {
+                    SourceFile = source,
+                    SymbolName = "OrderService",
+                    TargetNamespace = "TestProject.Billing",
+                    UpdateFileLocation = true
+                },
+                ct);
+        }
+
+        Assert.True(result.Success);
+        Assert.Equal("PARTIAL_SUCCESS", result.Error?.Code);
+        Assert.Contains("MSBuild does not compile", result.Error!.Message);
+        Assert.Contains("the move was undone", result.Error.Message);
+        Assert.Empty(result.Changes!.FilesCreated);
+        Assert.Empty(result.Changes.FilesDeleted);
+        Assert.Null(result.Symbol!.NewLocation);
+
+        // The namespace change stays, in the file at its old place; the folder the move
+        // created is gone again.
+        Assert.Contains("namespace TestProject.Billing;", File.ReadAllText(source));
+        Assert.False(Directory.Exists(targetFolder));
+
+        WorkspaceContext cached;
+        using (var ctx = await provider.CreateContextAsync(working.SolutionPath, ct))
+        {
+            cached = ctx;
+            Assert.NotNull(ctx.GetDocumentByPath(source));
+            Assert.Null(ctx.GetDocumentByPath(Path.Combine(targetFolder, "OrderService.cs")));
+            var compilation = await ctx.Solution.Projects.Single().GetCompilationAsync(ct);
+            Assert.Empty(compilation!.GetDiagnostics(ct).Where(d => d.Severity == DiagnosticSeverity.Error));
+        }
+
+        Assert.False(await cached.ReconcileProjectDocumentsAsync(projectFile, ct));
+    }
+
     [Theory]
     [InlineData("Services/**", "Services/Auth/Widget.cs", true)]
     [InlineData("Services/**", "Widget.cs", false)]

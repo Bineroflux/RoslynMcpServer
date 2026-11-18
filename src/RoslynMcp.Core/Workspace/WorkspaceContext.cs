@@ -258,35 +258,12 @@ public sealed class WorkspaceContext : IDisposable
     {
         ThrowIfDisposed();
 
-        // Only an MSBuild-backed workspace can be re-evaluated. The framework-only fallback for
-        // a standalone .cs file lives in an AdhocWorkspace with no project on disk, so there is
-        // nothing to reconcile — its single document is kept current via ApplyExternalTextChangeAsync.
-        if (_workspace is not MSBuildWorkspace)
-            return false;
-
-        // A standalone file-based program's wrapper .csproj is materialized only transiently and
-        // deleted right after load; it has a fixed document set and no longer exists on disk, so
-        // it can't (and needn't) be re-evaluated. Referenced real projects still reconcile normally.
-        if (!File.Exists(projectFilePath))
+        // Evaluate outside the gate — an MSBuild evaluation must not block operations.
+        var freshInfos = await EvaluateProjectAsync(projectFilePath, cancellationToken);
+        if (freshInfos is not { Count: > 0 })
             return false;
 
         var normalizedProjectPath = PathResolver.NormalizePath(projectFilePath);
-
-        // Evaluate outside the gate — an MSBuild evaluation must not block operations.
-        // No ProjectMap: it would mark this project "already known" and short-circuit the
-        // load. LoadMetadataForReferencedProjects stays false (the default), so referenced
-        // projects surface only as metadata and the result is just this project's info(s).
-        var loader = new MSBuildProjectLoader(_workspace, _msbuildProperties);
-        var evaluated = await loader.LoadProjectInfoAsync(
-            projectFilePath, cancellationToken: cancellationToken);
-
-        // A load surfaces referenced projects too; keep only the project we re-evaluated.
-        var freshInfos = evaluated
-            .Where(i => i.FilePath != null && string.Equals(
-                PathResolver.NormalizePath(i.FilePath), normalizedProjectPath, StringComparison.OrdinalIgnoreCase))
-            .ToList();
-        if (freshInfos.Count == 0)
-            return false;
 
         await _gate.EnterFileUpdateAsync(cancellationToken);
         try
@@ -358,6 +335,64 @@ public sealed class WorkspaceContext : IDisposable
         {
             _gate.ExitFileUpdate();
         }
+    }
+
+    /// <summary>
+    /// Whether MSBuild compiles <paramref name="filePath"/> in every target framework of
+    /// <paramref name="projectFilePath"/>, judged by re-evaluating the project as it is on disk
+    /// now; null when this workspace cannot be re-evaluated (see <see cref="EvaluateProjectAsync"/>).
+    /// Takes no lock, so an operation can call it while it holds its lease.
+    /// </summary>
+    internal async Task<bool?> IsCompiledByProjectAsync(
+        string projectFilePath,
+        string filePath,
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+
+        var infos = await EvaluateProjectAsync(projectFilePath, cancellationToken);
+        if (infos == null)
+            return null;
+
+        return infos.Count > 0 && infos.All(info => info.Documents.Any(
+            d => d.FilePath != null && PathResolver.PathsEqual(d.FilePath, filePath)));
+    }
+
+    /// <summary>
+    /// Re-evaluates <paramref name="projectFilePath"/> with MSBuild (the design-time load the
+    /// workspace itself used) and returns its project infos, one per target framework. Returns
+    /// null when the workspace is not MSBuild-backed or the project file is not on disk.
+    /// </summary>
+    private async Task<IReadOnlyList<ProjectInfo>?> EvaluateProjectAsync(
+        string projectFilePath,
+        CancellationToken cancellationToken)
+    {
+        // Only an MSBuild-backed workspace can be re-evaluated. The framework-only fallback for
+        // a standalone .cs file lives in an AdhocWorkspace with no project on disk, so there is
+        // nothing to reconcile — its single document is kept current via ApplyExternalTextChangeAsync.
+        if (_workspace is not MSBuildWorkspace)
+            return null;
+
+        // A standalone file-based program's wrapper .csproj is materialized only transiently and
+        // deleted right after load; it has a fixed document set and no longer exists on disk, so
+        // it can't (and needn't) be re-evaluated. Referenced real projects still reconcile normally.
+        if (!File.Exists(projectFilePath))
+            return null;
+
+        var normalizedProjectPath = PathResolver.NormalizePath(projectFilePath);
+
+        // No ProjectMap: it would mark this project "already known" and short-circuit the
+        // load. LoadMetadataForReferencedProjects stays false (the default), so referenced
+        // projects surface only as metadata and the result is just this project's info(s).
+        var loader = new MSBuildProjectLoader(_workspace, _msbuildProperties);
+        var evaluated = await loader.LoadProjectInfoAsync(
+            projectFilePath, cancellationToken: cancellationToken);
+
+        // A load surfaces referenced projects too; keep only the project we re-evaluated.
+        return evaluated
+            .Where(i => i.FilePath != null && string.Equals(
+                PathResolver.NormalizePath(i.FilePath), normalizedProjectPath, StringComparison.OrdinalIgnoreCase))
+            .ToList();
     }
 
     /// <summary>

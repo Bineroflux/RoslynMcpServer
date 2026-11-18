@@ -24,13 +24,14 @@ internal sealed record NamespaceFolderMove(string? TargetPath, IReadOnlyList<str
     /// namespace (<c>App</c> + <c>App.Services.Auth</c> → <c>&lt;projectDir&gt;/Services/Auth</c>).
     /// </summary>
     /// <remarks>
-    /// The move is only planned when MSBuild is sure to compile the file at its new path
-    /// exactly as before, which this decides from the project files instead of a full
-    /// evaluation: an SDK-style project whose default compile items are not disabled (in
-    /// the project or a <c>Directory.Build.props</c>/<c>.targets</c> above it), no
-    /// <c>Compile</c> item that matches the old path but not the new one or vice versa (an
-    /// explicit <c>Include</c>, <c>Update</c> metadata, a <c>Remove</c> of the new folder),
-    /// a file that holds nothing but the moved type, and a free target path.
+    /// This is a cheap pre-filter on the project files themselves: an SDK-style project whose
+    /// default compile items are not disabled (in the project or a
+    /// <c>Directory.Build.props</c>/<c>.targets</c> above it), no <c>Compile</c> item that
+    /// matches the old path but not the new one or vice versa (an explicit <c>Include</c>,
+    /// <c>Update</c> metadata, a <c>Remove</c> of the new folder), a file that holds nothing
+    /// but the moved type, and a free target path. It cannot see other imports (shared props,
+    /// NuGet build props), so after the move MSBuild itself has the last word (see
+    /// <c>MoveTypeToNamespaceOperation.MoveFileAsync</c>).
     /// </remarks>
     public static NamespaceFolderMove Plan(
         Document document,

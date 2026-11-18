@@ -12,10 +12,21 @@ using RoslynMcp.Core.Workspace;
 namespace RoslynMcp.Core.Refactoring.Signature;
 
 /// <summary>
-/// Changes a method's signature by adding, removing, or reordering parameters.
+/// Changes a method's signature by adding, removing, or reordering parameters, together with
+/// every method of its override / implementation family (see <see cref="MemberFamily"/>), and
+/// updates the calls to all of them.
 /// </summary>
+/// <remarks>
+/// Parameters correspond by position across the family, since an override may name them
+/// differently. A rename in the request renames the parameter at that position in every member
+/// (and its uses in the body and named arguments at the calls); otherwise each member keeps its
+/// own name. A kept parameter keeps its own type, modifiers and attributes unless the request
+/// gives a type.
+/// </remarks>
 public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSignatureParams>
 {
+    private const string ParameterListAnnotationKind = "RoslynMcp.ChangeSignature.ParameterList";
+
     /// <summary>
     /// Creates a new change signature operation.
     /// </summary>
@@ -70,100 +81,98 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
             throw new RefactoringException(ErrorCodes.RoslynError, "Could not parse file.");
         }
 
-        // Find method declaration
-        var methodDeclarations = root.DescendantNodes()
-            .OfType<MethodDeclarationSyntax>()
-            .Where(m => m.Identifier.Text == @params.MethodName)
-            .ToList();
+        var methodDecl = SignatureSyntax.SelectDeclaration(
+            root.DescendantNodes().OfType<MethodDeclarationSyntax>().Where(m => m.Identifier.Text == @params.MethodName).ToList(),
+            "method",
+            @params.MethodName,
+            @params.Line,
+            m => m.Identifier,
+            ErrorCodes.MethodNotFound);
 
-        if (methodDeclarations.Count == 0)
+        var methodSymbol = semanticModel.GetDeclaredSymbol(methodDecl, cancellationToken)
+            ?? throw new RefactoringException(ErrorCodes.RoslynError, "Could not resolve method symbol.");
+
+        var originalParams = methodSymbol.Parameters.ToList();
+        var newParameters = BuildNewParameterList(originalParams, @params.Parameters);
+
+        // A rename applies to the parameter at that position in every member of the family.
+        var renames = new string?[originalParams.Count];
+        foreach (var parameter in newParameters.Where(p => p.OriginalIndex.HasValue))
         {
-            throw new RefactoringException(
-                ErrorCodes.MethodNotFound,
-                $"Method '{@params.MethodName}' not found.");
+            var index = parameter.OriginalIndex!.Value;
+            if (parameter.Name != originalParams[index].Name)
+                renames[index] = parameter.Name;
         }
 
-        MethodDeclarationSyntax methodDecl;
-        if (methodDeclarations.Count > 1)
+        // Types the request writes, bound where the method is so each member can be given the
+        // same type. A type that does not resolve is written as given, everywhere.
+        var typePosition = methodDecl.ParameterList.OpenParenToken.Span.End;
+        var boundTypes = newParameters.ToDictionary(
+            p => p,
+            p => p.Type == null ? null : SignatureSyntax.BindType(semanticModel, typePosition, p.Type));
+
+        var solution = Context.Solution;
+        var family = await MemberFamily.FindAsync(methodSymbol, semanticModel.Compilation, solution, cancellationToken);
+        var edits = new SyntaxEdits();
+        var declarations = new List<(Document Document, MethodDeclarationSyntax Declaration, SyntaxAnnotation Annotation, IMethodSymbol Symbol)>();
+
+        foreach (var member in family.Members)
         {
-            if (!@params.Line.HasValue)
+            foreach (var reference in member.Declarations)
             {
-                var lines = methodDeclarations
-                    .Select(m => m.GetLocation().GetLineSpan().StartLinePosition.Line + 1)
-                    .ToList();
-                throw new RefactoringException(
-                    ErrorCodes.SymbolAmbiguous,
-                    $"Multiple methods named '{@params.MethodName}' found. Provide line number. Options: {string.Join(", ", lines)}");
+                if (await reference.GetSyntaxAsync(cancellationToken) is not MethodDeclarationSyntax declaration ||
+                    solution.GetDocument(reference.SyntaxTree) is not { } declaringDocument)
+                {
+                    continue;
+                }
+
+                var model = await declaringDocument.GetSemanticModelAsync(cancellationToken);
+                if (model?.GetDeclaredSymbol(declaration, cancellationToken) is not { } declared ||
+                    declared.Parameters.Length != originalParams.Count)
+                {
+                    throw new RefactoringException(
+                        ErrorCodes.RoslynError,
+                        $"Could not match the parameters of '{member.Symbol.ToDisplayString()}' to those of '{methodSymbol.ToDisplayString()}'.");
+                }
+
+                var types = newParameters.ToDictionary(
+                    p => p,
+                    p => p.Type == null
+                        ? null
+                        : boundTypes[p] is { } bound
+                            ? SignatureSyntax.WriteType(bound, member, model, declaration.SpanStart)
+                            : SyntaxFactory.ParseTypeName(p.Type));
+                var isExplicit = declared.ExplicitInterfaceImplementations.Length > 0;
+                var annotation = new SyntaxAnnotation(ParameterListAnnotationKind);
+
+                edits.Add(declaringDocument.Id, declaration.ParameterList, rewritten =>
+                    BuildParameterList((ParameterListSyntax)rewritten, newParameters, renames, types, isExplicit)
+                        .WithAdditionalAnnotations(annotation));
+                declarations.Add((declaringDocument, declaration, annotation, declared));
+
+                AddParameterRenames(edits, declaringDocument.Id, declaration, model, declared, renames, cancellationToken);
             }
-
-            methodDecl = methodDeclarations.FirstOrDefault(m =>
-                m.GetLocation().GetLineSpan().StartLinePosition.Line + 1 == @params.Line.Value)
-                ?? throw new RefactoringException(
-                    ErrorCodes.MethodNotFound,
-                    $"Method '{@params.MethodName}' not found at line {@params.Line}.");
         }
-        else
+
+        var callSites = new Dictionary<DocumentId, int>();
+        foreach (var member in family.Members)
         {
-            methodDecl = methodDeclarations[0];
+            foreach (var location in (await SymbolFinder.FindReferencesAsync(member.Symbol, solution, cancellationToken))
+                .SelectMany(r => r.Locations)
+                .Where(l => !l.IsImplicit))
+            {
+                if (await TryAddCallSiteAsync(edits, location, family, newParameters, renames, cancellationToken))
+                    callSites[location.Document.Id] = callSites.GetValueOrDefault(location.Document.Id) + 1;
+            }
         }
 
-        var methodSymbol = semanticModel.GetDeclaredSymbol(methodDecl, cancellationToken);
-        if (methodSymbol == null)
-        {
-            throw new RefactoringException(ErrorCodes.RoslynError, "Could not resolve method symbol.");
-        }
+        var newSolution = await edits.ApplyAsync(solution, cancellationToken);
 
-        // Build new parameter list
-        var newParameters = BuildNewParameterList(methodSymbol.Parameters.ToList(), @params.Parameters);
-
-        // Find all call sites
-        var references = await SymbolFinder.FindReferencesAsync(
-            methodSymbol,
-            Context.Solution,
-            cancellationToken);
-
-        var callSites = references
-            .SelectMany(r => r.Locations)
-            .Where(loc => loc.Document.Id != document.Id || !loc.Location.SourceSpan.IntersectsWith(methodDecl.Span))
-            .ToList();
-
-        // If preview mode, return without applying
         if (@params.Preview)
         {
-            return CreatePreviewResult(operationId, @params, methodSymbol.Parameters.ToList(), newParameters, callSites.Count);
-        }
-
-        // Update method declaration
-        var newParamSyntax = newParameters.Select(p => CreateParameterSyntax(p));
-        var newParamList = SyntaxFactory.ParameterList(SyntaxFactory.SeparatedList(newParamSyntax));
-        var newMethodDecl = methodDecl.WithParameterList(newParamList);
-
-        var newRoot = root.ReplaceNode(methodDecl, newMethodDecl);
-        var newSolution = document.WithSyntaxRoot(newRoot).Project.Solution;
-
-        // Update call sites
-        foreach (var callSite in callSites)
-        {
-            var callDoc = newSolution.GetDocument(callSite.Document.Id);
-            if (callDoc == null) continue;
-
-            var callRoot = await callDoc.GetSyntaxRootAsync(cancellationToken);
-            if (callRoot == null) continue;
-
-            var callNode = callRoot.FindNode(callSite.Location.SourceSpan);
-            var invocation = callNode.AncestorsAndSelf().OfType<InvocationExpressionSyntax>().FirstOrDefault();
-
-            if (invocation != null)
-            {
-                var newInvocation = UpdateInvocation(
-                    invocation,
-                    methodSymbol.Parameters.ToList(),
-                    newParameters,
-                    @params.Parameters);
-
-                var newCallRoot = callRoot.ReplaceNode(invocation, newInvocation);
-                newSolution = callDoc.WithSyntaxRoot(newCallRoot).Project.Solution;
-            }
+            return RefactoringResult.PreviewResult(
+                operationId,
+                await CreatePendingChangesAsync(newSolution, declarations, callSites, cancellationToken));
         }
 
         // Commit changes
@@ -183,7 +192,7 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
                 FullyQualifiedName = methodSymbol.ToDisplayString(),
                 Kind = Contracts.Enums.SymbolKind.Method
             },
-            callSites.Count,
+            callSites.Values.Sum(),
             0);
     }
 
@@ -192,15 +201,14 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
         IReadOnlyList<ParameterChange> changes)
     {
         var result = new List<NewParameter>();
-        var originalMap = originalParams.ToDictionary(p => p.Name);
-        var usedPositions = new HashSet<int>();
 
         // First pass: handle existing parameters and removals
         foreach (var change in changes.Where(c => c.OriginalName != null))
         {
             if (change.Remove) continue;
 
-            if (!originalMap.TryGetValue(change.OriginalName!, out var originalParam))
+            var index = originalParams.FindIndex(p => p.Name == change.OriginalName);
+            if (index < 0)
             {
                 throw new RefactoringException(
                     ErrorCodes.ParameterNotFound,
@@ -210,10 +218,10 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
             result.Add(new NewParameter
             {
                 Name = change.Name,
-                Type = change.Type ?? originalParam.Type.ToDisplayString(),
+                Type = change.Type,
                 DefaultValue = change.DefaultValue,
                 Position = change.NewPosition,
-                OriginalName = change.OriginalName
+                OriginalIndex = index
             });
         }
 
@@ -226,7 +234,7 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
                 Type = change.Type!,
                 DefaultValue = change.DefaultValue,
                 Position = change.NewPosition,
-                OriginalName = null
+                OriginalIndex = null
             });
         }
 
@@ -242,102 +250,271 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
         return result;
     }
 
-    private static ParameterSyntax CreateParameterSyntax(NewParameter param)
+    /// <summary>
+    /// The new parameter list of one family member. A kept parameter keeps its own declaration
+    /// (name, type, modifiers, attributes) except for what the request changes; its default
+    /// value is the request's, as before. An explicit interface implementation gets no default
+    /// values, which would have no effect there (CS1066).
+    /// </summary>
+    private static ParameterListSyntax BuildParameterList(
+        ParameterListSyntax original,
+        IReadOnlyList<NewParameter> newParameters,
+        IReadOnlyList<string?> renames,
+        IReadOnlyDictionary<NewParameter, TypeSyntax?> types,
+        bool isExplicitImplementation)
     {
-        var paramSyntax = SyntaxFactory.Parameter(SyntaxFactory.Identifier(param.Name))
-            .WithType(SyntaxFactory.ParseTypeName(param.Type).WithTrailingTrivia(SyntaxFactory.Space));
-
-        if (!string.IsNullOrEmpty(param.DefaultValue))
+        var parameters = new List<ParameterSyntax>();
+        foreach (var newParameter in newParameters)
         {
-            paramSyntax = paramSyntax.WithDefault(
-                SyntaxFactory.EqualsValueClause(
-                    SyntaxFactory.ParseExpression(param.DefaultValue)));
-        }
-
-        return paramSyntax;
-    }
-
-    private static InvocationExpressionSyntax UpdateInvocation(
-        InvocationExpressionSyntax invocation,
-        List<IParameterSymbol> originalParams,
-        List<NewParameter> newParams,
-        IReadOnlyList<ParameterChange> changes)
-    {
-        var originalArgs = invocation.ArgumentList.Arguments.ToList();
-        var newArgs = new List<ArgumentSyntax>();
-
-        // Build a map of original param name to argument
-        var argMap = new Dictionary<string, ArgumentSyntax>();
-        for (int i = 0; i < originalArgs.Count && i < originalParams.Count; i++)
-        {
-            var arg = originalArgs[i];
-            var paramName = arg.NameColon?.Name.Identifier.Text ?? originalParams[i].Name;
-            argMap[paramName] = arg;
-        }
-
-        foreach (var newParam in newParams)
-        {
-            if (newParam.OriginalName != null && argMap.TryGetValue(newParam.OriginalName, out var existingArg))
+            ParameterSyntax parameter;
+            if (newParameter.OriginalIndex is { } index)
             {
-                // Rename the argument if needed
-                if (newParam.Name != newParam.OriginalName && existingArg.NameColon != null)
-                {
-                    existingArg = existingArg.WithNameColon(
-                        SyntaxFactory.NameColon(newParam.Name));
-                }
-                newArgs.Add(existingArg);
-            }
-            else if (!string.IsNullOrEmpty(newParam.DefaultValue))
-            {
-                // New parameter with default - use default
-                newArgs.Add(SyntaxFactory.Argument(SyntaxFactory.ParseExpression(newParam.DefaultValue)));
+                parameter = original.Parameters[index];
+                if (renames[index] is { } name)
+                    parameter = parameter.WithIdentifier(SyntaxFactory.Identifier(name).WithTriviaFrom(parameter.Identifier));
+                if (types[newParameter] is { } type)
+                    parameter = parameter.WithType(parameter.Type == null ? type : type.WithTriviaFrom(parameter.Type));
             }
             else
             {
-                // New parameter without default - add placeholder
-                newArgs.Add(SyntaxFactory.Argument(
-                    SyntaxFactory.ParseExpression($"default /* TODO: {newParam.Name} */")));
+                parameter = SyntaxFactory.Parameter(SyntaxFactory.Identifier(newParameter.Name))
+                    .WithType(types[newParameter]!.WithTrailingTrivia(SyntaxFactory.Space));
+                if (original.Parameters.Count > 0)
+                    parameter = parameter.WithLeadingTrivia(original.Parameters[^1].GetLeadingTrivia());
             }
+
+            parameters.Add(WithDefault(parameter, isExplicitImplementation ? null : newParameter.DefaultValue));
         }
 
-        return invocation.WithArgumentList(
-            SyntaxFactory.ArgumentList(SyntaxFactory.SeparatedList(newArgs)));
+        return original.WithParameters(SyntaxFactory.SeparatedList(parameters, Separators(original.Parameters, parameters.Count)));
     }
 
-    private static RefactoringResult CreatePreviewResult(
-        Guid operationId,
-        ChangeSignatureParams @params,
-        List<IParameterSymbol> originalParams,
-        List<NewParameter> newParams,
-        int callSiteCount)
+    private static ParameterSyntax WithDefault(ParameterSyntax parameter, string? defaultValue)
     {
-        var oldSig = string.Join(", ", originalParams.Select(p => $"{p.Type.ToDisplayString()} {p.Name}"));
-        var newSig = string.Join(", ", newParams.Select(p =>
-            string.IsNullOrEmpty(p.DefaultValue)
-                ? $"{p.Type} {p.Name}"
-                : $"{p.Type} {p.Name} = {p.DefaultValue}"));
-
-        var pendingChanges = new List<PendingChange>
+        if (string.IsNullOrEmpty(defaultValue))
         {
-            new()
-            {
-                File = @params.SourceFile,
-                ChangeType = ChangeKind.Modify,
-                Description = $"Change signature of '{@params.MethodName}' ({callSiteCount} call sites to update)",
-                BeforeSnippet = $"{@params.MethodName}({oldSig})",
-                AfterSnippet = $"{@params.MethodName}({newSig})"
-            }
-        };
+            return parameter.Default == null
+                ? parameter
+                : parameter.WithDefault(null).WithIdentifier(parameter.Identifier.WithTrailingTrivia(
+                    parameter.Identifier.TrailingTrivia.Where(t => !t.IsKind(SyntaxKind.WhitespaceTrivia))));
+        }
 
-        return RefactoringResult.PreviewResult(operationId, pendingChanges);
+        var value = SyntaxFactory.ParseExpression(defaultValue);
+        if (parameter.Default != null)
+            return parameter.WithDefault(parameter.Default.WithValue(value.WithTriviaFrom(parameter.Default.Value)));
+
+        return parameter
+            .WithIdentifier(parameter.Identifier.WithTrailingTrivia(SyntaxFactory.Space))
+            .WithDefault(SyntaxFactory.EqualsValueClause(
+                SyntaxFactory.Token(SyntaxKind.EqualsToken).WithTrailingTrivia(SyntaxFactory.Space),
+                value));
+    }
+
+    /// <summary>
+    /// Separators for a list of <paramref name="count"/> items: the original ones (and so their
+    /// line breaks) as far as they go, then copies of the last one, or <c>", "</c>.
+    /// </summary>
+    private static IEnumerable<SyntaxToken> Separators<TNode>(SeparatedSyntaxList<TNode> original, int count)
+        where TNode : SyntaxNode
+    {
+        var fallback = original.SeparatorCount > 0
+            ? original.GetSeparator(original.SeparatorCount - 1)
+            : SyntaxFactory.Token(SyntaxKind.CommaToken).WithTrailingTrivia(SyntaxFactory.Space);
+
+        for (var i = 0; i < count - 1; i++)
+            yield return i < original.SeparatorCount ? original.GetSeparator(i) : fallback;
+    }
+
+    /// <summary>
+    /// Renames the uses of a renamed parameter inside <paramref name="declaration"/>: the body,
+    /// <c>nameof</c>, and documentation comments.
+    /// </summary>
+    private static void AddParameterRenames(
+        SyntaxEdits edits,
+        DocumentId document,
+        MethodDeclarationSyntax declaration,
+        SemanticModel model,
+        IMethodSymbol declared,
+        IReadOnlyList<string?> renames,
+        CancellationToken cancellationToken)
+    {
+        var renamed = new Dictionary<IParameterSymbol, string>(SymbolEqualityComparer.Default);
+        for (var i = 0; i < renames.Count; i++)
+        {
+            if (renames[i] is { } name && declared.Parameters[i].Name != name)
+                renamed[declared.Parameters[i]] = name;
+        }
+
+        if (renamed.Count == 0)
+            return;
+
+        foreach (var identifier in declaration.DescendantNodes(descendIntoTrivia: true).OfType<IdentifierNameSyntax>())
+        {
+            if (model.GetSymbolInfo(identifier, cancellationToken).Symbol is IParameterSymbol parameter &&
+                renamed.TryGetValue(parameter, out var name))
+            {
+                edits.Add(document, identifier, rewritten =>
+                {
+                    var node = (IdentifierNameSyntax)rewritten;
+                    return node.WithIdentifier(SyntaxFactory.Identifier(name).WithTriviaFrom(node.Identifier));
+                });
+            }
+        }
+    }
+
+    /// <summary>
+    /// Rewrites the arguments of a call to a family member found at <paramref name="location"/>.
+    /// Other references (method groups, <c>nameof</c>, crefs) are left alone.
+    /// </summary>
+    private static async Task<bool> TryAddCallSiteAsync(
+        SyntaxEdits edits,
+        ReferenceLocation location,
+        MemberFamily family,
+        IReadOnlyList<NewParameter> newParameters,
+        IReadOnlyList<string?> renames,
+        CancellationToken cancellationToken)
+    {
+        var root = await location.Document.GetSyntaxRootAsync(cancellationToken);
+        var model = await location.Document.GetSemanticModelAsync(cancellationToken);
+        if (root == null || model == null)
+            return false;
+
+        SyntaxNode callee = root.FindNode(location.Location.SourceSpan, getInnermostNodeForTie: true);
+        if (callee.Parent is MemberAccessExpressionSyntax access && access.Name == callee ||
+            callee.Parent is MemberBindingExpressionSyntax)
+        {
+            callee = callee.Parent;
+        }
+
+        if (callee.Parent is not InvocationExpressionSyntax invocation || invocation.Expression != callee ||
+            model.GetSymbolInfo(invocation, cancellationToken).Symbol is not IMethodSymbol invoked)
+        {
+            return false;
+        }
+
+        if (!family.Contains(invoked.ReducedFrom ?? invoked))
+            return false;
+
+        // A call in extension form passes the `this` parameter as the receiver.
+        var offset = invoked.ReducedFrom != null ? 1 : 0;
+        var parameters = invoked.Parameters;
+        var original = invocation.ArgumentList;
+
+        return edits.Add(location.Document.Id, original, rewritten =>
+            BuildArgumentList((ArgumentListSyntax)rewritten, parameters, offset, newParameters, renames) ?? rewritten);
+    }
+
+    /// <summary>
+    /// The new arguments of one call, in the new parameter order. Arguments are matched to
+    /// parameters by name or position (extra ones to a <c>params</c> parameter); a parameter the
+    /// call does not pass gets the request's default value, or a <c>TODO</c> placeholder.
+    /// Null when an argument names no parameter.
+    /// </summary>
+    private static ArgumentListSyntax? BuildArgumentList(
+        ArgumentListSyntax original,
+        IReadOnlyList<IParameterSymbol> parameters,
+        int offset,
+        IReadOnlyList<NewParameter> newParameters,
+        IReadOnlyList<string?> renames)
+    {
+        var passed = new Dictionary<int, List<ArgumentSyntax>>();
+        for (var i = 0; i < original.Arguments.Count; i++)
+        {
+            var argument = original.Arguments[i];
+            var index = argument.NameColon is { } nameColon
+                ? parameters.ToList().FindIndex(p => p.Name == nameColon.Name.Identifier.ValueText)
+                : Math.Min(i, parameters.Count - 1);
+            if (index < 0)
+                return null;
+
+            if (!passed.TryGetValue(index + offset, out var list))
+                passed[index + offset] = list = [];
+            list.Add(argument);
+        }
+
+        var arguments = new List<ArgumentSyntax>();
+        foreach (var newParameter in newParameters)
+        {
+            if (newParameter.OriginalIndex is { } index)
+            {
+                if (index < offset)
+                    continue; // the receiver
+
+                if (passed.TryGetValue(index, out var list))
+                {
+                    arguments.AddRange(list.Select(a => a.NameColon != null && renames[index] is { } name
+                        ? a.WithNameColon(a.NameColon.WithName(SyntaxFactory.IdentifierName(name).WithTriviaFrom(a.NameColon.Name)))
+                        : a));
+                    continue;
+                }
+
+                // An omitted params array stays omitted while it is still last.
+                if (parameters[index - offset].IsParams && newParameter == newParameters[^1])
+                    continue;
+            }
+
+            arguments.Add(SyntaxFactory.Argument(SyntaxFactory.ParseExpression(
+                string.IsNullOrEmpty(newParameter.DefaultValue)
+                    ? $"default /* TODO: {newParameter.Name} */"
+                    : newParameter.DefaultValue)));
+        }
+
+        return original.WithArguments(SyntaxFactory.SeparatedList(arguments, Separators(original.Arguments, arguments.Count)));
+    }
+
+    /// <summary>
+    /// One pending change per changed declaration (its parameter list before and after) and
+    /// one per document with updated calls.
+    /// </summary>
+    private static async Task<List<PendingChange>> CreatePendingChangesAsync(
+        Solution newSolution,
+        List<(Document Document, MethodDeclarationSyntax Declaration, SyntaxAnnotation Annotation, IMethodSymbol Symbol)> declarations,
+        Dictionary<DocumentId, int> callSites,
+        CancellationToken cancellationToken)
+    {
+        var changes = new List<PendingChange>();
+        foreach (var (document, declaration, annotation, symbol) in declarations)
+        {
+            var newRoot = await newSolution.GetDocument(document.Id)!.GetSyntaxRootAsync(cancellationToken);
+            var line = declaration.Identifier.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
+
+            changes.Add(new PendingChange
+            {
+                File = document.FilePath ?? document.Name,
+                ChangeType = ChangeKind.Modify,
+                Description = $"Change the parameters of '{symbol.ToDisplayString()}'",
+                BeforeSnippet = declaration.Identifier.Text + declaration.ParameterList,
+                AfterSnippet = declaration.Identifier.Text + newRoot?.GetAnnotatedNodes(annotation).FirstOrDefault(),
+                StartLine = line,
+                EndLine = line
+            });
+        }
+
+        foreach (var (id, count) in callSites.OrderBy(c => newSolution.GetDocument(c.Key)?.FilePath, StringComparer.OrdinalIgnoreCase))
+        {
+            var document = newSolution.GetDocument(id)!;
+            changes.Add(new PendingChange
+            {
+                File = document.FilePath ?? document.Name,
+                ChangeType = ChangeKind.Modify,
+                Description = count == 1 ? "Update 1 call site" : $"Update {count} call sites"
+            });
+        }
+
+        return changes;
     }
 
     private sealed class NewParameter
     {
         public required string Name { get; init; }
-        public required string Type { get; init; }
+
+        /// <summary>The type the request gives, or null to keep each member's own.</summary>
+        public string? Type { get; init; }
+
         public string? DefaultValue { get; init; }
         public int? Position { get; init; }
-        public string? OriginalName { get; init; }
+
+        /// <summary>The position the parameter had, or null for a new one.</summary>
+        public int? OriginalIndex { get; init; }
     }
 }

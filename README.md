@@ -222,7 +222,7 @@ All tools accept a `solutionPath` parameter (absolute path to a `.sln`, `.slnx`,
 
 | Tool | Description | Key Parameters |
 |------|-------------|----------------|
-| `change_signature` | Add, remove, or reorder method parameters and update all call sites. | `sourceFile`, `methodName`, `parameters` (array of changes), `line` |
+| `change_signature` | Add, remove, rename or reorder method parameters and update all call sites. Applies to the whole override / implementation family (base and interface members, overrides, implementations), matching parameters by position. | `sourceFile`, `methodName`, `parameters` (array of changes), `line` |
 | `encapsulate_field` | Convert a field to a property with backing field. | `sourceFile`, `fieldName`, `propertyName`, `readOnly` |
 
 ### Generate

@@ -305,6 +305,22 @@ public static class ErrorCodes
     /// <summary>Start/end line range is invalid for data or control flow analysis.</summary>
     public const string InvalidRegion = "3100";
 
+    // --------------------------------------------
+    // Signature Errors (3110-3119)
+    // --------------------------------------------
+
+    /// <summary>
+    /// A member that overrides, implements or is implemented by the changed member is declared
+    /// in metadata or generated code, so the family's signature cannot change.
+    /// </summary>
+    public const string FamilyMemberNotInSource = "3110";
+
+    /// <summary>
+    /// A type mentions a type parameter that has no counterpart in an override or
+    /// implementation, so it cannot be written there.
+    /// </summary>
+    public const string TypeNotExpressible = "3111";
+
     // ============================================
     // System Errors (4xxx)
     // ============================================

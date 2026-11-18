@@ -168,7 +168,7 @@ public sealed class ToolRegistry
 
         // ── Refactoring: Signature (1) ────────────────────────────────
         r.RegisterRefactoring<ChangeSignatureOperation, ChangeSignatureParams>(
-            "change-signature", "Add, remove, or reorder method parameters");
+            "change-signature", "Add, remove, rename or reorder method parameters (with overrides and implementations)");
 
         // ── Refactoring: Encapsulate (1) ──────────────────────────────
         r.RegisterRefactoring<EncapsulateFieldOperation, EncapsulateFieldParams>(

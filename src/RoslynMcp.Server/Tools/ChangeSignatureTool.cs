@@ -28,7 +28,10 @@ public sealed class ChangeSignatureTool : IToolHandler
     public string Name => "change_signature";
 
     /// <inheritdoc />
-    public string Description => "Add, remove, or reorder method parameters and update all call sites.";
+    public string Description =>
+        "Add, remove, rename or reorder method parameters and update all call sites. The change also applies to the " +
+        "members the method overrides or implements and to its overrides and implementations, matching parameters by " +
+        "position. Refused when a member of that family is declared in metadata (e.g. an override of object.ToString).";
 
     /// <inheritdoc />
     public object InputSchema => new

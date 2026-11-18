@@ -656,8 +656,23 @@ public sealed class WorkspaceContext : IDisposable
     /// commit operations are attempted concurrently on the same workspace context.
     /// Files are written sequentially to avoid file locking issues.
     /// </remarks>
+    public Task<CommitResult> CommitChangesAsync(
+        Solution newSolution,
+        CancellationToken cancellationToken = default) =>
+        CommitChangesAsync(newSolution, newFilesEncodingFrom: null, cancellationToken);
+
+    /// <summary>
+    /// Commits all pending changes to the filesystem. A file the commit creates takes the
+    /// encoding of an existing file: a document moved to a new path that of its old path,
+    /// an added document that of <paramref name="newFilesEncodingFrom"/> (e.g. the file a
+    /// type was split off from). Encodings are read before anything is written or deleted.
+    /// </summary>
+    /// <param name="newSolution">Solution with changes to commit.</param>
+    /// <param name="newFilesEncodingFrom">Existing file whose encoding added documents take.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
     public async Task<CommitResult> CommitChangesAsync(
         Solution newSolution,
+        string? newFilesEncodingFrom,
         CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
@@ -688,25 +703,31 @@ public sealed class WorkspaceContext : IDisposable
                     if (doc?.FilePath == null) continue;
 
                     var filePath = doc.FilePath;
+                    var encoding = newFilesEncodingFrom == null ? null : _fileWriter.GetEncoding(newFilesEncodingFrom);
                     fileOperations.Add((filePath, async () =>
                     {
                         var text = await doc.GetTextAsync(cancellationToken);
-                        await _fileWriter.WriteAsync(filePath, text.ToString(), cancellationToken);
+                        await _fileWriter.WriteAsync(filePath, text.ToString(), encoding, cancellationToken);
                     }, "created"));
                     filesCreated.Add(filePath);
                 }
 
-                // Handle changed documents
+                // Handle changed documents. One repointed at a new path (a renamed file) is
+                // written there as a new file, in the encoding of the file at its old path.
                 foreach (var docId in projectChanges.GetChangedDocuments())
                 {
                     var doc = newSolution.GetDocument(docId);
                     if (doc?.FilePath == null) continue;
 
                     var filePath = doc.FilePath;
+                    var oldPath = _solution.GetDocument(docId)?.FilePath;
+                    var encoding = oldPath != null && !PathResolver.PathsEqual(oldPath, filePath)
+                        ? _fileWriter.GetEncoding(oldPath)
+                        : null;
                     fileOperations.Add((filePath, async () =>
                     {
                         var text = await doc.GetTextAsync(cancellationToken);
-                        await _fileWriter.WriteAsync(filePath, text.ToString(), cancellationToken);
+                        await _fileWriter.WriteAsync(filePath, text.ToString(), encoding, cancellationToken);
                     }, "modified"));
                     filesModified.Add(filePath);
                 }

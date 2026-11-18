@@ -6,6 +6,7 @@ using RoslynMcp.Contracts.Enums;
 using RoslynMcp.Contracts.Errors;
 using RoslynMcp.Contracts.Models;
 using RoslynMcp.Core.FileSystem;
+using RoslynMcp.Core.Refactoring.Utilities;
 using RoslynMcp.Core.Resolution;
 using RoslynMcp.Core.Workspace;
 
@@ -78,8 +79,9 @@ public sealed class MoveTypeToFileOperation
                 return CreatePreviewResult(operationId, changeInfo, resolution);
             }
 
-            // Commit changes
-            var commitResult = await _context.CommitChangesAsync(newSolution, cancellationToken);
+            // Commit changes; a new target file takes the encoding of the file the type comes from.
+            var commitResult = await _context.CommitChangesAsync(
+                newSolution, resolution.Document.FilePath, cancellationToken);
 
             if (!commitResult.Success)
             {
@@ -207,8 +209,9 @@ public sealed class MoveTypeToFileOperation
             .OfType<UsingDirectiveSyntax>()
             .ToList();
 
-        // Create the target file content
-        var targetContent = CreateTargetFileContent(typeNode, namespaceName, usings);
+        // Create the target file content, with the source file's line ending
+        var lineEnding = await LineEndings.GetAsync(sourceDoc, cancellationToken);
+        var targetContent = CreateTargetFileContent(typeNode, namespaceName, usings, lineEnding);
 
         // Check if target document exists
         var targetDoc = _context.GetDocumentByPath(@params.TargetFile);
@@ -259,10 +262,11 @@ public sealed class MoveTypeToFileOperation
     private string CreateTargetFileContent(
         TypeDeclarationSyntax typeNode,
         string namespaceName,
-        List<UsingDirectiveSyntax> usings)
+        List<UsingDirectiveSyntax> usings,
+        string lineEnding)
     {
         // Build using directives
-        var usingStatements = string.Join("\n", usings.Select(u => u.ToFullString().TrimEnd()));
+        var usingStatements = string.Join(lineEnding, usings.Select(u => u.ToFullString().TrimEnd()));
 
         // Use file-scoped namespace (modern C# style)
         var namespaceDecl = $"namespace {namespaceName};";
@@ -270,9 +274,10 @@ public sealed class MoveTypeToFileOperation
         // Get the type declaration with original formatting
         var typeDecl = typeNode.ToFullString();
 
+        var blankLine = lineEnding + lineEnding;
         var content = string.IsNullOrEmpty(usingStatements)
-            ? $"{namespaceDecl}\n\n{typeDecl}"
-            : $"{usingStatements}\n\n{namespaceDecl}\n\n{typeDecl}";
+            ? $"{namespaceDecl}{blankLine}{typeDecl}"
+            : $"{usingStatements}{blankLine}{namespaceDecl}{blankLine}{typeDecl}";
 
         return content.TrimStart();
     }

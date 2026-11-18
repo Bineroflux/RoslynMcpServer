@@ -87,6 +87,40 @@ public class AtomicFileWriterTests : IDisposable
     }
 
     [Fact]
+    public async Task WriteAsync_NewFile_UsesTheGivenEncoding()
+    {
+        var filePath = Path.Combine(_tempDir, "renamed.cs");
+
+        await _writer.WriteAsync(filePath, "class A { }", new System.Text.UTF8Encoding(false), TestContext.Current.CancellationToken);
+
+        Assert.Equal("class A { }"u8.ToArray(), await File.ReadAllBytesAsync(filePath, TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task WriteAsync_ExistingFile_KeepsItsOwnEncodingOverTheGivenOne()
+    {
+        var filePath = Path.Combine(_tempDir, "existing.cs");
+        await File.WriteAllBytesAsync(filePath, "class A { }"u8.ToArray(), TestContext.Current.CancellationToken);
+
+        await _writer.WriteAsync(filePath, "class B { }", System.Text.Encoding.UTF8, TestContext.Current.CancellationToken);
+
+        Assert.Equal("class B { }"u8.ToArray(), await File.ReadAllBytesAsync(filePath, TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public void GetEncoding_DescribesAnExistingFileOnly()
+    {
+        var withBom = Path.Combine(_tempDir, "bom.cs");
+        var withoutBom = Path.Combine(_tempDir, "plain.cs");
+        File.WriteAllText(withBom, "class A { }", new System.Text.UTF8Encoding(true));
+        File.WriteAllText(withoutBom, "class A { }", new System.Text.UTF8Encoding(false));
+
+        Assert.NotEmpty(_writer.GetEncoding(withBom)!.GetPreamble());
+        Assert.Empty(_writer.GetEncoding(withoutBom)!.GetPreamble());
+        Assert.Null(_writer.GetEncoding(Path.Combine(_tempDir, "missing.cs")));
+    }
+
+    [Fact]
     public async Task WriteAsync_CreatesDirectoryIfNotExists()
     {
         // Arrange

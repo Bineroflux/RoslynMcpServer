@@ -8,12 +8,18 @@ namespace RoslynMcp.Core.FileSystem;
 /// </summary>
 /// <remarks>
 /// An existing file keeps its encoding: a file without a byte order mark is rewritten
-/// without one, and a UTF-8 or UTF-16 BOM is kept. New files are written as UTF-8 with BOM.
+/// without one, and a UTF-8 or UTF-16 BOM is kept. New files are written in the encoding
+/// the caller passes (a renamed or split-off file takes its source's), otherwise as UTF-8
+/// with BOM.
 /// </remarks>
 public sealed class AtomicFileWriter : IFileWriter
 {
     /// <inheritdoc />
-    public async Task WriteAsync(string filePath, string content, CancellationToken cancellationToken = default)
+    public Task WriteAsync(string filePath, string content, CancellationToken cancellationToken = default) =>
+        WriteAsync(filePath, content, newFileEncoding: null, cancellationToken);
+
+    /// <inheritdoc />
+    public async Task WriteAsync(string filePath, string content, Encoding? newFileEncoding, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(filePath);
 
@@ -27,7 +33,8 @@ public sealed class AtomicFileWriter : IFileWriter
         try
         {
             // Write to temp file
-            await File.WriteAllTextAsync(tempFilePath, content, GetEncoding(filePath), cancellationToken);
+            var encoding = GetEncoding(filePath) ?? newFileEncoding ?? Encoding.UTF8;
+            await File.WriteAllTextAsync(tempFilePath, content, encoding, cancellationToken);
 
             // Atomic rename (same filesystem)
             if (File.Exists(filePath))
@@ -64,15 +71,16 @@ public sealed class AtomicFileWriter : IFileWriter
         }
     }
 
-    /// <summary>
-    /// The encoding to write <paramref name="filePath"/> with, derived from the byte order
-    /// mark of the file it replaces (UTF-8 without BOM when it has none).
-    /// </summary>
-    private static Encoding GetEncoding(string filePath)
+    /// <inheritdoc />
+    /// <remarks>
+    /// Derived from the file's byte order mark: UTF-8 or UTF-16 as it indicates, UTF-8
+    /// without BOM when it has none.
+    /// </remarks>
+    public Encoding? GetEncoding(string filePath)
     {
         if (!File.Exists(filePath))
         {
-            return Encoding.UTF8;
+            return null;
         }
 
         Span<byte> preamble = stackalloc byte[3];

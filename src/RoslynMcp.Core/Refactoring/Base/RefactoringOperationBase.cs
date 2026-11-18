@@ -146,7 +146,8 @@ public abstract class RefactoringOperationBase<TParams> : IRefactoringOperation<
             WorkspaceLoadMs = workspaceLoadMs,
             TotalExecutionTimeMs = opMs + workspaceLoadMs,
             Error = result.Error,
-            PendingChanges = result.PendingChanges
+            PendingChanges = result.PendingChanges,
+            Warnings = result.Warnings
         };
     }
 }

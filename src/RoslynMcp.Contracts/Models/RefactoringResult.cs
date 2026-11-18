@@ -1,3 +1,4 @@
+using System.Text.Json.Serialization;
 using RoslynMcp.Contracts.Errors;
 
 namespace RoslynMcp.Contracts.Models;
@@ -72,6 +73,13 @@ public sealed class RefactoringResult
     /// Pending changes for preview mode.
     /// </summary>
     public IReadOnlyList<PendingChange>? PendingChanges { get; init; }
+
+    /// <summary>
+    /// Problems the operation leaves behind without failing, e.g. the compiler errors a
+    /// declaration-only change causes. Omitted when the operation reports none.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<string>? Warnings { get; init; }
 
     /// <summary>
     /// Creates a successful result.

@@ -76,6 +76,13 @@ public static class OutputFormatter
             sb.AppendLine($"  References updated: {r.ReferencesUpdated}");
         }
 
+        if (r.Warnings is { Count: > 0 })
+        {
+            sb.AppendLine($"  Warnings: {r.Warnings.Count}");
+            foreach (var warning in r.Warnings)
+                sb.AppendLine($"    {warning}");
+        }
+
         sb.AppendLine($"  Duration: {r.ExecutionTimeMs}ms");
         return sb.ToString();
     }

@@ -50,6 +50,7 @@ public sealed class McpRequestDispatcher
         _toolRegistry.Register(new InlineVariableTool(workspaceProvider));
         _toolRegistry.Register(new ExtractConstantTool(workspaceProvider));
         _toolRegistry.Register(new ChangeSignatureTool(workspaceProvider));
+        _toolRegistry.Register(new ChangeReturnTypeTool(workspaceProvider));
         _toolRegistry.Register(new EncapsulateFieldTool(workspaceProvider));
         _toolRegistry.Register(new ConvertToAsyncTool(workspaceProvider));
         _toolRegistry.Register(new ExtractBaseClassTool(workspaceProvider));

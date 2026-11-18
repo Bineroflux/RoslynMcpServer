@@ -297,8 +297,11 @@ public static class SyntaxGenerationHelper
     /// usings in scope allow (see <see cref="GeneratedCodeFormatter.FormatAsync"/>).
     /// </summary>
     internal static TypeSyntax CreateTypeSyntax(ITypeSymbol type, bool nullableAnnotations) =>
-        SyntaxFactory.ParseTypeName(type.ToDisplayString(nullableAnnotations ? AnnotatedTypeFormat : ObliviousTypeFormat))
-            .WithAdditionalAnnotations(Simplifier.Annotation);
+        type.SpecialType == SpecialType.System_Void
+            // Parsed on its own, void carries CS1547 into the tree.
+            ? SyntaxFactory.PredefinedType(SyntaxFactory.Token(SyntaxKind.VoidKeyword))
+            : SyntaxFactory.ParseTypeName(type.ToDisplayString(nullableAnnotations ? AnnotatedTypeFormat : ObliviousTypeFormat))
+                .WithAdditionalAnnotations(Simplifier.Annotation);
 
     private static MethodDeclarationSyntax CreateInterfaceMethod(IMethodSymbol method, bool nullableAnnotations)
     {

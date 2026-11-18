@@ -334,7 +334,9 @@ public sealed class AddMissingUsingsOperation : RefactoringOperationBase<AddMiss
 
     /// <summary>
     /// Adds using directives for <paramref name="namespaces"/>, each ending in the
-    /// document's <paramref name="lineEnding"/>, and re-sorts the file's usings.
+    /// document's <paramref name="lineEnding"/>, and re-sorts the file's usings. A using
+    /// block created in a file that had none is separated from the code after it by a blank
+    /// line.
     /// </summary>
     private static CompilationUnitSyntax AddUsings(
         CompilationUnitSyntax root,
@@ -347,6 +349,15 @@ public sealed class AddMissingUsingsOperation : RefactoringOperationBase<AddMiss
                 .WithTrailingTrivia(SyntaxFactory.EndOfLine(lineEnding)));
 
         var sortedUsings = UsingDirectiveSorter.Sort(root.Usings.AddRange(newUsingDirectives));
+
+        var following = (root.AttributeLists.FirstOrDefault() ?? (SyntaxNode?)root.Members.FirstOrDefault())?.GetFirstToken();
+        if (root.Usings.Count == 0 && sortedUsings.Count > 0 && following is { } next &&
+            !next.LeadingTrivia.FirstOrDefault().IsKind(SyntaxKind.EndOfLineTrivia))
+        {
+            var last = sortedUsings[^1];
+            sortedUsings[^1] = last.WithTrailingTrivia(last.GetTrailingTrivia().Add(SyntaxFactory.EndOfLine(lineEnding)));
+        }
+
         return root.WithUsings(SyntaxFactory.List(sortedUsings));
     }
 

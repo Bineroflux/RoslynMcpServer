@@ -144,9 +144,22 @@ public sealed class ImplementInterfaceOperation : RefactoringOperationBase<Imple
         // Get unimplemented members
         var unimplementedMembers = MemberAnalyzer.GetUnimplementedMembers(typeSymbol, interfaceSymbol).ToList();
 
-        // Filter to requested members if specified
+        // Filter to requested members if specified. A name the interface does not have is an
+        // error rather than silently dropped (one it has but that is implemented already is not).
         if (@params.Members != null && @params.Members.Count > 0)
         {
+            var interfaceMemberNames = interfaceSymbol.AllInterfaces.Prepend(interfaceSymbol)
+                .SelectMany(i => i.GetMembers())
+                .Select(m => m.Name)
+                .ToHashSet();
+            var notFound = @params.Members.Where(name => !interfaceMemberNames.Contains(name)).ToList();
+            if (notFound.Count > 0)
+            {
+                throw new RefactoringException(
+                    ErrorCodes.MemberNotFound,
+                    $"Members not found in '{interfaceSymbol.Name}': {string.Join(", ", notFound)}");
+            }
+
             var requestedSet = new HashSet<string>(@params.Members);
             unimplementedMembers = unimplementedMembers.Where(m => requestedSet.Contains(m.Name)).ToList();
         }

@@ -1,4 +1,5 @@
 using Microsoft.CodeAnalysis;
+using RoslynMcp.Contracts.Errors;
 
 namespace RoslynMcp.Core.Refactoring.Utilities;
 
@@ -34,11 +35,20 @@ public static class EqualityMemberCollector
             members.Add(prop);
         }
 
-        // Filter to requested members if specified
+        // Filter to requested members if specified; a name that matches none is an error,
+        // not something to drop silently.
         if (requestedFields != null && requestedFields.Count > 0)
         {
             var requestedSet = new HashSet<string>(requestedFields);
             members = members.Where(m => requestedSet.Contains(m.Name)).ToList();
+
+            var notFound = requestedFields.Where(name => members.All(m => m.Name != name)).ToList();
+            if (notFound.Count > 0)
+            {
+                throw new RefactoringException(
+                    ErrorCodes.MemberNotFound,
+                    $"Fields or properties not found (instance fields and readable non-indexer properties only): {string.Join(", ", notFound)}");
+            }
         }
 
         return members;

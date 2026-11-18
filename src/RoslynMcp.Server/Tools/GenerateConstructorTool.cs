@@ -56,7 +56,7 @@ public sealed class GenerateConstructorTool : IToolHandler
             {
                 type = "array",
                 items = new { type = "string" },
-                description = "Names of fields/properties to initialize. If not specified, uses all uninitialized fields and settable properties."
+                description = "Names of fields/properties to initialize. If not specified, uses all instance fields (including ones with an initializer) and settable properties."
             },
             addNullChecks = new
             {

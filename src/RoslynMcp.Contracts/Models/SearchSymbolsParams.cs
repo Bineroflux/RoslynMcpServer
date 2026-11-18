@@ -19,4 +19,32 @@ public sealed class SearchSymbolsParams
     /// Maximum number of results to return.
     /// </summary>
     public int? MaxResults { get; init; }
+
+    /// <summary>
+    /// Whether the symbol name must equal the query instead of containing it. Default: false.
+    /// </summary>
+    public bool? ExactMatch { get; init; }
+
+    /// <summary>
+    /// Whether the query is matched case-sensitively. Default: false.
+    /// </summary>
+    public bool? CaseSensitive { get; init; }
+
+    /// <summary>
+    /// Absolute path to a project file of the solution. Only that project (every target
+    /// framework of it) is searched.
+    /// </summary>
+    public string? ProjectPath { get; init; }
+
+    /// <summary>
+    /// Only symbols declared in this namespace or one nested in it, matched by whole segments
+    /// and case-insensitively: <c>App.Core</c> matches <c>App.Core.X</c> but not <c>App.CoreUtils</c>.
+    /// </summary>
+    public string? NamespaceFilter { get; init; }
+
+    /// <summary>
+    /// Absolute path to a source file. Only symbols declared in it (for a partial type, any
+    /// of its declarations).
+    /// </summary>
+    public string? SourceFile { get; init; }
 }

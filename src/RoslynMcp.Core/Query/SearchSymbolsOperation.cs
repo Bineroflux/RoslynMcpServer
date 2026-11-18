@@ -2,6 +2,7 @@ using Microsoft.CodeAnalysis;
 using RoslynMcp.Contracts.Errors;
 using RoslynMcp.Contracts.Models;
 using RoslynMcp.Core.Query.Base;
+using RoslynMcp.Core.Query.Utilities;
 using RoslynMcp.Core.Refactoring;
 using RoslynMcp.Core.Resolution;
 using RoslynMcp.Core.Workspace;
@@ -27,6 +28,9 @@ public sealed class SearchSymbolsOperation : QueryOperationBase<SearchSymbolsPar
 
         if (@params.MaxResults.HasValue && @params.MaxResults.Value < 1)
             throw new RefactoringException(ErrorCodes.MissingRequiredParam, "maxResults must be >= 1.");
+
+        QueryScope.ValidateProjectPath(@params.ProjectPath);
+        QueryScope.ValidateFilePath(@params.SourceFile, "sourceFile");
     }
 
     /// <inheritdoc />
@@ -37,9 +41,15 @@ public sealed class SearchSymbolsOperation : QueryOperationBase<SearchSymbolsPar
     {
         var query = @params.Query;
         var maxResults = @params.MaxResults ?? 50;
-        var kindFilter = ParseKindFilter(@params.KindFilter);
+        var kindFilter = SymbolKindFilter.Parse(@params.KindFilter);
+        var exactMatch = @params.ExactMatch ?? false;
+        var comparison = @params.CaseSensitive == true ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
+        var namespaceFilter = NormalizeNamespaceFilter(@params.NamespaceFilter);
+        var projectScope = QueryScope.ResolveProject(Context.Solution, @params.ProjectPath);
+        var fileScope = QueryScope.ResolveFile(Context.Solution, @params.SourceFile, "sourceFile");
 
         var entries = new List<SymbolSearchEntry>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
         var totalCount = 0;
 
         // Determine the SymbolFilter based on kindFilter
@@ -47,16 +57,29 @@ public sealed class SearchSymbolsOperation : QueryOperationBase<SearchSymbolsPar
             ? GetSymbolFilter(kindFilter.Value)
             : SymbolFilter.All;
 
-        foreach (var project in Context.Solution.Projects)
+        // Compile only the projects the scopes leave: the project path's, and those compiling the file.
+        IEnumerable<Project> projects = projectScope?.Projects ?? Context.Solution.Projects;
+        if (fileScope is not null)
+        {
+            var fileProjects = fileScope.Documents.Select(d => d.Project.Id).ToHashSet();
+            projects = projects.Where(p => fileProjects.Contains(p.Id));
+        }
+
+        foreach (var project in projects)
         {
             var compilation = await project.GetCompilationAsync(cancellationToken);
             if (compilation == null) continue;
 
-            // Use GetSymbolsWithName with substring predicate
-            var symbols = compilation.GetSymbolsWithName(
-                name => name.Contains(query, StringComparison.OrdinalIgnoreCase),
-                symbolFilter,
-                cancellationToken);
+            // The name overload is an exact, case-sensitive lookup in the declaration index;
+            // anything else needs the predicate.
+            var symbols = exactMatch && comparison == StringComparison.Ordinal
+                ? compilation.GetSymbolsWithName(query, symbolFilter, cancellationToken)
+                : compilation.GetSymbolsWithName(
+                    exactMatch
+                        ? name => string.Equals(name, query, comparison)
+                        : name => name.Contains(query, comparison),
+                    symbolFilter,
+                    cancellationToken);
 
             foreach (var symbol in symbols)
             {
@@ -68,17 +91,24 @@ public sealed class SearchSymbolsOperation : QueryOperationBase<SearchSymbolsPar
                 if (kindFilter.HasValue && SymbolKindMapper.Map(symbol) != kindFilter.Value)
                     continue;
 
-                // Skip duplicates (same symbol can appear in multiple compilations)
+                if (namespaceFilter is not null && !IsInNamespace(symbol, namespaceFilter))
+                    continue;
+
+                // With a sourceFile, report the declaration in that file (any part of a partial type).
+                var location = fileScope is null
+                    ? symbol.Locations.FirstOrDefault(l => l.IsInSource)
+                    : symbol.Locations.FirstOrDefault(l => l.IsInSource && fileScope.ContainsFile(l.SourceTree?.FilePath));
+                if (location == null) continue;
+
+                // Skip duplicates (same symbol can appear in multiple compilations). Tracked
+                // apart from the returned entries so totalCount stays right past maxResults.
                 var fqn = symbol.ToDisplayString();
-                if (entries.Any(e => e.FullyQualifiedName == fqn)) continue;
+                if (!seen.Add(fqn)) continue;
 
                 totalCount++;
 
                 if (entries.Count < maxResults)
                 {
-                    var location = symbol.Locations.FirstOrDefault(l => l.IsInSource);
-                    if (location == null) continue;
-
                     var lineSpan = location.GetLineSpan();
                     entries.Add(new SymbolSearchEntry
                     {
@@ -105,19 +135,39 @@ public sealed class SearchSymbolsOperation : QueryOperationBase<SearchSymbolsPar
         return QueryResult<SearchSymbolsResult>.Succeeded(operationId, result);
     }
 
-    private static Contracts.Enums.SymbolKind? ParseKindFilter(string? kindFilter)
+    /// <summary>
+    /// The namespace filter without a <c>global::</c> prefix or surrounding dots, or null
+    /// when there is none.
+    /// </summary>
+    private static string? NormalizeNamespaceFilter(string? namespaceFilter)
     {
-        if (string.IsNullOrWhiteSpace(kindFilter)) return null;
+        if (string.IsNullOrWhiteSpace(namespaceFilter))
+            return null;
 
-        if (!System.Enum.TryParse<Contracts.Enums.SymbolKind>(kindFilter, ignoreCase: true, out var kind))
-        {
-            var validKinds = string.Join(", ", System.Enum.GetNames<Contracts.Enums.SymbolKind>());
-            throw new RefactoringException(
-                ErrorCodes.InvalidSymbolKind,
-                $"Invalid kindFilter '{kindFilter}'. Valid values: {validKinds}");
-        }
+        var trimmed = namespaceFilter.Trim();
+        if (trimmed.StartsWith("global::", StringComparison.Ordinal))
+            trimmed = trimmed["global::".Length..];
 
-        return kind;
+        trimmed = trimmed.Trim('.');
+        return trimmed.Length == 0 ? null : trimmed;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="symbol"/> is declared in <paramref name="namespaceName"/> or a
+    /// namespace nested in it, comparing whole segments case-insensitively. A namespace symbol
+    /// is tested by its own name, so the filter also finds the namespace it names.
+    /// </summary>
+    private static bool IsInNamespace(ISymbol symbol, string namespaceName)
+    {
+        var ns = symbol as INamespaceSymbol ?? symbol.ContainingNamespace;
+        if (ns is null || ns.IsGlobalNamespace)
+            return false;
+
+        var name = ns.ToDisplayString();
+        return name.Equals(namespaceName, StringComparison.OrdinalIgnoreCase)
+            || (name.Length > namespaceName.Length
+                && name[namespaceName.Length] == '.'
+                && name.StartsWith(namespaceName, StringComparison.OrdinalIgnoreCase));
     }
 
     private static SymbolFilter GetSymbolFilter(Contracts.Enums.SymbolKind kind)

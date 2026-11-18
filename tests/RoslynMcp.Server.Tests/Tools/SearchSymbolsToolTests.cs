@@ -71,6 +71,17 @@ public class SearchSymbolsToolTests
         Assert.Contains("query", requiredFields);
     }
 
+    [Theory]
+    [InlineData("exactMatch", "boolean")]
+    [InlineData("caseSensitive", "boolean")]
+    [InlineData("projectPath", "string")]
+    [InlineData("namespaceFilter", "string")]
+    [InlineData("sourceFile", "string")]
+    public void GetDefinition_HasFilteringParameters(string name, string type)
+    {
+        SchemaAssert.HasOptionalProperty(_tool, name, type);
+    }
+
     [Fact]
     public void GetDefinition_HasProperties_ForAllParameters()
     {

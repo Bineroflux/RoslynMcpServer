@@ -28,7 +28,7 @@ public sealed class SearchSymbolsTool : IToolHandler
     public string Name => "search_symbols";
 
     /// <inheritdoc />
-    public string Description => "Search for C# symbols by name pattern across the solution. Supports substring matching and filtering by symbol kind (Class, Method, Property, etc.).";
+    public string Description => "Search for C# symbols by name across the solution: substring or exact match, optionally case-sensitive, filtered by symbol kind (Class, Method, Property, etc.), project, namespace or file.";
 
     /// <inheritdoc />
     public object InputSchema => new
@@ -45,7 +45,7 @@ public sealed class SearchSymbolsTool : IToolHandler
             query = new
             {
                 type = "string",
-                description = "Name pattern to search for (substring matching)"
+                description = "Name to search for: a case-insensitive substring unless exactMatch/caseSensitive say otherwise"
             },
             kindFilter = new
             {
@@ -57,6 +57,31 @@ public sealed class SearchSymbolsTool : IToolHandler
                 type = "integer",
                 description = "Maximum number of results to return (default: 50)",
                 minimum = 1
+            },
+            exactMatch = new
+            {
+                type = "boolean",
+                description = "Match the whole symbol name instead of a substring (default: false)"
+            },
+            caseSensitive = new
+            {
+                type = "boolean",
+                description = "Match the query case-sensitively (default: false)"
+            },
+            projectPath = new
+            {
+                type = "string",
+                description = "Absolute path to a project file of the solution. Searches only that project (all its target frameworks)."
+            },
+            namespaceFilter = new
+            {
+                type = "string",
+                description = "Only symbols in this namespace or a nested one, by whole segments, case-insensitive: App.Core matches App.Core.X, not App.CoreUtils"
+            },
+            sourceFile = new
+            {
+                type = "string",
+                description = "Absolute path to a .cs file. Only symbols declared in it (any declaration of a partial type)."
             }
         },
         additionalProperties = false
@@ -81,7 +106,12 @@ public sealed class SearchSymbolsTool : IToolHandler
             {
                 Query = args.Query,
                 KindFilter = args.KindFilter,
-                MaxResults = args.MaxResults
+                MaxResults = args.MaxResults,
+                ExactMatch = args.ExactMatch,
+                CaseSensitive = args.CaseSensitive,
+                ProjectPath = args.ProjectPath,
+                NamespaceFilter = args.NamespaceFilter,
+                SourceFile = args.SourceFile
             };
 
             var result = await operation.ExecuteAsync(@params, cancellationToken);
@@ -111,5 +141,10 @@ public sealed class SearchSymbolsTool : IToolHandler
         public string Query { get; init; } = "";
         public string? KindFilter { get; init; }
         public int? MaxResults { get; init; }
+        public bool? ExactMatch { get; init; }
+        public bool? CaseSensitive { get; init; }
+        public string? ProjectPath { get; init; }
+        public string? NamespaceFilter { get; init; }
+        public string? SourceFile { get; init; }
     }
 }

@@ -18,6 +18,11 @@ public class QueryFilterOptionsTests
     [InlineData("get-diagnostics", "--exclude-diagnostic-ids")]
     [InlineData("get-diagnostics", "--message-filter")]
     [InlineData("get-diagnostics", "--max-results")]
+    [InlineData("search-symbols", "--exact-match")]
+    [InlineData("search-symbols", "--case-sensitive")]
+    [InlineData("search-symbols", "--project-path")]
+    [InlineData("search-symbols", "--namespace-filter")]
+    [InlineData("search-symbols", "--source-file")]
     public void ToolHelp_ListsTheOption(string toolName, string option)
     {
         var tool = ToolRegistry.BuildDefault().GetTool(toolName)!;

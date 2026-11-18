@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace RoslynMcp.Contracts.Models;
 
 /// <summary>
@@ -60,4 +62,11 @@ public sealed class DiagnosticInfo
     /// Diagnostic category.
     /// </summary>
     public string? Category { get; init; }
+
+    /// <summary>
+    /// For a diagnostic of a multi-targeted project: the target frameworks whose compilation
+    /// reported it (the diagnostic is listed once for all of them). Null otherwise.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<string>? TargetFrameworks { get; init; }
 }

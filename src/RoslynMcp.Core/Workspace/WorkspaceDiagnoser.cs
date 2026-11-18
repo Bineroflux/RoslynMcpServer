@@ -138,7 +138,7 @@ public static class WorkspaceDiagnoser
     /// The project's target framework: the SDK hands it to analyzers as a global option;
     /// failing that, a multi-targeted project's name ends in <c>(tfm)</c>.
     /// </summary>
-    private static string? TargetFrameworkOf(Project project)
+    internal static string? TargetFrameworkOf(Project project)
     {
         if (project.AnalyzerOptions.AnalyzerConfigOptionsProvider.GlobalOptions
                 .TryGetValue("build_property.TargetFramework", out var targetFramework) &&

@@ -1,4 +1,5 @@
 using System.Text.Json;
+using RoslynMcp.Contracts.Models;
 using RoslynMcp.Server.Tools;
 using RoslynMcp.Server.Transport;
 using Xunit;
@@ -96,6 +97,19 @@ public class GetDiagnosticsToolTests
         var args = JsonDocument.Parse("{}").RootElement;
         var result = await _tool.ExecuteAsync(args, TestContext.Current.CancellationToken);
         Assert.True(result.IsError);
+    }
+
+    [Fact]
+    public void TargetFrameworks_IsOmittedFromTheJsonUnlessSet()
+    {
+        var plain = new DiagnosticInfo { Id = "CS0168", Message = "m", Severity = "Warning" };
+        var multiTargeted = new DiagnosticInfo { Id = "CS0168", Message = "m", Severity = "Warning", TargetFrameworks = ["net8.0", "net9.0"] };
+
+        var plainJson = JsonSerializer.Serialize(plain, ToolJsonOptions.Default);
+        var multiJson = JsonDocument.Parse(JsonSerializer.Serialize(multiTargeted, ToolJsonOptions.Default)).RootElement;
+
+        Assert.DoesNotContain("targetFrameworks", plainJson);
+        Assert.Equal(["net8.0", "net9.0"], multiJson.GetProperty("targetFrameworks").EnumerateArray().Select(e => e.GetString()));
     }
 
     private static string GetResultText(ToolResult result)

@@ -63,7 +63,7 @@ public sealed class GetDiagnosticsOperation : QueryOperationBase<GetDiagnosticsP
         var severityFilter = ParseSeverityFilter(@params.SeverityFilter);
         var projectScope = QueryScope.ResolveProject(Context.Solution, @params.ProjectPath);
         var contentFilter = new DiagnosticContentFilter(@params);
-        var diagnostics = new List<DiagnosticInfo>();
+        var diagnostics = new DiagnosticCollector(Context.Solution);
 
         // The caller's sourceFile is matched against each diagnostic's span path
         // below. Normalize it once up front: the workspace normalizes document (and
@@ -108,7 +108,7 @@ public sealed class GetDiagnosticsOperation : QueryOperationBase<GetDiagnosticsP
                     File = null,
                     Line = 0,
                     Column = 0
-                });
+                }, project: null, span: default);
             }
         }
 
@@ -168,7 +168,7 @@ public sealed class GetDiagnosticsOperation : QueryOperationBase<GetDiagnosticsP
                     File = null,
                     Line = 0,
                     Column = 0
-                });
+                }, project, span: default);
             }
 
             if (compilation is null) continue;
@@ -227,7 +227,7 @@ public sealed class GetDiagnosticsOperation : QueryOperationBase<GetDiagnosticsP
                     Column = column
                 };
 
-                diagnostics.Add(info);
+                diagnostics.Add(info, project, hasLocation ? preferredSpan : default);
             }
         }
 
@@ -236,7 +236,7 @@ public sealed class GetDiagnosticsOperation : QueryOperationBase<GetDiagnosticsP
         // then by file, line, column, ID and message. Filter before truncating, so
         // totalCount counts every match.
         var matching = ResultOrder.ByLocation(
-                diagnostics.Where(contentFilter.Matches),
+                diagnostics.Diagnostics.Where(contentFilter.Matches),
                 d => d.File,
                 d => d.Line ?? 0,
                 d => d.Column ?? 0,
@@ -400,6 +400,68 @@ public sealed class GetDiagnosticsOperation : QueryOperationBase<GetDiagnosticsP
         }
 
         return toRemove.Count == 0 ? compilation : compilation.RemoveSyntaxTrees(toRemove);
+    }
+
+    /// <summary>
+    /// Collects the diagnostics, listing an identical one (same ID, location, message and
+    /// severity) once. Each target framework of a multi-targeted project is compiled on its
+    /// own and reports the same diagnostic again; such a diagnostic names the frameworks that
+    /// reported it. A linked file compiled by several projects is listed once as well.
+    /// </summary>
+    private sealed class DiagnosticCollector
+    {
+        private readonly Dictionary<DiagnosticKey, (DiagnosticInfo Info, List<string> Frameworks)> _byKey = new();
+        private readonly List<DiagnosticKey> _order = new();
+        private readonly HashSet<ProjectId> _multiTargeted;
+
+        public DiagnosticCollector(Solution solution)
+        {
+            // A multi-targeted project is one project file loaded once per framework.
+            _multiTargeted = solution.Projects
+                .Where(p => !string.IsNullOrEmpty(p.FilePath))
+                .GroupBy(p => PathResolver.NormalizePath(p.FilePath!), PathResolver.PathComparer)
+                .Where(g => g.Count() > 1)
+                .SelectMany(g => g.Select(p => p.Id))
+                .ToHashSet();
+        }
+
+        public void Add(DiagnosticInfo info, Project? project, FileLinePositionSpan span)
+        {
+            var key = new DiagnosticKey(
+                info.Id, info.File ?? "", span.StartLinePosition, span.EndLinePosition, info.Message, info.Severity);
+            if (!_byKey.TryGetValue(key, out var entry))
+            {
+                entry = (info, []);
+                _byKey[key] = entry;
+                _order.Add(key);
+            }
+
+            if (project is not null && _multiTargeted.Contains(project.Id))
+            {
+                var framework = WorkspaceDiagnoser.TargetFrameworkOf(project) ?? project.Name;
+                if (!entry.Frameworks.Contains(framework))
+                    entry.Frameworks.Add(framework);
+            }
+        }
+
+        public IEnumerable<DiagnosticInfo> Diagnostics => _order.Select(key =>
+        {
+            var (info, frameworks) = _byKey[key];
+            return frameworks.Count == 0 ? info : new DiagnosticInfo
+            {
+                Id = info.Id,
+                Message = info.Message,
+                Severity = info.Severity,
+                File = info.File,
+                Line = info.Line,
+                Column = info.Column,
+                Category = info.Category,
+                TargetFrameworks = frameworks
+            };
+        });
+
+        private readonly record struct DiagnosticKey(
+            string Id, string File, LinePosition Start, LinePosition End, string Message, string Severity);
     }
 
     /// <summary>

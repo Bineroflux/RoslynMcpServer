@@ -89,12 +89,13 @@ public sealed class GenerateToStringOperation : RefactoringOperationBase<Generat
             return RefactoringResult.PreviewResult(operationId, pendingChanges);
         }
 
-        var newTypeDecl = typeDecl.AddMembers(
-            toStringMethod.WithLeadingTrivia(SyntaxFactory.CarriageReturnLineFeed, SyntaxFactory.CarriageReturnLineFeed));
+        var newTypeDecl = typeDecl.AddMembers(GeneratedCodeFormatter.MarkInserted(toStringMethod));
 
         var newRoot = root.ReplaceNode(typeDecl, newTypeDecl);
         var newDocument = document.WithSyntaxRoot(newRoot);
-        var commitResult = await CommitChangesAsync(newDocument.Project.Solution, cancellationToken);
+        var newSolution = await GeneratedCodeFormatter.FormatAsync(
+            newDocument.Project.Solution, document.Id, cancellationToken);
+        var commitResult = await CommitChangesAsync(newSolution, cancellationToken);
 
         return RefactoringResult.Succeeded(operationId,
             new FileChanges { FilesModified = commitResult.FilesModified, FilesCreated = commitResult.FilesCreated, FilesDeleted = commitResult.FilesDeleted },

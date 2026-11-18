@@ -93,12 +93,14 @@ public sealed class GenerateEqualsHashCodeOperation : RefactoringOperationBase<G
         }
 
         var newTypeDecl = typeDecl.AddMembers(
-            equalsMethod.WithLeadingTrivia(SyntaxFactory.CarriageReturnLineFeed, SyntaxFactory.CarriageReturnLineFeed),
-            hashCodeMethod.WithLeadingTrivia(SyntaxFactory.CarriageReturnLineFeed, SyntaxFactory.CarriageReturnLineFeed));
+            GeneratedCodeFormatter.MarkInserted(equalsMethod),
+            GeneratedCodeFormatter.MarkInserted(hashCodeMethod));
 
         var newRoot = root.ReplaceNode(typeDecl, newTypeDecl);
         var newDocument = document.WithSyntaxRoot(newRoot);
-        var commitResult = await CommitChangesAsync(newDocument.Project.Solution, cancellationToken);
+        var newSolution = await GeneratedCodeFormatter.FormatAsync(
+            newDocument.Project.Solution, document.Id, cancellationToken);
+        var commitResult = await CommitChangesAsync(newSolution, cancellationToken);
 
         return RefactoringResult.Succeeded(operationId,
             new FileChanges { FilesModified = commitResult.FilesModified, FilesCreated = commitResult.FilesCreated, FilesDeleted = commitResult.FilesDeleted },

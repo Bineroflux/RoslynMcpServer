@@ -178,7 +178,8 @@ public sealed class ExtractConstantOperation : RefactoringOperationBase<ExtractC
         newRoot = newRoot.ReplaceNode(updatedContainingType, newContainingType);
 
         var newDocument = document.WithSyntaxRoot(newRoot);
-        var newSolution = newDocument.Project.Solution;
+        var newSolution = await GeneratedCodeFormatter.FormatAsync(
+            newDocument.Project.Solution, document.Id, cancellationToken);
 
         // Commit changes
         var commitResult = await CommitChangesAsync(newSolution, cancellationToken);
@@ -299,9 +300,7 @@ public sealed class ExtractConstantOperation : RefactoringOperationBase<ExtractC
             }
         }
 
-        members.Insert(insertIndex, constField
-            .WithLeadingTrivia(SyntaxFactory.CarriageReturnLineFeed)
-            .WithTrailingTrivia(SyntaxFactory.CarriageReturnLineFeed));
+        members.Insert(insertIndex, GeneratedCodeFormatter.MarkInserted(constField));
 
         return typeDeclaration.WithMembers(SyntaxFactory.List(members));
     }

@@ -145,14 +145,7 @@ public sealed class EncapsulateFieldOperation : RefactoringOperationBase<Encapsu
         var newFieldDeclaration = fieldDeclaration;
         if (fieldSymbol.DeclaredAccessibility != Accessibility.Private)
         {
-            var newModifiers = SyntaxFactory.TokenList(
-                fieldDeclaration.Modifiers.Where(m =>
-                    !m.IsKind(SyntaxKind.PublicKeyword) &&
-                    !m.IsKind(SyntaxKind.ProtectedKeyword) &&
-                    !m.IsKind(SyntaxKind.InternalKeyword))
-                .Prepend(SyntaxFactory.Token(SyntaxKind.PrivateKeyword)));
-
-            newFieldDeclaration = fieldDeclaration.WithModifiers(newModifiers);
+            newFieldDeclaration = fieldDeclaration.WithModifiers(MakePrivate(fieldDeclaration.Modifiers));
         }
 
         // Rename field if property name would conflict
@@ -192,8 +185,7 @@ public sealed class EncapsulateFieldOperation : RefactoringOperationBase<Encapsu
         var fieldIndex = updatedContainingType.Members.IndexOf(updatedFieldDecl);
         var newMembers = updatedContainingType.Members.Insert(
             fieldIndex + 1,
-            property.WithLeadingTrivia(SyntaxFactory.CarriageReturnLineFeed, SyntaxFactory.CarriageReturnLineFeed)
-                   .WithTrailingTrivia(SyntaxFactory.CarriageReturnLineFeed));
+            GeneratedCodeFormatter.MarkInserted(property));
 
         var newContainingType = updatedContainingType.WithMembers(newMembers);
         newRoot = newRoot.ReplaceNode(updatedContainingType, newContainingType);
@@ -220,6 +212,8 @@ public sealed class EncapsulateFieldOperation : RefactoringOperationBase<Encapsu
             }
         }
 
+        newSolution = await GeneratedCodeFormatter.FormatAsync(newSolution, document.Id, cancellationToken);
+
         // Commit changes
         var commitResult = await CommitChangesAsync(newSolution, cancellationToken);
 
@@ -239,6 +233,34 @@ public sealed class EncapsulateFieldOperation : RefactoringOperationBase<Encapsu
             },
             externalReferences.Count,
             0);
+    }
+
+    /// <summary>
+    /// Replaces the accessibility modifiers with <c>private</c>. The new keyword takes over
+    /// the trivia of the first modifier it replaces, so neither the indentation before it
+    /// nor the space after it is lost (which used to produce <c>privatestring Name;</c>).
+    /// </summary>
+    private static SyntaxTokenList MakePrivate(SyntaxTokenList modifiers)
+    {
+        var result = new List<SyntaxToken>();
+        var replaced = false;
+
+        foreach (var modifier in modifiers)
+        {
+            if (!modifier.IsKind(SyntaxKind.PublicKeyword) &&
+                !modifier.IsKind(SyntaxKind.ProtectedKeyword) &&
+                !modifier.IsKind(SyntaxKind.InternalKeyword))
+            {
+                result.Add(modifier);
+            }
+            else if (!replaced)
+            {
+                result.Add(SyntaxFactory.Token(modifier.LeadingTrivia, SyntaxKind.PrivateKeyword, modifier.TrailingTrivia));
+                replaced = true;
+            }
+        }
+
+        return SyntaxFactory.TokenList(result);
     }
 
     private static bool IsInsideContainingType(

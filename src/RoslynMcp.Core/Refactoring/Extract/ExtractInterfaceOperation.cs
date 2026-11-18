@@ -1,6 +1,7 @@
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using Microsoft.CodeAnalysis.Editing;
 using RoslynMcp.Contracts.Enums;
 using RoslynMcp.Contracts.Errors;
 using RoslynMcp.Contracts.Models;
@@ -176,6 +177,8 @@ public sealed class ExtractInterfaceOperation : RefactoringOperationBase<Extract
             }
         }
 
+        newSolution = await GeneratedCodeFormatter.FormatAsync(newSolution, document.Id, cancellationToken);
+
         // Commit changes
         var commitResult = await CommitChangesAsync(newSolution, cancellationToken);
 
@@ -272,9 +275,7 @@ public sealed class ExtractInterfaceOperation : RefactoringOperationBase<Extract
         InterfaceDeclarationSyntax interfaceDecl)
     {
         // Find insertion point - before the class
-        var newInterface = interfaceDecl
-            .WithLeadingTrivia(SyntaxFactory.CarriageReturnLineFeed)
-            .WithTrailingTrivia(SyntaxFactory.CarriageReturnLineFeed, SyntaxFactory.CarriageReturnLineFeed);
+        var newInterface = GeneratedCodeFormatter.MarkInserted(interfaceDecl);
 
         var newRoot = root.InsertNodesBefore(typeDeclaration, new[] { newInterface });
         var newDoc = document.WithSyntaxRoot(newRoot);
@@ -298,19 +299,11 @@ public sealed class ExtractInterfaceOperation : RefactoringOperationBase<Extract
 
         if (typeDeclaration == null) return solution;
 
-        var baseType = SyntaxFactory.SimpleBaseType(SyntaxFactory.ParseTypeName(interfaceName));
-
-        TypeDeclarationSyntax newTypeDeclaration;
-        if (typeDeclaration.BaseList == null)
-        {
-            newTypeDeclaration = typeDeclaration.WithBaseList(
-                SyntaxFactory.BaseList(SyntaxFactory.SingletonSeparatedList<BaseTypeSyntax>(baseType)));
-        }
-        else
-        {
-            var newBaseList = typeDeclaration.BaseList.AddTypes(baseType);
-            newTypeDeclaration = typeDeclaration.WithBaseList(newBaseList);
-        }
+        // SyntaxGenerator moves the trivia that ended the type's header (e.g. the line break
+        // before `{`) behind the new base list, which is then laid out by the formatter.
+        var newTypeDeclaration = (TypeDeclarationSyntax)SyntaxGenerator.GetGenerator(document)
+            .AddInterfaceType(typeDeclaration, SyntaxFactory.ParseTypeName(interfaceName));
+        newTypeDeclaration = newTypeDeclaration.WithBaseList(GeneratedCodeFormatter.Mark(newTypeDeclaration.BaseList!));
 
         var newRoot = root.ReplaceNode(typeDeclaration, newTypeDeclaration);
         var newDoc = document.WithSyntaxRoot(newRoot);

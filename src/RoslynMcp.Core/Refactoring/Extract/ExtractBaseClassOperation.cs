@@ -1,11 +1,13 @@
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using Microsoft.CodeAnalysis.Editing;
 using RoslynMcp.Contracts.Enums;
 using RoslynMcp.Contracts.Errors;
 using RoslynMcp.Contracts.Models;
 using RoslynMcp.Core.FileSystem;
 using RoslynMcp.Core.Refactoring.Base;
+using RoslynMcp.Core.Refactoring.Utilities;
 using RoslynMcp.Core.Workspace;
 
 namespace RoslynMcp.Core.Refactoring.Extract;
@@ -167,23 +169,12 @@ public sealed class ExtractBaseClassOperation : RefactoringOperationBase<Extract
                     .OfType<ClassDeclarationSyntax>()
                     .First(t => t.Identifier.Text == @params.TypeName);
 
-                // Add base class to type
-                var baseType = SyntaxFactory.SimpleBaseType(SyntaxFactory.ParseTypeName(@params.BaseClassName));
-
-                ClassDeclarationSyntax newTypeDecl;
-                if (updatedTypeDecl.BaseList == null)
-                {
-                    newTypeDecl = updatedTypeDecl.WithBaseList(
-                        SyntaxFactory.BaseList(SyntaxFactory.SingletonSeparatedList<BaseTypeSyntax>(baseType)));
-                }
-                else
-                {
-                    // Insert base class before interfaces
-                    var newBaseList = SyntaxFactory.BaseList(
-                        SyntaxFactory.SeparatedList(
-                            new[] { baseType }.Concat(updatedTypeDecl.BaseList.Types)));
-                    newTypeDecl = updatedTypeDecl.WithBaseList(newBaseList);
-                }
+                // Add base class to type, before any interfaces. SyntaxGenerator moves the
+                // trivia that ended the type's header (e.g. the line break before `{`) behind
+                // the new base list, which is then laid out by the formatter.
+                var newTypeDecl = (ClassDeclarationSyntax)SyntaxGenerator.GetGenerator(updatedDoc)
+                    .AddBaseType(updatedTypeDecl, SyntaxFactory.ParseTypeName(@params.BaseClassName));
+                newTypeDecl = newTypeDecl.WithBaseList(GeneratedCodeFormatter.Mark(newTypeDecl.BaseList!));
 
                 // Remove extracted members from derived class
                 var memberNames = @params.Members.ToHashSet();
@@ -197,6 +188,8 @@ public sealed class ExtractBaseClassOperation : RefactoringOperationBase<Extract
                 newSolution = updatedDoc.WithSyntaxRoot(updatedRoot).Project.Solution;
             }
         }
+
+        newSolution = await GeneratedCodeFormatter.FormatAsync(newSolution, document.Id, cancellationToken);
 
         // Commit changes
         var commitResult = await CommitChangesAsync(newSolution, cancellationToken);
@@ -363,9 +356,7 @@ public sealed class ExtractBaseClassOperation : RefactoringOperationBase<Extract
         ClassDeclarationSyntax baseClass)
     {
         // Insert base class before derived class
-        var newBaseClass = baseClass
-            .WithLeadingTrivia(SyntaxFactory.CarriageReturnLineFeed)
-            .WithTrailingTrivia(SyntaxFactory.CarriageReturnLineFeed, SyntaxFactory.CarriageReturnLineFeed);
+        var newBaseClass = GeneratedCodeFormatter.MarkInserted(baseClass);
 
         var newRoot = root.InsertNodesBefore(derivedClass, new[] { newBaseClass });
         var newDoc = document.WithSyntaxRoot(newRoot);

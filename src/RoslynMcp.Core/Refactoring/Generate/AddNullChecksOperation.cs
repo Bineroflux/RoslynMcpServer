@@ -108,13 +108,15 @@ public sealed class AddNullChecksOperation : RefactoringOperationBase<AddNullChe
         if (body == null)
             throw new RefactoringException(ErrorCodes.RoslynError, "Method has no body to insert null checks into.");
 
-        var newStatements = nullChecks.Concat(body.Statements);
+        var newStatements = nullChecks.Select(GeneratedCodeFormatter.MarkInserted).Concat(body.Statements);
         var newBody = body.WithStatements(SyntaxFactory.List(newStatements));
         var newMethodNode = ReplaceBody(methodNode, newBody);
 
         var newRoot = root.ReplaceNode(methodNode, newMethodNode);
         var newDocument = document.WithSyntaxRoot(newRoot);
-        var commitResult = await CommitChangesAsync(newDocument.Project.Solution, cancellationToken);
+        var newSolution = await GeneratedCodeFormatter.FormatAsync(
+            newDocument.Project.Solution, document.Id, cancellationToken);
+        var commitResult = await CommitChangesAsync(newSolution, cancellationToken);
 
         return RefactoringResult.Succeeded(operationId,
             new FileChanges { FilesModified = commitResult.FilesModified, FilesCreated = commitResult.FilesCreated, FilesDeleted = commitResult.FilesDeleted },

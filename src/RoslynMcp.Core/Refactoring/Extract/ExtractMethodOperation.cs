@@ -147,7 +147,8 @@ public sealed class ExtractMethodOperation : RefactoringOperationBase<ExtractMet
 
         // Update document
         var newDocument = document.WithSyntaxRoot(newRoot);
-        var newSolution = newDocument.Project.Solution;
+        var newSolution = await GeneratedCodeFormatter.FormatAsync(
+            newDocument.Project.Solution, document.Id, cancellationToken);
 
         // Commit changes
         var commitResult = await CommitChangesAsync(newSolution, cancellationToken);
@@ -718,9 +719,7 @@ public sealed class ExtractMethodOperation : RefactoringOperationBase<ExtractMet
         var currentType = newRoot.DescendantNodes().OfType<TypeDeclarationSyntax>()
             .First(t => t.Identifier.Text == containingType.Identifier.Text);
 
-        var newType = currentType.AddMembers(extractedMethod
-            .WithLeadingTrivia(SyntaxFactory.CarriageReturnLineFeed, SyntaxFactory.CarriageReturnLineFeed)
-            .WithTrailingTrivia(SyntaxFactory.CarriageReturnLineFeed));
+        var newType = currentType.AddMembers(GeneratedCodeFormatter.MarkInserted(extractedMethod));
 
         newRoot = newRoot.ReplaceNode(currentType, newType);
 

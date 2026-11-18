@@ -127,7 +127,8 @@ public sealed class ImplementInterfaceOperation : RefactoringOperationBase<Imple
         var newRoot = root.ReplaceNode(typeDeclaration, newTypeDeclaration);
 
         var newDocument = document.WithSyntaxRoot(newRoot);
-        var newSolution = newDocument.Project.Solution;
+        var newSolution = await GeneratedCodeFormatter.FormatAsync(
+            newDocument.Project.Solution, document.Id, cancellationToken);
 
         // Commit changes
         var commitResult = await CommitChangesAsync(newSolution, cancellationToken);
@@ -213,16 +214,7 @@ public sealed class ImplementInterfaceOperation : RefactoringOperationBase<Imple
         TypeDeclarationSyntax typeDeclaration,
         List<MemberDeclarationSyntax> newMembers)
     {
-        var members = typeDeclaration.Members.ToList();
-
-        foreach (var member in newMembers)
-        {
-            members.Add(member
-                .WithLeadingTrivia(SyntaxFactory.CarriageReturnLineFeed, SyntaxFactory.CarriageReturnLineFeed)
-                .WithTrailingTrivia(SyntaxFactory.CarriageReturnLineFeed));
-        }
-
-        return typeDeclaration.WithMembers(SyntaxFactory.List(members));
+        return typeDeclaration.AddMembers(newMembers.Select(GeneratedCodeFormatter.MarkInserted).ToArray());
     }
 
     private static RefactoringResult CreatePreviewResult(

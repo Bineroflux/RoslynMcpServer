@@ -5,6 +5,7 @@ using RoslynMcp.Contracts.Errors;
 using RoslynMcp.Contracts.Models;
 using RoslynMcp.Core.FileSystem;
 using RoslynMcp.Core.Refactoring.Base;
+using RoslynMcp.Core.Refactoring.Utilities;
 using RoslynMcp.Core.Workspace;
 
 namespace RoslynMcp.Core.Refactoring.Generate;
@@ -149,7 +150,8 @@ public sealed class GenerateConstructorOperation : RefactoringOperationBase<Gene
         var newRoot = root.ReplaceNode(typeDeclaration, newTypeDeclaration);
 
         var newDocument = document.WithSyntaxRoot(newRoot);
-        var newSolution = newDocument.Project.Solution;
+        var newSolution = await GeneratedCodeFormatter.FormatAsync(
+            newDocument.Project.Solution, document.Id, cancellationToken);
 
         // Commit changes
         var commitResult = await CommitChangesAsync(newSolution, cancellationToken);
@@ -331,9 +333,7 @@ public sealed class GenerateConstructorOperation : RefactoringOperationBase<Gene
             }
         }
 
-        members.Insert(insertIndex, constructor
-            .WithLeadingTrivia(SyntaxFactory.CarriageReturnLineFeed, SyntaxFactory.CarriageReturnLineFeed)
-            .WithTrailingTrivia(SyntaxFactory.CarriageReturnLineFeed));
+        members.Insert(insertIndex, GeneratedCodeFormatter.MarkInserted(constructor));
 
         return typeDeclaration.WithMembers(SyntaxFactory.List(members));
     }

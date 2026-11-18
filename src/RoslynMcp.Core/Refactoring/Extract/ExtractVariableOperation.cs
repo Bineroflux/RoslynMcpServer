@@ -169,8 +169,7 @@ public sealed class ExtractVariableOperation : RefactoringOperationBase<ExtractV
         var newStatements = new List<StatementSyntax>();
 
         // Add declaration
-        newStatements.Add(variableDeclaration.NormalizeWhitespace()
-            .WithTrailingTrivia(SyntaxFactory.CarriageReturnLineFeed));
+        newStatements.Add(GeneratedCodeFormatter.MarkInserted(variableDeclaration.NormalizeWhitespace()));
 
         // Modify original statement to use variable. Keep the expression's trivia so a
         // following keyword (`x is T`, `x as T`, `x switch`, `x with`) stays separated.
@@ -200,7 +199,8 @@ public sealed class ExtractVariableOperation : RefactoringOperationBase<ExtractV
         }
 
         var newDocument = document.WithSyntaxRoot(newRoot);
-        var newSolution = newDocument.Project.Solution;
+        var newSolution = await GeneratedCodeFormatter.FormatAsync(
+            newDocument.Project.Solution, document.Id, cancellationToken);
 
         // Commit changes
         var commitResult = await CommitChangesAsync(newSolution, cancellationToken);

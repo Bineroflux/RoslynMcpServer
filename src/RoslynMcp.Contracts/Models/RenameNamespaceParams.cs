@@ -17,8 +17,9 @@ public sealed class RenameNamespaceParams
     public required string NewNamespace { get; init; }
 
     /// <summary>
-    /// Also move the files of the renamed namespaces into the folders matching their new names,
-    /// where the project's default globbing makes that safe. Default: false.
+    /// Also move the files of the renamed namespaces that sit in the folder of their old namespace
+    /// into the folder of the new one, where the project's default globbing makes that safe; other
+    /// files stay where they are. Default: false.
     /// </summary>
     public bool UpdateFolders { get; init; }
 

@@ -34,7 +34,7 @@ public sealed class RenameNamespaceTool : IToolHandler
         "static, alias), qualified and global:: names and crefs; not comments or strings. Refused when a type would " +
         "collide with an existing one, or an enclosing namespace block that also declares other things would have to " +
         "change. Generated files and project-level <Using>/<RootNamespace> are not changed; 'warnings' names them and " +
-        "the compiler errors left behind. updateFolders moves the files into the matching folders where that is safe.";
+        "the compiler errors left behind. updateFolders moves the files that sit in their old namespace's folder into the new one's, where that is safe.";
 
     /// <inheritdoc />
     public object InputSchema => new
@@ -61,7 +61,7 @@ public sealed class RenameNamespaceTool : IToolHandler
             updateFolders = new
             {
                 type = "boolean",
-                description = "Also move each file whose types all end up in one renamed namespace into the folder matching it (SDK-style projects with default globbing; confirmed by MSBuild, undone otherwise)",
+                description = "Also move each file whose types all end up in one renamed namespace, and which sits in the folder of its old namespace, into the folder of the new one (SDK-style projects with default globbing; confirmed by MSBuild, undone otherwise); other files stay, with a warning",
                 @default = false
             },
             preview = new

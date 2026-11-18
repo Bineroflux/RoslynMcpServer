@@ -117,6 +117,26 @@ internal sealed record NamespaceFolderMove(string? TargetPath, IReadOnlyList<str
     private static NamespaceFolderMove Skip(string reason) => new(null, [], reason);
 
     /// <summary>
+    /// The folder the SDK convention gives <paramref name="namespaceName"/> in
+    /// <paramref name="project"/>: the project's folder plus the namespace's segments below the
+    /// root namespace. Null when the project has no file or root namespace, or the namespace is
+    /// neither the root namespace nor under it.
+    /// </summary>
+    public static string? FolderOf(Project project, string namespaceName)
+    {
+        var rootNamespace = project.DefaultNamespace;
+        if (project.FilePath == null || string.IsNullOrEmpty(rootNamespace) ||
+            (namespaceName != rootNamespace && !namespaceName.StartsWith(rootNamespace + ".", StringComparison.Ordinal)))
+        {
+            return null;
+        }
+
+        var projectDir = Path.GetDirectoryName(PathResolver.NormalizePath(project.FilePath))!;
+        string[] folders = namespaceName.Length == rootNamespace.Length ? [] : namespaceName[(rootNamespace.Length + 1)..].Split('.');
+        return Path.Combine([projectDir, .. folders]);
+    }
+
+    /// <summary>
     /// Moves the (already committed) files of <paramref name="moves"/> to their targets and
     /// repoints the cached solution, then lets MSBuild confirm, once per project, that it
     /// compiles each file at its new path. The project files <see cref="Plan(Document, string, Solution, Func{string?}, IReadOnlySet{string}?)"/>

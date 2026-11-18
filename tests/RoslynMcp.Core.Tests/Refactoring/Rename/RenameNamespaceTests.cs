@@ -334,6 +334,35 @@ public sealed class RenameNamespaceTests
     }
 
     [Fact]
+    public async Task UpdateFolders_OnlyMovesFilesThatSitInTheFolderOfTheirNamespace()
+    {
+        using var ws = TestWorkspace.Create(
+            [
+                ("Old/Widget.cs", "namespace App.Old;\n\npublic class Widget { }\n"),
+                ("Old/Nested.cs", "namespace App.Old.Inner;\n\npublic class Nested { }\n"),
+                ("Elsewhere/Stray.cs", "namespace App.Old;\n\npublic class Stray { }\n"),
+                ("Root.cs", "namespace App.Old;\n\npublic class AtTheRoot { }\n")
+            ],
+            [],
+            defaultNamespace: "App");
+        File.WriteAllText(ws.ProjectFilePath, "<Project Sdk=\"Microsoft.NET.Sdk\" />");
+
+        var result = await RenameAsync(ws, "App.Old", "App.New", updateFolders: true);
+
+        Assert.True(result.Success, result.Error?.Message);
+        Assert.Null(result.Error);
+        Assert.Equal([Path.Combine(ws.Directory, "New", "Widget.cs")], result.Changes!.FilesCreated);
+        Assert.Equal("namespace App.New.Inner;\n\npublic class Nested { }\n", ws.ReadFile("Old/Nested.cs"));
+        Assert.Equal("namespace App.New;\n\npublic class Stray { }\n", ws.ReadFile("Elsewhere/Stray.cs"));
+        Assert.True(File.Exists(ws.PathOf("Root.cs")));
+        Assert.True(Directory.Exists(Path.Combine(ws.Directory, "Old")));
+        Assert.Contains(result.Warnings!, w => w.Contains("Nested.cs' was not moved: it is not in 'Old" + Path.DirectorySeparatorChar + "Inner', the folder of its namespace 'App.Old.Inner'", StringComparison.Ordinal));
+        Assert.Contains(result.Warnings!, w => w.Contains("Stray.cs' was not moved: it is not in 'Old', the folder of its namespace 'App.Old'", StringComparison.Ordinal));
+        Assert.Contains(result.Warnings!, w => w.Contains("Root.cs' was not moved: it is not in 'Old'", StringComparison.Ordinal));
+        Assert.Empty(ws.GetDiskCompilationErrors());
+    }
+
+    [Fact]
     public async Task UpdateFolders_WarningsNameTheMovedFilesWhereTheyAreNow()
     {
         using var ws = TestWorkspace.Create(

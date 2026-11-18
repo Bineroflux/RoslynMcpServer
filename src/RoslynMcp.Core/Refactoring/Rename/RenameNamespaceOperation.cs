@@ -543,7 +543,10 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
         else if (namespaces.Count > 1)
             file.ContentReason = $"'{name}' declares types in several namespaces";
         else
+        {
+            file.OldNamespace = namespaces[0];
             file.TargetNamespace = rename.Map(namespaces[0]);
+        }
     }
 
     /// <summary>
@@ -658,7 +661,8 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
                 continue;
             }
 
-            var move = NamespaceFolderMove.Plan(document, file.TargetNamespace, solution, () => null, claimed);
+            var move = NamespaceFolderMove.Plan(
+                document, file.TargetNamespace, solution, () => WhyNotInItsFolder(document, file.OldNamespace!), claimed);
 
             if (move.TargetPath != null)
             {
@@ -672,6 +676,33 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
         }
 
         return skipped;
+    }
+
+    /// <summary>
+    /// Why <paramref name="document"/> does not follow the folder convention, or null when it sits
+    /// in the folder of its namespace: only such a file is moved to the folder of the new name,
+    /// so the rename does not change a layout the project chose otherwise.
+    /// </summary>
+    private static string? WhyNotInItsFolder(Document document, string oldNamespace)
+    {
+        var folder = NamespaceFolderMove.FolderOf(document.Project, oldNamespace);
+        if (folder == null)
+        {
+            return $"its namespace '{oldNamespace}' is not inside the project's root namespace " +
+                $"'{document.Project.DefaultNamespace}', so it has no folder to follow";
+        }
+
+        if (PathResolver.PathComparer.Equals(
+                PathResolver.NormalizePath(folder),
+                Path.GetDirectoryName(PathResolver.NormalizePath(document.FilePath!))))
+        {
+            return null;
+        }
+
+        var projectDir = Path.GetDirectoryName(PathResolver.NormalizePath(document.Project.FilePath!))!;
+        var relative = Path.GetRelativePath(projectDir, folder);
+        return $"it is not in '{(relative == "." ? "the project folder" : relative)}', the folder of its namespace " +
+            $"'{oldNamespace}', so it does not follow the folder convention";
     }
 
     /// <summary>
@@ -786,6 +817,9 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
         public int References { get; set; }
 
         public bool NeedsSimplification { get; set; }
+
+        /// <summary>The namespace all the file's types are in before the rename, when there is one.</summary>
+        public string? OldNamespace { get; set; }
 
         /// <summary>The namespace all the file's types end up in, when there is one.</summary>
         public string? TargetNamespace { get; set; }

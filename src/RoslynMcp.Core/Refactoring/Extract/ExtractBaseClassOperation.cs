@@ -2,13 +2,16 @@ using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.Editing;
+using Microsoft.CodeAnalysis.FindSymbols;
 using Microsoft.CodeAnalysis.Text;
 using RoslynMcp.Contracts.Enums;
 using RoslynMcp.Contracts.Errors;
 using RoslynMcp.Contracts.Models;
 using RoslynMcp.Core.FileSystem;
 using RoslynMcp.Core.Refactoring.Base;
+using RoslynMcp.Core.Refactoring.Delete;
 using RoslynMcp.Core.Refactoring.Hierarchy;
+using RoslynMcp.Core.Refactoring.Signature;
 using RoslynMcp.Core.Refactoring.Utilities;
 using RoslynMcp.Core.Workspace;
 
@@ -21,10 +24,15 @@ namespace RoslynMcp.Core.Refactoring.Extract;
 /// Members are picked by name like pull_members_up picks them (every overload of a method,
 /// field-like events, indexers as <c>this</c>, one variable of <c>int a, b;</c>); a private member
 /// becomes protected and a <c>private protected</c> one stays. A member that uses members of the
-/// type staying behind is refused with the members it uses.
+/// type staying behind is refused with the members it uses. The members leave the type's text with
+/// their comments, as in safe_delete; compiler errors the move leaves (e.g. a readonly field still
+/// assigned in the type's constructor) are returned as warnings.
 /// </remarks>
 public sealed class ExtractBaseClassOperation : RefactoringOperationBase<ExtractBaseClassParams>
 {
+    private const string RemoveAnnotationKind = "RoslynMcp.ExtractBaseClass.Remove";
+    private const string TypeAnnotationKind = "RoslynMcp.ExtractBaseClass.Type";
+
     /// <summary>
     /// Creates a new extract base class operation.
     /// </summary>
@@ -165,6 +173,16 @@ public sealed class ExtractBaseClassOperation : RefactoringOperationBase<Extract
             return CreatePreviewResult(operationId, @params, moved, baseClass, namespaceName);
         }
 
+        // Mark what leaves the type; it is removed from the text once the rest is done.
+        var originalSolution = document.Project.Solution;
+        var markedRoot = root.ReplaceNodes(
+            selected.SelectMany(s => s.Removed).Append(typeDeclaration),
+            (original, rewritten) => rewritten.WithAdditionalAnnotations(
+                new SyntaxAnnotation(original == typeDeclaration ? TypeAnnotationKind : RemoveAnnotationKind)));
+        document = document.WithSyntaxRoot(markedRoot);
+        root = (await document.GetSyntaxRootAsync(cancellationToken))!;
+        typeDeclaration = (ClassDeclarationSyntax)root.GetAnnotatedNodes(TypeAnnotationKind).Single();
+
         // Apply changes
         Solution newSolution;
         if (@params.TargetFile != null && !PathResolver.PathsEqual(@params.TargetFile, @params.SourceFile))
@@ -196,9 +214,7 @@ public sealed class ExtractBaseClassOperation : RefactoringOperationBase<Extract
             var updatedRoot = await updatedDoc.GetSyntaxRootAsync(cancellationToken);
             if (updatedRoot != null)
             {
-                var updatedTypeDecl = updatedRoot.DescendantNodes()
-                    .OfType<ClassDeclarationSyntax>()
-                    .First(t => t.Identifier.Text == @params.TypeName);
+                var updatedTypeDecl = (ClassDeclarationSyntax)updatedRoot.GetAnnotatedNodes(TypeAnnotationKind).Single();
 
                 // Add base class to type, before any interfaces. SyntaxGenerator moves the
                 // trivia that ended the type's header (e.g. the line break before `{`) behind
@@ -207,16 +223,6 @@ public sealed class ExtractBaseClassOperation : RefactoringOperationBase<Extract
                     .AddBaseType(updatedTypeDecl, SyntaxFactory.ParseTypeName(@params.BaseClassName));
                 newTypeDecl = newTypeDecl.WithBaseList(GeneratedCodeFormatter.Mark(newTypeDecl.BaseList!));
 
-                // Remove extracted members from derived class: whole declarations, or the extracted
-                // variables of a field declared with others. The members are where they were.
-                var byIndex = selected.ToDictionary(s => typeDeclaration.Members.IndexOf(s.Declaration));
-                var newMembers = newTypeDecl.Members
-                    .Select((m, i) => byIndex.TryGetValue(i, out var s) ? s.Remaining(m) : m)
-                    .OfType<MemberDeclarationSyntax>()
-                    .ToList();
-
-                newTypeDecl = newTypeDecl.WithMembers(SyntaxFactory.List(newMembers));
-
                 updatedRoot = updatedRoot.ReplaceNode(updatedTypeDecl, newTypeDecl);
                 newSolution = updatedDoc.WithSyntaxRoot(updatedRoot).Project.Solution;
             }
@@ -224,18 +230,29 @@ public sealed class ExtractBaseClassOperation : RefactoringOperationBase<Extract
 
         newSolution = await GeneratedCodeFormatter.FormatAsync(newSolution, document, cancellationToken);
 
+        // Remove the extracted declarations (or variables) from the text, with their comments.
+        var formatted = newSolution.GetDocument(document.Id)!;
+        var formattedRoot = await formatted.GetSyntaxRootAsync(cancellationToken);
+        var formattedText = await formatted.GetTextAsync(cancellationToken);
+        newSolution = newSolution.WithDocumentText(document.Id, DeclarationRemoval.Remove(
+            formattedText, DeclarationRemoval.Spans(formattedText, formattedRoot!.GetAnnotatedNodes(RemoveAnnotationKind))));
+
+        var warnings = await FindWarningsAsync(originalSolution, newSolution, document.Id, @params.TargetFile, moved, cancellationToken);
+
         // Commit changes
         var commitResult = await CommitChangesAsync(newSolution, cancellationToken);
 
-        return RefactoringResult.Succeeded(
-            operationId,
-            new FileChanges
+        return new RefactoringResult
+        {
+            Success = true,
+            OperationId = operationId,
+            Changes = new FileChanges
             {
                 FilesModified = commitResult.FilesModified,
                 FilesCreated = commitResult.FilesCreated,
                 FilesDeleted = commitResult.FilesDeleted
             },
-            new Contracts.Models.SymbolInfo
+            Symbol = new Contracts.Models.SymbolInfo
             {
                 Name = @params.BaseClassName,
                 FullyQualifiedName = string.IsNullOrEmpty(namespaceName)
@@ -243,8 +260,32 @@ public sealed class ExtractBaseClassOperation : RefactoringOperationBase<Extract
                     : $"{namespaceName}.{@params.BaseClassName}",
                 Kind = Contracts.Enums.SymbolKind.Class
             },
-            0,
-            0);
+            Warnings = warnings
+        };
+    }
+
+    /// <summary>
+    /// The compiler errors the extraction introduces in the type's file, the new base class's file
+    /// and the files referencing the moved members.
+    /// </summary>
+    private static async Task<IReadOnlyList<string>?> FindWarningsAsync(
+        Solution before,
+        Solution after,
+        DocumentId typeDocument,
+        string? targetFile,
+        List<ISymbol> moved,
+        CancellationToken cancellationToken)
+    {
+        var documents = new HashSet<DocumentId> { typeDocument };
+        if (targetFile != null)
+            documents.UnionWith(after.GetDocumentIdsWithFilePath(targetFile));
+        foreach (var symbol in moved)
+        {
+            foreach (var reference in await SymbolFinder.FindReferencesAsync(symbol, before, cancellationToken))
+                documents.UnionWith(reference.Locations.Select(l => l.Document.Id));
+        }
+
+        return await IntroducedErrors.FindAsync(before, after, documents, cancellationToken);
     }
 
     private static ClassDeclarationSyntax GenerateBaseClass(
@@ -258,11 +299,20 @@ public sealed class ExtractBaseClassOperation : RefactoringOperationBase<Extract
             modifiers.Add(SyntaxFactory.Token(SyntaxKind.AbstractKeyword));
         }
 
-        return SyntaxFactory.ClassDeclaration(className)
+        return SeparateMembers(SyntaxFactory.ClassDeclaration(className)
             .WithModifiers(SyntaxFactory.TokenList(modifiers))
             .WithMembers(SyntaxFactory.List(members))
-            .NormalizeWhitespace();
+            .NormalizeWhitespace(), "\r\n");
     }
+
+    /// <summary>
+    /// Puts a blank line between the members of a class laid out by <c>NormalizeWhitespace</c>,
+    /// which writes them on consecutive lines.
+    /// </summary>
+    private static ClassDeclarationSyntax SeparateMembers(ClassDeclarationSyntax type, string lineEnding) =>
+        type.WithMembers(SyntaxFactory.List(type.Members.Select((member, i) => i == 0
+            ? member
+            : member.WithLeadingTrivia(member.GetLeadingTrivia().Insert(0, SyntaxFactory.EndOfLine(lineEnding))))));
 
     private static async Task<Solution> CreateBaseClassInNewFileAsync(
         Solution solution,
@@ -302,6 +352,8 @@ public sealed class ExtractBaseClassOperation : RefactoringOperationBase<Extract
             .WithUsings(SyntaxFactory.List(usings))
             .WithMembers(SyntaxFactory.SingletonList(wrappedClass))
             .NormalizeWhitespace(eol: lineEnding);
+        var normalizedClass = compilationUnit.DescendantNodes().OfType<ClassDeclarationSyntax>().First();
+        compilationUnit = compilationUnit.ReplaceNode(normalizedClass, SeparateMembers(normalizedClass, lineEnding));
 
         return newDoc.WithSyntaxRoot(compilationUnit).Project.Solution;
     }

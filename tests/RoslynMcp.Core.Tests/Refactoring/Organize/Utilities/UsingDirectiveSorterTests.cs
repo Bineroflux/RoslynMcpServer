@@ -303,6 +303,58 @@ using System;";
 
     #endregion
 
+    #region Global Using Tests
+
+    [Fact]
+    public void Sort_GlobalUsings_PlacedBeforeAllNonGlobalUsings()
+    {
+        // Arrange - CS8915: a global using after a non-global one does not compile.
+        // Without the global split, "global using MyApp;" sorted after "using System;".
+        var usings = ParseUsings(
+            "using System;",
+            "using static System.Math;",
+            "using Alias = System.Text;",
+            "global using MyApp;",
+            "global using static System.Console;",
+            "global using System.Linq;",
+            "global using GAlias = System.IO;");
+
+        // Act
+        var sorted = UsingDirectiveSorter.Sort(usings);
+
+        // Assert
+        Assert.Equal(
+            new[]
+            {
+                "global using System.Linq;",
+                "global using MyApp;",
+                "global using static System.Console;",
+                "global using GAlias = System.IO;",
+                "using System;",
+                "using static System.Math;",
+                "using Alias = System.Text;"
+            },
+            sorted.Select(u => u.ToString()));
+    }
+
+    [Fact]
+    public void Sort_OnlyGlobalUsings_SortedLikeRegularUsings()
+    {
+        // Arrange
+        var usings = ParseUsings(
+            "global using Zebra;",
+            "global using System;",
+            "global using Apple;");
+
+        // Act
+        var sorted = UsingDirectiveSorter.Sort(usings);
+
+        // Assert
+        Assert.Equal(new[] { "System", "Apple", "Zebra" }, sorted.Select(GetNamespaceName));
+    }
+
+    #endregion
+
     #region Helper Methods
 
     private static List<UsingDirectiveSyntax> ParseUsings(params string[] usingStatements)

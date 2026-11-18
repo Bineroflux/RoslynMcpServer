@@ -14,6 +14,8 @@ namespace RoslynMcp.Core.Refactoring.Organize.Utilities;
 ///   <item>Static using directives (System namespaces first, then alphabetical)</item>
 ///   <item>Alias using directives (alphabetical by alias name)</item>
 /// </list>
+/// <c>global using</c> directives are ordered the same way but always come before all
+/// non-global ones, which the compiler requires (CS8915).
 /// </remarks>
 public static class UsingDirectiveSorter
 {
@@ -26,6 +28,15 @@ public static class UsingDirectiveSorter
     {
         var usingsList = usings.ToList();
 
+        // Global usings must precede all non-global ones (CS8915), so each half is sorted
+        // on its own and the globals go first.
+        var result = SortGroups(usingsList.Where(u => u.GlobalKeyword.IsKind(SyntaxKind.GlobalKeyword)));
+        result.AddRange(SortGroups(usingsList.Where(u => !u.GlobalKeyword.IsKind(SyntaxKind.GlobalKeyword))));
+        return result;
+    }
+
+    private static List<UsingDirectiveSyntax> SortGroups(IEnumerable<UsingDirectiveSyntax> usingsList)
+    {
         // Categorize usings
         var regularUsings = new List<UsingDirectiveSyntax>();
         var staticUsings = new List<UsingDirectiveSyntax>();

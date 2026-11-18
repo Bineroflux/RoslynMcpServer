@@ -5,6 +5,7 @@ using RoslynMcp.Contracts.Errors;
 using RoslynMcp.Contracts.Models;
 using RoslynMcp.Core.FileSystem;
 using RoslynMcp.Core.Query.Base;
+using RoslynMcp.Core.Query.Utilities;
 using RoslynMcp.Core.Refactoring;
 using RoslynMcp.Core.Workspace;
 
@@ -71,20 +72,19 @@ public sealed class AnalyzeControlFlowOperation : QueryOperationBase<AnalyzeCont
         var endPosition = text.Lines[endLine].End;
         var span = Microsoft.CodeAnalysis.Text.TextSpan.FromBounds(startPosition, endPosition);
 
-        // Find statements in the region
-        var statements = root.DescendantNodes()
-            .OfType<StatementSyntax>()
-            .Where(s => span.Contains(s.Span))
-            .ToList();
-
-        if (statements.Count == 0)
+        if (FlowAnalysisRegion.FindStatementRange(root, span) is not var (firstStatement, lastStatement))
             throw new RefactoringException(ErrorCodes.InvalidRegion, "No statements found in the specified region.");
 
-        // Get first and last statement for analysis
-        var firstStatement = statements.First();
-        var lastStatement = statements.Last();
-
-        var controlFlowAnalysis = semanticModel.AnalyzeControlFlow(firstStatement, lastStatement);
+        ControlFlowAnalysis? controlFlowAnalysis;
+        try
+        {
+            controlFlowAnalysis = semanticModel.AnalyzeControlFlow(firstStatement, lastStatement);
+        }
+        catch (ArgumentException ex)
+        {
+            // Roslyn rejects regions it cannot analyze with ArgumentException.
+            throw new RefactoringException(ErrorCodes.InvalidRegion, $"Control flow analysis is not possible for the specified region: {ex.Message}");
+        }
 
         if (controlFlowAnalysis == null || !controlFlowAnalysis.Succeeded)
             throw new RefactoringException(ErrorCodes.InvalidRegion, "Control flow analysis failed for the specified region.");

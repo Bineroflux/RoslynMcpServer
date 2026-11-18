@@ -1,10 +1,10 @@
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
-using Microsoft.CodeAnalysis.CSharp.Syntax;
 using RoslynMcp.Contracts.Errors;
 using RoslynMcp.Contracts.Models;
 using RoslynMcp.Core.FileSystem;
 using RoslynMcp.Core.Query.Base;
+using RoslynMcp.Core.Query.Utilities;
 using RoslynMcp.Core.Refactoring;
 using RoslynMcp.Core.Workspace;
 
@@ -71,19 +71,29 @@ public sealed class AnalyzeDataFlowOperation : QueryOperationBase<AnalyzeDataFlo
         var endPosition = text.Lines[endLine].End;
         var span = Microsoft.CodeAnalysis.Text.TextSpan.FromBounds(startPosition, endPosition);
 
-        // Find statements in the region
-        var statements = root.DescendantNodes()
-            .OfType<StatementSyntax>()
-            .Where(s => span.Contains(s.Span))
-            .ToList();
-
-        if (statements.Count == 0)
-            throw new RefactoringException(ErrorCodes.InvalidRegion, "No statements found in the specified region.");
-
-        var firstStatement = statements.First();
-        var lastStatement = statements.Last();
-
-        var dataFlowAnalysis = semanticModel.AnalyzeDataFlow(firstStatement, lastStatement);
+        // Analyze the region's statements; a region without any (an expression-bodied
+        // member or an initializer) is analyzed as that single expression.
+        DataFlowAnalysis? dataFlowAnalysis;
+        try
+        {
+            if (FlowAnalysisRegion.FindStatementRange(root, span) is var (firstStatement, lastStatement))
+            {
+                dataFlowAnalysis = semanticModel.AnalyzeDataFlow(firstStatement, lastStatement);
+            }
+            else if (FlowAnalysisRegion.FindExpression(root, span) is { } expression)
+            {
+                dataFlowAnalysis = semanticModel.AnalyzeDataFlow(expression);
+            }
+            else
+            {
+                throw new RefactoringException(ErrorCodes.InvalidRegion, "No statements found in the specified region.");
+            }
+        }
+        catch (ArgumentException ex)
+        {
+            // Roslyn rejects regions it cannot analyze with ArgumentException.
+            throw new RefactoringException(ErrorCodes.InvalidRegion, $"Data flow analysis is not possible for the specified region: {ex.Message}");
+        }
 
         if (dataFlowAnalysis == null || !dataFlowAnalysis.Succeeded)
             throw new RefactoringException(ErrorCodes.InvalidRegion, "Data flow analysis failed for the specified region.");

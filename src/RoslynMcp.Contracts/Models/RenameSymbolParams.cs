@@ -36,11 +36,6 @@ public sealed class RenameSymbolParams
     public bool RenameOverloads { get; init; }
 
     /// <summary>
-    /// Whether to rename interface implementations. Default: true.
-    /// </summary>
-    public bool RenameImplementations { get; init; } = true;
-
-    /// <summary>
     /// Whether to rename the file if renaming a type. Default: true.
     /// </summary>
     public bool RenameFile { get; init; } = true;

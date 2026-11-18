@@ -92,7 +92,7 @@ public class RenameSymbolToolTests
         Assert.True(properties.TryGetProperty("line", out _));
         Assert.True(properties.TryGetProperty("column", out _));
         Assert.True(properties.TryGetProperty("renameOverloads", out _));
-        Assert.True(properties.TryGetProperty("renameImplementations", out _));
+        Assert.False(properties.TryGetProperty("renameImplementations", out _)); // removed: always renamed
         Assert.True(properties.TryGetProperty("renameFile", out _));
         Assert.True(properties.TryGetProperty("preview", out _));
     }

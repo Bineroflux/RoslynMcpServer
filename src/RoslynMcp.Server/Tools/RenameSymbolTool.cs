@@ -28,7 +28,7 @@ public sealed class RenameSymbolTool : IToolHandler
     public string Name => "rename_symbol";
 
     /// <inheritdoc />
-    public string Description => "Rename any C# symbol (type, method, property, field, variable, etc.) with automatic reference updates across the solution.";
+    public string Description => "Rename any C# symbol (type, method, property, field, variable, etc.) with automatic reference updates across the solution. Interface implementations and overrides of a renamed member are always renamed with it.";
 
     /// <inheritdoc />
     public object InputSchema => new
@@ -74,12 +74,6 @@ public sealed class RenameSymbolTool : IToolHandler
                 type = "boolean",
                 description = "Rename all overloads of a method",
                 @default = false
-            },
-            renameImplementations = new
-            {
-                type = "boolean",
-                description = "Rename interface implementations",
-                @default = true
             },
             renameFile = new
             {
@@ -128,7 +122,6 @@ public sealed class RenameSymbolTool : IToolHandler
                 Line = args.Line,
                 Column = args.Column,
                 RenameOverloads = args.RenameOverloads ?? false,
-                RenameImplementations = args.RenameImplementations ?? true,
                 RenameFile = args.RenameFile ?? true,
                 Preview = args.Preview ?? false
             };
@@ -164,7 +157,6 @@ public sealed class RenameSymbolTool : IToolHandler
         public int? Line { get; init; }
         public int? Column { get; init; }
         public bool? RenameOverloads { get; init; }
-        public bool? RenameImplementations { get; init; }
         public bool? RenameFile { get; init; }
         public bool? Preview { get; init; }
     }

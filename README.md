@@ -198,7 +198,7 @@ All tools accept a `solutionPath` parameter (absolute path to a `.sln`, `.slnx`,
 |------|-------------|----------------|
 | `move_type_to_file` | Move a C# type declaration to a different file. Updates all references automatically. | `sourceFile`, `symbolName`, `targetFile`, `createTargetFile` |
 | `move_type_to_namespace` | Change the namespace of a C# type. Updates all using directives and qualified references. | `sourceFile`, `symbolName`, `targetNamespace`, `updateFileLocation` |
-| `rename_symbol` | Rename any C# symbol (type, method, property, field, variable, etc.) with automatic reference updates across the solution. | `sourceFile`, `symbolName`, `newName`, `line`, `column`, `renameOverloads`, `renameFile` |
+| `rename_symbol` | Rename any C# symbol (type, method, property, field, variable, etc.) with automatic reference updates across the solution. Interface implementations and overrides of a renamed member are always renamed with it. | `sourceFile`, `symbolName`, `newName`, `line`, `column`, `renameOverloads`, `renameFile` |
 
 ### Extract
 

@@ -8,7 +8,7 @@
 
 Let AI assistants like Claude safely refactor your C# codebase using the same Roslyn compiler platform that powers Visual Studio.
 
-Roslyn MCP Server is a [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server that exposes **46 Roslyn-powered tools** to AI assistants and other MCP clients. It combines 23 refactoring operations, 5 code navigation tools, 7 analysis and metrics tools, 4 code generation tools, and 7 code conversion tools -- giving your AI deep code intelligence, comprehensive refactoring, and modern C# syntax transformations with full solution-wide reference tracking and preview support.
+Roslyn MCP Server is a [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server that exposes **47 Roslyn-powered tools** to AI assistants and other MCP clients. It combines 24 refactoring operations, 5 code navigation tools, 7 analysis and metrics tools, 4 code generation tools, and 7 code conversion tools -- giving your AI deep code intelligence, comprehensive refactoring, and modern C# syntax transformations with full solution-wide reference tracking and preview support.
 
 ---
 
@@ -31,7 +31,7 @@ Roslyn MCP Server is a [Model Context Protocol (MCP)](https://modelcontextprotoc
 
 ## Why RoslynMcpServer?
 
-- **46 tools** -- refactoring, navigation, analysis, generation, and conversion tools, the most comprehensive Roslyn MCP server available
+- **47 tools** -- refactoring, navigation, analysis, generation, and conversion tools, the most comprehensive Roslyn MCP server available
 - **Preview mode on every operation** -- see exactly what will change before applying
 - **Atomic file writes with rollback** -- if any file write fails, all changes are reverted
 - **Solution-wide reference updates** -- renames and moves propagate across your entire solution
@@ -105,7 +105,7 @@ Claude will use the `rename_symbol` tool to rename the class and update every re
 
 ## Standalone CLI
 
-All 46 tools are also available as a standalone CLI for use in scripts, CI/CD pipelines, and terminals without an AI assistant.
+All 47 tools are also available as a standalone CLI for use in scripts, CI/CD pipelines, and terminals without an AI assistant.
 
 ### Install
 
@@ -212,6 +212,12 @@ All tools accept a `solutionPath` parameter (absolute path to a `.sln`, `.slnx`,
 | `extract_constant` | Extract a literal value to a named constant. | `sourceFile`, `startLine`, `startColumn`, `endLine`, `endColumn`, `constantName`, `visibility`, `replaceAll` |
 | `extract_interface` | Extract an interface from a class's public members. | `sourceFile`, `typeName`, `interfaceName`, `members`, `targetFile` |
 | `extract_base_class` | Extract members to a new base class. | `sourceFile`, `typeName`, `baseClassName`, `members`, `targetFile`, `makeAbstract` |
+
+### Hierarchy
+
+| Tool | Description | Key Parameters |
+|------|-------------|----------------|
+| `pull_members_up` | Move fields, methods (every overload), properties, events and indexers (`this`) of a type into its direct base class, or add their signatures to an interface it implements (`targetType`). Declarations move with their doc comments and attributes; a private member becomes protected (`private protected` stays, or becomes protected when the base class is in another assembly), and types using the type's own type parameters are written in the base class's (`Derived<U> : Base<U>`). With `makeAbstract`, methods, properties, indexers and events are declared abstract in the base class, which is made abstract if nothing instantiates it, and stay in the type as overrides. Into an interface, public instance members add their signature (public accessors only) and keep their implementation. Refused when a member uses members that stay behind (listed in the error), when the target already declares the name or signature, for an override of the base class's own member, for `base.` calls whose meaning would change, and for types the target's project can't see. Adds the usings the moved code needs to the target's file; accessibility notes, other derived types that now hide a member, and compiler errors left (e.g. implementers lacking the new member) are returned as `warnings`. | `sourceFile`, `typeName`, `members`, `targetType`, `makeAbstract`, `line` |
 
 ### Inline
 

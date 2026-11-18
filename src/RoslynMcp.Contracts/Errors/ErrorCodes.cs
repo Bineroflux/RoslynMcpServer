@@ -380,6 +380,28 @@ public static class ErrorCodes
     /// </summary>
     public const string CallNotInlinable = "3141";
 
+    // --------------------------------------------
+    // Pull Members Up Errors (3150-3159)
+    // --------------------------------------------
+
+    /// <summary>
+    /// A member to pull up uses members of its type that stay behind; the error's details list
+    /// them so they can be pulled up too.
+    /// </summary>
+    public const string MemberDependsOnDerived = "3150";
+
+    /// <summary>
+    /// The target type already declares a member of that name and signature, or the member cannot
+    /// be declared there.
+    /// </summary>
+    public const string MemberConflict = "3151";
+
+    /// <summary>
+    /// makeAbstract needs an abstract base class, but the base class is instantiated, so it cannot
+    /// be made abstract.
+    /// </summary>
+    public const string BaseClassInstantiated = "3152";
+
     // ============================================
     // System Errors (4xxx)
     // ============================================

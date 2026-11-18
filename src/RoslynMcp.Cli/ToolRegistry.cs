@@ -11,6 +11,7 @@ using RoslynMcp.Core.Refactoring.Encapsulate;
 using RoslynMcp.Core.Refactoring.Extract;
 using RoslynMcp.Core.Refactoring.Format;
 using RoslynMcp.Core.Refactoring.Generate;
+using RoslynMcp.Core.Refactoring.Hierarchy;
 using RoslynMcp.Core.Refactoring.Inline;
 using RoslynMcp.Core.Refactoring.Organize;
 using RoslynMcp.Core.Refactoring.Rename;
@@ -47,7 +48,7 @@ public sealed class ToolEntry
 }
 
 /// <summary>
-/// Maps tool names to execution delegates for all 46 Roslyn tools.
+/// Maps tool names to execution delegates for all 47 Roslyn tools.
 /// </summary>
 public sealed class ToolRegistry
 {
@@ -139,7 +140,7 @@ public sealed class ToolRegistry
         _tools.Values.OrderBy(t => t.Category).ThenBy(t => t.Name).ToList();
 
     /// <summary>
-    /// Build the default registry with all 46 tools registered.
+    /// Build the default registry with all 47 tools registered.
     /// </summary>
     public static ToolRegistry BuildDefault()
     {
@@ -158,6 +159,10 @@ public sealed class ToolRegistry
             "extract-base-class", "Extract a base class from common members");
         r.RegisterRefactoring<IntroduceParameterOperation, IntroduceParameterParams>(
             "introduce-parameter", "Introduce a method parameter from an expression");
+
+        // ── Refactoring: Hierarchy (1) ────────────────────────────────
+        r.RegisterRefactoring<PullMembersUpOperation, PullMembersUpParams>(
+            "pull-members-up", "Move members into the base class (optionally as abstract) or an implemented interface");
 
         // ── Refactoring: Rename (2) ───────────────────────────────────
         r.RegisterRefactoring<RenameSymbolOperation, RenameSymbolParams>(

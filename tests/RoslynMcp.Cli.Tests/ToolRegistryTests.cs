@@ -6,11 +6,11 @@ namespace RoslynMcp.Cli.Tests;
 public class ToolRegistryTests
 {
     [Fact]
-    public void BuildDefault_Registers46Tools()
+    public void BuildDefault_Registers47Tools()
     {
         var registry = ToolRegistry.BuildDefault();
         var tools = registry.GetAllTools();
-        Assert.Equal(46, tools.Count);
+        Assert.Equal(47, tools.Count);
     }
 
     [Fact]
@@ -95,6 +95,7 @@ public class ToolRegistryTests
     [InlineData("find-unused-symbols", "Query")]
     [InlineData("safe-delete", "Refactoring")]
     [InlineData("inline-method", "Refactoring")]
+    [InlineData("pull-members-up", "Refactoring")]
     [InlineData("rename-namespace", "Refactoring")]
     public void ToolCategories_CorrectlyAssigned(string name, string expectedCategory)
     {
@@ -105,11 +106,11 @@ public class ToolRegistryTests
     }
 
     [Fact]
-    public void RefactoringToolCount_Is32()
+    public void RefactoringToolCount_Is33()
     {
         var registry = ToolRegistry.BuildDefault();
         var count = registry.GetAllTools().Count(t => t.Category == "Refactoring");
-        Assert.Equal(32, count);
+        Assert.Equal(33, count);
     }
 
     [Fact]

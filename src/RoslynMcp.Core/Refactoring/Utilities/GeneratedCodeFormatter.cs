@@ -78,6 +78,19 @@ internal static class GeneratedCodeFormatter
             document = document.WithSyntaxRoot(root);
         }
 
+        // A documentation comment carried over from another file ends its lines with XML new-line tokens.
+        var xmlLineBreaks = root.GetAnnotatedNodes(Formatter.Annotation)
+            .SelectMany(node => node.DescendantTokens(descendIntoTrivia: true))
+            .Where(token => token.IsKind(SyntaxKind.XmlTextLiteralNewLineToken) && token.Text != lineEnding)
+            .ToList();
+
+        if (xmlLineBreaks.Count > 0)
+        {
+            root = root.ReplaceTokens(xmlLineBreaks, (original, _) => SyntaxFactory.Token(
+                original.LeadingTrivia, SyntaxKind.XmlTextLiteralNewLineToken, lineEnding, lineEnding, original.TrailingTrivia));
+            document = document.WithSyntaxRoot(root);
+        }
+
         return document.Project.Solution;
     }
 }

@@ -89,11 +89,15 @@ public sealed class GetTypeHierarchyOperation : QueryOperationBase<GetTypeHierar
             }
         }
 
-        // Find descendants
+        // Find descendants. FindDerivedClassesAsync finds nothing for an interface, whose
+        // descendants are the interfaces extending it and the types implementing it.
         if (direction is HierarchyDirection.Descendants or HierarchyDirection.Both)
         {
-            var derived = await SymbolFinder.FindDerivedClassesAsync(
-                typeSymbol, Context.Solution, cancellationToken: cancellationToken);
+            var derived = typeSymbol.TypeKind == TypeKind.Interface
+                ? (await SymbolFinder.FindDerivedInterfacesAsync(typeSymbol, Context.Solution, cancellationToken: cancellationToken))
+                    .Concat(await SymbolFinder.FindImplementationsAsync(typeSymbol, Context.Solution, cancellationToken: cancellationToken))
+                : await SymbolFinder.FindDerivedClassesAsync(
+                    typeSymbol, Context.Solution, cancellationToken: cancellationToken);
 
             foreach (var d in derived)
             {

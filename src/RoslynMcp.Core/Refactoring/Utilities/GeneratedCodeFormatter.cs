@@ -1,6 +1,7 @@
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.Formatting;
+using Microsoft.CodeAnalysis.Simplification;
 
 namespace RoslynMcp.Core.Refactoring.Utilities;
 
@@ -9,7 +10,8 @@ namespace RoslynMcp.Core.Refactoring.Utilities;
 /// marked with <see cref="Formatter.Annotation"/> and only the marked nodes (plus the
 /// whitespace right around them) are formatted before the commit: they get the
 /// indentation, line breaks and line ending of their surroundings while the rest of the
-/// file stays exactly as it was.
+/// file stays exactly as it was. Generated type names are written fully qualified and
+/// marked with <see cref="Simplifier.Annotation"/>; only those are simplified.
 /// </summary>
 internal static class GeneratedCodeFormatter
 {
@@ -33,8 +35,10 @@ internal static class GeneratedCodeFormatter
             .WithTrailingTrivia(SyntaxFactory.ElasticCarriageReturnLineFeed));
 
     /// <summary>
-    /// Formats the marked nodes of <paramref name="originalDocument"/>'s counterpart in
-    /// <paramref name="solution"/>, using the line ending of the original document.
+    /// Simplifies the marked type names and formats the marked nodes of
+    /// <paramref name="originalDocument"/>'s counterpart in <paramref name="solution"/>,
+    /// using the line ending of the original document. Simplification only shortens names
+    /// to what the usings in scope allow; it never adds usings.
     /// </summary>
     public static async Task<Solution> FormatAsync(
         Solution solution,
@@ -48,6 +52,7 @@ internal static class GeneratedCodeFormatter
         }
 
         var lineEnding = await LineEndings.GetAsync(originalDocument, cancellationToken);
+        document = await Simplifier.ReduceAsync(document, Simplifier.Annotation, cancellationToken: cancellationToken);
         document = await Formatter.FormatAsync(document, Formatter.Annotation, cancellationToken: cancellationToken);
 
         // Generated nodes carry NormalizeWhitespace's CRLFs and the formatter writes its own

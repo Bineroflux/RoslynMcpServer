@@ -1,6 +1,7 @@
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using Microsoft.CodeAnalysis.Simplification;
 using Microsoft.CodeAnalysis.Text;
 using RoslynMcp.Contracts.Enums;
 using RoslynMcp.Contracts.Errors;
@@ -271,7 +272,9 @@ public sealed class ExtractConstantOperation : RefactoringOperationBase<ExtractC
 
         return SyntaxFactory.FieldDeclaration(
             SyntaxFactory.VariableDeclaration(
-                SyntaxFactory.ParseTypeName(type.ToDisplayString()).WithTrailingTrivia(SyntaxFactory.Space))
+                SyntaxFactory.ParseTypeName(type.ToDisplayString())
+                    .WithAdditionalAnnotations(Simplifier.Annotation)
+                    .WithTrailingTrivia(SyntaxFactory.Space))
                 .WithVariables(SyntaxFactory.SingletonSeparatedList(
                     SyntaxFactory.VariableDeclarator(name)
                         .WithInitializer(SyntaxFactory.EqualsValueClause(initializer)))))

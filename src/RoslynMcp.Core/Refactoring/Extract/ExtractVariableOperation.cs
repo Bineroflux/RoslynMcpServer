@@ -1,6 +1,7 @@
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using Microsoft.CodeAnalysis.Simplification;
 using Microsoft.CodeAnalysis.Text;
 using RoslynMcp.Contracts.Enums;
 using RoslynMcp.Contracts.Errors;
@@ -143,7 +144,8 @@ public sealed class ExtractVariableOperation : RefactoringOperationBase<ExtractV
         }
         else
         {
-            typeSyntax = SyntaxFactory.ParseTypeName(typeInfo.Type.ToDisplayString());
+            typeSyntax = SyntaxFactory.ParseTypeName(typeInfo.Type.ToDisplayString())
+                .WithAdditionalAnnotations(Simplifier.Annotation);
         }
 
         // Create variable declaration

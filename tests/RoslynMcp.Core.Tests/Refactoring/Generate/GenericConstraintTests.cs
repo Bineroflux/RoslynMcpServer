@@ -59,15 +59,15 @@ public sealed class GenericConstraintTests
         Assert.Empty(ws.GetDiskCompilationWarningsAndErrors());
         if (explicitImplementation)
         {
-            Assert.Contains("T App.IRange.Clamp<T>(T value)\n        where T : struct", text.ReplaceLineEndings("\n"));
+            Assert.Contains("T IRange.Clamp<T>(T value)\n        where T : struct", text.ReplaceLineEndings("\n"));
             Assert.Contains("where U : class", text);
             Assert.Contains("where T : default", text);
             Assert.DoesNotContain("IComparable", text);
         }
         else
         {
-            Assert.Contains("where T : struct, System.IComparable<T>", text);
-            Assert.Contains("where U : class, System.IDisposable, new()", text);
+            Assert.Contains("where T : struct, IComparable<T>", text);
+            Assert.Contains("where U : class, IDisposable, new()", text);
             Assert.Contains("where V : notnull", text);
         }
     }
@@ -132,6 +132,6 @@ public sealed class GenericConstraintTests
         Assert.True(result.Success, result.Error?.Message);
         var text = ws.ReadFile("Range.cs");
         Assert.Empty(ws.GetDiskCompilationWarningsAndErrors());
-        Assert.Contains("T Clamp<T>(T value)\n        where T : struct, System.IComparable<T>;", text.ReplaceLineEndings("\n"));
+        Assert.Contains("T Clamp<T>(T value)\n        where T : struct, IComparable<T>;", text.ReplaceLineEndings("\n"));
     }
 }

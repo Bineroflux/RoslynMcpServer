@@ -274,7 +274,9 @@ public sealed class ExtractInterfaceOperation : RefactoringOperationBase<Extract
             .WithMembers(SyntaxFactory.SingletonList(wrappedInterface))
             .NormalizeWhitespace(eol: lineEnding);
 
-        return newDoc.WithSyntaxRoot(compilationUnit).Project.Solution;
+        // Shorten the interface's type names to what the copied usings allow.
+        newDoc = newDoc.WithSyntaxRoot(compilationUnit);
+        return await GeneratedCodeFormatter.FormatAsync(newDoc.Project.Solution, newDoc, cancellationToken);
     }
 
     private static Solution AddInterfaceToSameFile(

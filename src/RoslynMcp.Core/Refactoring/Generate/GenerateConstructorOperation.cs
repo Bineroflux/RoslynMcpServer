@@ -1,6 +1,7 @@
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using Microsoft.CodeAnalysis.Simplification;
 using RoslynMcp.Contracts.Errors;
 using RoslynMcp.Contracts.Models;
 using RoslynMcp.Core.FileSystem;
@@ -238,7 +239,9 @@ public sealed class GenerateConstructorOperation : RefactoringOperationBase<Gene
             var paramName = ToCamelCase(member.Name);
 
             var parameter = SyntaxFactory.Parameter(SyntaxFactory.Identifier(paramName))
-                .WithType(SyntaxFactory.ParseTypeName(type.ToDisplayString()).WithTrailingTrivia(SyntaxFactory.Space));
+                .WithType(SyntaxFactory.ParseTypeName(type.ToDisplayString())
+                    .WithAdditionalAnnotations(Simplifier.Annotation)
+                    .WithTrailingTrivia(SyntaxFactory.Space));
 
             parameters.Add(parameter);
         }

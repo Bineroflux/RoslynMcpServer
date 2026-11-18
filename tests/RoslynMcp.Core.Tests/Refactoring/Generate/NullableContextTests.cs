@@ -88,7 +88,7 @@ public sealed class NullableContextTests
         Assert.True(result.Success, result.Error?.Message);
         var text = ws.ReadFile("Store.cs");
         Assert.Contains("public string? Find(string? key)", text);
-        Assert.Contains("System.EventHandler<string?>? Changed", text);
+        Assert.Contains("EventHandler<string?>? Changed", text);
         Assert.Empty(ws.GetDiskCompilationWarningsAndErrors());
     }
 

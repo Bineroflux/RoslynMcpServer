@@ -75,13 +75,13 @@ public sealed class MemberGenerationTests
         Assert.DoesNotContain("get_Item", text);
         Assert.DoesNotContain("get_Name", text);
         Assert.DoesNotContain("add_Changed", text);
-        Assert.Contains(explicitImplementation ? "int App.IRepository.this[int index]" : "public int this[int index]", text);
+        Assert.Contains(explicitImplementation ? "int IRepository.this[int index]" : "public int this[int index]", text);
         Assert.Contains("out string name", text);
         Assert.Contains("ref int counter, in long stamp", text);
-        Assert.Contains("scoped System.Span<int> buffer", text);
+        Assert.Contains("scoped Span<int> buffer", text);
 
         // Members inherited from base interfaces need implementing too.
-        Assert.Contains(explicitImplementation ? "void System.IDisposable.Dispose()" : "public void Dispose()", text);
+        Assert.Contains(explicitImplementation ? "void IDisposable.Dispose()" : "public void Dispose()", text);
     }
 
     #endregion
@@ -133,7 +133,7 @@ public sealed class MemberGenerationTests
         Assert.Contains("protected internal override void Touch(ref int counter, in long stamp)", text);
         Assert.Contains("base.Touch(ref counter, in stamp);", text);
         Assert.Contains("return base.TryGet(key, out value);", text);
-        Assert.Contains("public override void Fill(scoped System.Span<int> buffer)", text);
+        Assert.Contains("public override void Fill(scoped Span<int> buffer)", text);
 
         // callBase applies to properties and indexers too, instead of `return default;`.
         Assert.Contains("return base.Title;", text);

@@ -1,6 +1,7 @@
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using Microsoft.CodeAnalysis.Simplification;
 
 namespace RoslynMcp.Core.Refactoring.Utilities;
 
@@ -291,10 +292,13 @@ public static class SyntaxGenerationHelper
 
     /// <summary>
     /// Writes <paramref name="type"/> as a type name, with <c>?</c> on annotated reference
-    /// types only when <paramref name="nullableAnnotations"/> is set.
+    /// types only when <paramref name="nullableAnnotations"/> is set. The name is fully
+    /// qualified and marked for <see cref="Simplifier"/>, which shortens it to what the
+    /// usings in scope allow (see <see cref="GeneratedCodeFormatter.FormatAsync"/>).
     /// </summary>
     internal static TypeSyntax CreateTypeSyntax(ITypeSymbol type, bool nullableAnnotations) =>
-        SyntaxFactory.ParseTypeName(type.ToDisplayString(nullableAnnotations ? AnnotatedTypeFormat : ObliviousTypeFormat));
+        SyntaxFactory.ParseTypeName(type.ToDisplayString(nullableAnnotations ? AnnotatedTypeFormat : ObliviousTypeFormat))
+            .WithAdditionalAnnotations(Simplifier.Annotation);
 
     private static MethodDeclarationSyntax CreateInterfaceMethod(IMethodSymbol method, bool nullableAnnotations)
     {

@@ -16,6 +16,7 @@ public static class ArgsToJsonConverter
     /// - --kebab-case → camelCase key
     /// - Numeric string values → JSON numbers
     /// - "true"/"false" (case-insensitive) → JSON booleans
+    /// - A JSON array or object (<c>--members '["A","B"]'</c>) → that JSON, for list parameters
     /// - Everything else → JSON strings
     /// </remarks>
     public static string Convert(Dictionary<string, string> options)
@@ -37,6 +38,14 @@ public static class ArgsToJsonConverter
             {
                 writer.WriteNumber(camelKey, longVal);
             }
+            else if (TryParseJson(value) is { } json)
+            {
+                using (json)
+                {
+                    writer.WritePropertyName(camelKey);
+                    json.RootElement.WriteTo(writer);
+                }
+            }
             else
             {
                 writer.WriteString(camelKey, value);
@@ -47,6 +56,21 @@ public static class ArgsToJsonConverter
         writer.Flush();
 
         return System.Text.Encoding.UTF8.GetString(stream.ToArray());
+    }
+
+    private static JsonDocument? TryParseJson(string value)
+    {
+        if (!value.StartsWith('[') && !value.StartsWith('{'))
+            return null;
+
+        try
+        {
+            return JsonDocument.Parse(value);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
     /// <summary>

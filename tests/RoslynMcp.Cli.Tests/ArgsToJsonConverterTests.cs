@@ -23,6 +23,23 @@ public class ArgsToJsonConverterTests
     }
 
     [Fact]
+    public void JsonArrayOrObject_IsPassedThrough()
+    {
+        // List parameters (extract-base-class --members, change-signature --parameters) could
+        // not be given at all: the value always became a JSON string.
+        var dict = new Dictionary<string, string>
+        {
+            ["members"] = "[\"Print\", \"Other\"]",
+            ["parameters"] = "[{\"name\": \"x\", \"type\": \"int\"}]",
+            ["new-name"] = "[not json"
+        };
+        var doc = JsonDocument.Parse(ArgsToJsonConverter.Convert(dict));
+        Assert.Equal(["Print", "Other"], doc.RootElement.GetProperty("members").EnumerateArray().Select(e => e.GetString()));
+        Assert.Equal("int", doc.RootElement.GetProperty("parameters")[0].GetProperty("type").GetString());
+        Assert.Equal("[not json", doc.RootElement.GetProperty("newName").GetString());
+    }
+
+    [Fact]
     public void NumericValue_SerializedAsJsonNumber()
     {
         var dict = new Dictionary<string, string> { ["line"] = "42" };

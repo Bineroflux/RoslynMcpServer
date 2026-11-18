@@ -191,7 +191,7 @@ public static class HelpGenerator
             if (genDef == typeof(List<>) || genDef == typeof(IReadOnlyList<>) || genDef == typeof(IList<>))
             {
                 var elemType = GetFriendlyTypeName(type.GetGenericArguments()[0]);
-                return $"{elemType}[]";
+                return $"{elemType}[] (JSON array)";
             }
         }
 

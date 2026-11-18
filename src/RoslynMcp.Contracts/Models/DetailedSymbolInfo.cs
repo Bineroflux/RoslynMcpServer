@@ -58,6 +58,17 @@ public sealed class DetailedSymbolInfo
     public IReadOnlyList<string>? Members { get; init; }
 
     /// <summary>
+    /// Total number of members matching the member filters (for types; may exceed
+    /// Members.Count if truncated).
+    /// </summary>
+    public int? MembersTotalCount { get; init; }
+
+    /// <summary>
+    /// Whether Members was truncated due to maxResults (for types).
+    /// </summary>
+    public bool? MembersTruncated { get; init; }
+
+    /// <summary>
     /// Display signature (e.g., method signature with parameters).
     /// </summary>
     public string? Signature { get; init; }

@@ -90,6 +90,16 @@ public class GetSymbolInfoToolTests
         Assert.True(properties.TryGetProperty("column", out _));
     }
 
+    [Theory]
+    [InlineData("kindFilter", "string")]
+    [InlineData("nameFilter", "string")]
+    [InlineData("accessibilityFilter", "string")]
+    [InlineData("maxResults", "integer")]
+    public void GetDefinition_HasMemberFilteringParameters(string name, string type)
+    {
+        SchemaAssert.HasOptionalProperty(_tool, name, type);
+    }
+
     #endregion
 
     #region ExecuteAsync Argument Validation Tests

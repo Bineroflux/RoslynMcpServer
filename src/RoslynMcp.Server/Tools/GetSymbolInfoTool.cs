@@ -63,6 +63,27 @@ public sealed class GetSymbolInfoTool : IToolHandler
                 type = "integer",
                 description = "1-based column number for position-based symbol resolution",
                 minimum = 1
+            },
+            kindFilter = new
+            {
+                type = "string",
+                description = "For a type: only members of this kind: Class, Struct, Interface, Enum, Record, Delegate, Method, Property, Field, Event, Constant"
+            },
+            nameFilter = new
+            {
+                type = "string",
+                description = "For a type: only members whose name contains this text (case-insensitive substring)"
+            },
+            accessibilityFilter = new
+            {
+                type = "string",
+                description = "For a type: only members with exactly this declared accessibility: public, internal, protected, private, protected internal, private protected"
+            },
+            maxResults = new
+            {
+                type = "integer",
+                description = "For a type: maximum number of members to return; membersTotalCount and membersTruncated report the rest",
+                minimum = 1
             }
         },
         additionalProperties = false
@@ -88,7 +109,11 @@ public sealed class GetSymbolInfoTool : IToolHandler
                 SourceFile = args.SourceFile,
                 SymbolName = args.SymbolName,
                 Line = args.Line,
-                Column = args.Column
+                Column = args.Column,
+                KindFilter = args.KindFilter,
+                NameFilter = args.NameFilter,
+                AccessibilityFilter = args.AccessibilityFilter,
+                MaxResults = args.MaxResults
             };
 
             var result = await operation.ExecuteAsync(@params, cancellationToken);
@@ -119,5 +144,9 @@ public sealed class GetSymbolInfoTool : IToolHandler
         public string? SymbolName { get; init; }
         public int? Line { get; init; }
         public int? Column { get; init; }
+        public string? KindFilter { get; init; }
+        public string? NameFilter { get; init; }
+        public string? AccessibilityFilter { get; init; }
+        public int? MaxResults { get; init; }
     }
 }

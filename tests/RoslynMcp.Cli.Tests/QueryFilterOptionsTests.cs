@@ -35,6 +35,10 @@ public class QueryFilterOptionsTests
     [InlineData("get-document-outline", "--kind-filter")]
     [InlineData("get-document-outline", "--name-filter")]
     [InlineData("get-document-outline", "--max-results")]
+    [InlineData("get-symbol-info", "--kind-filter")]
+    [InlineData("get-symbol-info", "--name-filter")]
+    [InlineData("get-symbol-info", "--accessibility-filter")]
+    [InlineData("get-symbol-info", "--max-results")]
     public void ToolHelp_ListsTheOption(string toolName, string option)
     {
         var tool = ToolRegistry.BuildDefault().GetTool(toolName)!;

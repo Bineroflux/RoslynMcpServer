@@ -3,6 +3,7 @@ using RoslynMcp.Contracts.Errors;
 using RoslynMcp.Contracts.Models;
 using RoslynMcp.Core.FileSystem;
 using RoslynMcp.Core.Query.Base;
+using RoslynMcp.Core.Query.Utilities;
 using RoslynMcp.Core.Refactoring;
 using RoslynMcp.Core.Resolution;
 using RoslynMcp.Core.Workspace;
@@ -42,6 +43,12 @@ public sealed class GetSymbolInfoOperation : QueryOperationBase<GetSymbolInfoPar
 
         if (@params.Column.HasValue && @params.Column.Value < 1)
             throw new RefactoringException(ErrorCodes.InvalidColumnNumber, "Column number must be >= 1.");
+
+        if (@params.MaxResults.HasValue && @params.MaxResults.Value < 1)
+            throw new RefactoringException(ErrorCodes.MissingRequiredParam, "maxResults must be >= 1.");
+
+        SymbolKindFilter.Parse(@params.KindFilter);
+        AccessibilityFilter.Parse(@params.AccessibilityFilter);
     }
 
     /// <inheritdoc />
@@ -54,12 +61,12 @@ public sealed class GetSymbolInfoOperation : QueryOperationBase<GetSymbolInfoPar
             @params.SourceFile, @params.SymbolName, @params.Line, @params.Column, cancellationToken);
 
         var symbol = resolved.Symbol;
-        var info = BuildDetailedInfo(symbol);
+        var info = BuildDetailedInfo(symbol, new MemberFilter(@params));
 
         return QueryResult<DetailedSymbolInfo>.Succeeded(operationId, info);
     }
 
-    private static DetailedSymbolInfo BuildDetailedInfo(ISymbol symbol)
+    private static DetailedSymbolInfo BuildDetailedInfo(ISymbol symbol, MemberFilter memberFilter)
     {
         var modifiers = GetModifiers(symbol);
         var location = GetLocation(symbol);
@@ -68,6 +75,8 @@ public sealed class GetSymbolInfoOperation : QueryOperationBase<GetSymbolInfoPar
         string? baseType = null;
         IReadOnlyList<string>? interfaces = null;
         IReadOnlyList<string>? members = null;
+        int? membersTotalCount = null;
+        bool? membersTruncated = null;
         string? returnType = null;
         IReadOnlyList<Contracts.Models.ParameterInfo>? parameters = null;
 
@@ -77,10 +86,17 @@ public sealed class GetSymbolInfoOperation : QueryOperationBase<GetSymbolInfoPar
                 ? null
                 : namedType.BaseType?.ToDisplayString();
             interfaces = namedType.Interfaces.Select(i => i.ToDisplayString()).ToList();
-            members = namedType.GetMembers()
+            // Filter before truncating, so the total counts every match.
+            var matching = namedType.GetMembers()
                 .Where(m => !m.IsImplicitlyDeclared && m.CanBeReferencedByName)
+                .Where(memberFilter.Matches)
+                .ToList();
+            members = matching
+                .Take(memberFilter.MaxResults)
                 .Select(m => m.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat))
                 .ToList();
+            membersTotalCount = matching.Count;
+            membersTruncated = matching.Count > members.Count;
         }
 
         if (symbol is IMethodSymbol method)
@@ -122,9 +138,36 @@ public sealed class GetSymbolInfoOperation : QueryOperationBase<GetSymbolInfoPar
             BaseType = baseType,
             Interfaces = interfaces,
             Members = members,
+            MembersTotalCount = membersTotalCount,
+            MembersTruncated = membersTruncated,
             ReturnType = returnType,
             Parameters = parameters
         };
+    }
+
+    /// <summary>
+    /// The member options: kindFilter, nameFilter, accessibilityFilter and maxResults.
+    /// </summary>
+    private sealed class MemberFilter
+    {
+        private readonly Contracts.Enums.SymbolKind? _kind;
+        private readonly string? _name;
+        private readonly Accessibility? _accessibility;
+
+        public MemberFilter(GetSymbolInfoParams @params)
+        {
+            _kind = SymbolKindFilter.Parse(@params.KindFilter);
+            _name = string.IsNullOrEmpty(@params.NameFilter) ? null : @params.NameFilter;
+            _accessibility = AccessibilityFilter.Parse(@params.AccessibilityFilter);
+            MaxResults = @params.MaxResults ?? int.MaxValue;
+        }
+
+        public int MaxResults { get; }
+
+        public bool Matches(ISymbol member) =>
+            (!_kind.HasValue || SymbolKindMapper.Map(member) == _kind.Value) &&
+            (_name is null || member.Name.Contains(_name, StringComparison.OrdinalIgnoreCase)) &&
+            (!_accessibility.HasValue || member.DeclaredAccessibility == _accessibility.Value);
     }
 
     private static List<string> GetModifiers(ISymbol symbol)

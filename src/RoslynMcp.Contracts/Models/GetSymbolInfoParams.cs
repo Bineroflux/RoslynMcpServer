@@ -24,4 +24,25 @@ public sealed class GetSymbolInfoParams
     /// 1-based column number for position-based resolution.
     /// </summary>
     public int? Column { get; init; }
+
+    /// <summary>
+    /// For a type: only members of this symbol kind (e.g. "Method", "Property").
+    /// </summary>
+    public string? KindFilter { get; init; }
+
+    /// <summary>
+    /// For a type: only members whose name contains this case-insensitive substring.
+    /// </summary>
+    public string? NameFilter { get; init; }
+
+    /// <summary>
+    /// For a type: only members with exactly this declared accessibility: public, internal,
+    /// protected, private, protected internal or private protected.
+    /// </summary>
+    public string? AccessibilityFilter { get; init; }
+
+    /// <summary>
+    /// For a type: maximum number of members to return.
+    /// </summary>
+    public int? MaxResults { get; init; }
 }

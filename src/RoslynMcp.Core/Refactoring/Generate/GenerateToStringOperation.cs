@@ -105,39 +105,20 @@ public sealed class GenerateToStringOperation : RefactoringOperationBase<Generat
     private static MethodDeclarationSyntax GenerateToString(string typeName, List<ISymbol> members)
     {
         // $"TypeName {{ Field1 = {Field1}, Field2 = {Field2} }}"
+        // Each run of literal text goes into a single text token: adjacent text tokens get
+        // separated by whitespace when laid out, which would end up inside the string.
         var parts = new List<InterpolatedStringContentSyntax>();
-
-        parts.Add(SyntaxFactory.InterpolatedStringText(
-            SyntaxFactory.Token(
-                SyntaxFactory.TriviaList(),
-                SyntaxKind.InterpolatedStringTextToken,
-                $"{typeName} {{ ",
-                $"{typeName} {{ ",
-                SyntaxFactory.TriviaList())));
+        var text = typeName + " {{ ";
 
         for (int i = 0; i < members.Count; i++)
         {
-            var member = members[i];
-            var prefix = i == 0 ? "" : ", ";
-
-            parts.Add(SyntaxFactory.InterpolatedStringText(
-                SyntaxFactory.Token(
-                    SyntaxFactory.TriviaList(),
-                    SyntaxKind.InterpolatedStringTextToken,
-                    $"{prefix}{member.Name} = ",
-                    $"{prefix}{member.Name} = ",
-                    SyntaxFactory.TriviaList())));
-
-            parts.Add(SyntaxFactory.Interpolation(SyntaxFactory.IdentifierName(member.Name)));
+            text += (i == 0 ? "" : ", ") + members[i].Name + " = ";
+            parts.Add(InterpolatedText(text));
+            parts.Add(SyntaxFactory.Interpolation(SyntaxFactory.IdentifierName(members[i].Name)));
+            text = "";
         }
 
-        parts.Add(SyntaxFactory.InterpolatedStringText(
-            SyntaxFactory.Token(
-                SyntaxFactory.TriviaList(),
-                SyntaxKind.InterpolatedStringTextToken,
-                " }}",
-                " }}",
-                SyntaxFactory.TriviaList())));
+        parts.Add(InterpolatedText(text + " }}"));
 
         var interpolatedString = SyntaxFactory.InterpolatedStringExpression(
             SyntaxFactory.Token(SyntaxKind.InterpolatedStringStartToken),
@@ -152,4 +133,17 @@ public sealed class GenerateToStringOperation : RefactoringOperationBase<Generat
             .WithBody(SyntaxFactory.Block(SyntaxFactory.ReturnStatement(interpolatedString)))
             .NormalizeWhitespace();
     }
+
+    /// <summary>
+    /// Literal text of an interpolated string. <paramref name="text"/> is source text, so
+    /// literal braces must already be escaped as <c>{{</c> / <c>}}</c>.
+    /// </summary>
+    private static InterpolatedStringTextSyntax InterpolatedText(string text) =>
+        SyntaxFactory.InterpolatedStringText(
+            SyntaxFactory.Token(
+                SyntaxFactory.TriviaList(),
+                SyntaxKind.InterpolatedStringTextToken,
+                text,
+                text.Replace("{{", "{").Replace("}}", "}"),
+                SyntaxFactory.TriviaList()));
 }

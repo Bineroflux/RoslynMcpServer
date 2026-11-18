@@ -30,6 +30,44 @@ internal sealed class MemberFamily
     /// <summary>Whether <paramref name="symbol"/>, from any compilation of the solution, is a member.</summary>
     public bool Contains(ISymbol symbol) => Members.Any(member => Same(member.Symbol, symbol));
 
+    /// <summary>The references to every member, each location once.</summary>
+    public async Task<IReadOnlyList<ReferenceLocation>> FindReferencesAsync(Solution solution, CancellationToken cancellationToken)
+    {
+        var locations = new List<ReferenceLocation>();
+        var seen = new HashSet<(DocumentId, Microsoft.CodeAnalysis.Text.TextSpan)>();
+        foreach (var member in Members)
+        {
+            foreach (var location in (await SymbolFinder.FindReferencesAsync(member.Symbol, solution, cancellationToken))
+                .SelectMany(r => r.Locations))
+            {
+                if (seen.Add((location.Document.Id, location.Location.SourceSpan)))
+                    locations.Add(location);
+            }
+        }
+
+        return locations;
+    }
+
+    /// <summary>
+    /// The documents a change of the family's signature can break: where the members are
+    /// declared, where their types are declared (an implementing or derived type), and where
+    /// they are referenced.
+    /// </summary>
+    public IReadOnlyCollection<DocumentId> AffectedDocuments(Solution solution, IEnumerable<ReferenceLocation> references)
+    {
+        var documents = new HashSet<DocumentId>(references.Select(r => r.Document.Id));
+        foreach (var member in Members)
+        {
+            foreach (var declaration in member.Declarations.Concat(member.Symbol.ContainingType.DeclaringSyntaxReferences))
+            {
+                if (solution.GetDocument(declaration.SyntaxTree) is { } document)
+                    documents.Add(document.Id);
+            }
+        }
+
+        return documents;
+    }
+
     /// <summary>
     /// Finds the family of <paramref name="target"/>. Fails when a member is declared only in
     /// metadata (e.g. <c>object.ToString</c>, <c>IDisposable.Dispose</c>) or in generated code:

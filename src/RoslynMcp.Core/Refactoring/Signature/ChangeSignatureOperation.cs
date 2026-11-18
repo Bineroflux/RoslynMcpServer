@@ -21,11 +21,13 @@ namespace RoslynMcp.Core.Refactoring.Signature;
 /// differently. A rename in the request renames the parameter at that position in every member
 /// (and its uses in the body and named arguments at the calls); otherwise each member keeps its
 /// own name. A kept parameter keeps its own type, modifiers and attributes unless the request
-/// gives a type.
+/// gives a type. The compiler errors the change leaves in the affected documents are reported
+/// as warnings.
 /// </remarks>
 public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSignatureParams>
 {
     private const string ParameterListAnnotationKind = "RoslynMcp.ChangeSignature.ParameterList";
+    private const string PlaceholderAnnotationKind = "RoslynMcp.ChangeSignature.Placeholder";
 
     /// <summary>
     /// Creates a new change signature operation.
@@ -154,46 +156,57 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
             }
         }
 
+        var references = await family.FindReferencesAsync(solution, cancellationToken);
         var callSites = new Dictionary<DocumentId, int>();
-        foreach (var member in family.Members)
+        foreach (var location in references.Where(l => !l.IsImplicit))
         {
-            foreach (var location in (await SymbolFinder.FindReferencesAsync(member.Symbol, solution, cancellationToken))
-                .SelectMany(r => r.Locations)
-                .Where(l => !l.IsImplicit))
-            {
-                if (await TryAddCallSiteAsync(edits, location, family, newParameters, renames, cancellationToken))
-                    callSites[location.Document.Id] = callSites.GetValueOrDefault(location.Document.Id) + 1;
-            }
+            if (await TryAddCallSiteAsync(edits, location, family, newParameters, renames, cancellationToken))
+                callSites[location.Document.Id] = callSites.GetValueOrDefault(location.Document.Id) + 1;
         }
 
         var newSolution = await edits.ApplyAsync(solution, cancellationToken);
 
+        // What only a person can fix: method groups converted to delegates, a removed parameter
+        // the body still uses, the TODO placeholders passed for parameters without a default value.
+        var errors = await IntroducedErrors.FindAsync(
+            solution, newSolution, family.AffectedDocuments(solution, references), cancellationToken);
+        var placeholders = await FindPlaceholdersAsync(newSolution, callSites.Keys, cancellationToken);
+        var warnings = errors == null && placeholders.Count == 0 ? null : (errors ?? []).Concat(placeholders).ToList();
+
         if (@params.Preview)
         {
-            return RefactoringResult.PreviewResult(
-                operationId,
-                await CreatePendingChangesAsync(newSolution, declarations, callSites, cancellationToken));
+            return new RefactoringResult
+            {
+                Success = true,
+                OperationId = operationId,
+                Preview = true,
+                PendingChanges = await CreatePendingChangesAsync(newSolution, declarations, callSites, cancellationToken),
+                Warnings = warnings
+            };
         }
 
         // Commit changes
         var commitResult = await CommitChangesAsync(newSolution, cancellationToken);
 
-        return RefactoringResult.Succeeded(
-            operationId,
-            new FileChanges
+        return new RefactoringResult
+        {
+            Success = true,
+            OperationId = operationId,
+            Changes = new FileChanges
             {
                 FilesModified = commitResult.FilesModified,
                 FilesCreated = commitResult.FilesCreated,
                 FilesDeleted = commitResult.FilesDeleted
             },
-            new Contracts.Models.SymbolInfo
+            Symbol = new Contracts.Models.SymbolInfo
             {
                 Name = @params.MethodName,
                 FullyQualifiedName = methodSymbol.ToDisplayString(),
                 Kind = Contracts.Enums.SymbolKind.Method
             },
-            callSites.Values.Sum(),
-            0);
+            ReferencesUpdated = callSites.Values.Sum(),
+            Warnings = warnings
+        };
     }
 
     private static List<NewParameter> BuildNewParameterList(
@@ -453,13 +466,43 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
                     continue;
             }
 
-            arguments.Add(SyntaxFactory.Argument(SyntaxFactory.ParseExpression(
-                string.IsNullOrEmpty(newParameter.DefaultValue)
-                    ? $"default /* TODO: {newParameter.Name} */"
-                    : newParameter.DefaultValue)));
+            arguments.Add(string.IsNullOrEmpty(newParameter.DefaultValue)
+                ? SyntaxFactory.Argument(SyntaxFactory.ParseExpression($"default /* TODO: {newParameter.Name} */"))
+                    .WithAdditionalAnnotations(new SyntaxAnnotation(PlaceholderAnnotationKind, newParameter.Name))
+                : SyntaxFactory.Argument(SyntaxFactory.ParseExpression(newParameter.DefaultValue)));
         }
 
         return original.WithArguments(SyntaxFactory.SeparatedList(arguments, Separators(original.Arguments, arguments.Count)));
+    }
+
+    /// <summary>The <c>TODO</c> placeholders the calls now pass, as <c>path(line,column): TODO: ...</c>.</summary>
+    private static async Task<List<string>> FindPlaceholdersAsync(
+        Solution solution,
+        IEnumerable<DocumentId> documents,
+        CancellationToken cancellationToken)
+    {
+        var placeholders = new List<(string Path, int Line, int Column, string Text)>();
+        foreach (var id in documents)
+        {
+            if (await solution.GetDocument(id)!.GetSyntaxRootAsync(cancellationToken) is not { } root)
+                continue;
+
+            foreach (var argument in root.GetAnnotatedNodes(PlaceholderAnnotationKind))
+            {
+                var span = argument.GetLocation().GetLineSpan();
+                var (line, column) = (span.StartLinePosition.Line + 1, span.StartLinePosition.Character + 1);
+                var name = argument.GetAnnotations(PlaceholderAnnotationKind).First().Data;
+                placeholders.Add((span.Path, line, column,
+                    $"{span.Path}({line},{column}): TODO: replace the placeholder 'default' passed for parameter '{name}'"));
+            }
+        }
+
+        return placeholders
+            .OrderBy(p => p.Path, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(p => p.Line)
+            .ThenBy(p => p.Column)
+            .Select(p => p.Text)
+            .ToList();
     }
 
     /// <summary>

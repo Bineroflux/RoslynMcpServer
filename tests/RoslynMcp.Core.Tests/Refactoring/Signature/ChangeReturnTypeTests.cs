@@ -1,5 +1,4 @@
 using System.Text;
-using System.Text.RegularExpressions;
 using RoslynMcp.Contracts.Errors;
 using RoslynMcp.Contracts.Models;
 using RoslynMcp.Core.Refactoring;
@@ -12,7 +11,7 @@ namespace RoslynMcp.Core.Tests.Refactoring.Signature;
 /// change_return_type changes the declared type of a method, property or indexer on its whole
 /// override / implementation family, and reports what stops compiling instead of rewriting it.
 /// </summary>
-public sealed partial class ChangeReturnTypeTests
+public sealed class ChangeReturnTypeTests
 {
     private const string Library = """
         namespace Lib;
@@ -330,23 +329,8 @@ public sealed partial class ChangeReturnTypeTests
         AssertWarningsAreTheCompilerErrors(ws, result.Warnings!);
     }
 
-    /// <summary>The warnings name exactly the errors (file, line, column, id) the compiler reports for the files on disk.</summary>
-    private static void AssertWarningsAreTheCompilerErrors(TestWorkspace ws, IReadOnlyList<string> warnings)
-    {
-        static string Key(string diagnostic)
-        {
-            var match = DiagnosticPattern().Match(diagnostic);
-            Assert.True(match.Success, diagnostic);
-            return $"{Path.GetFileName(match.Groups["path"].Value)}({match.Groups["position"].Value}) {match.Groups["id"].Value}";
-        }
-
-        Assert.Equal(
-            ws.GetDiskCompilationErrors().Select(Key).Order(StringComparer.Ordinal),
-            warnings.Select(Key).Order(StringComparer.Ordinal));
-    }
-
-    [GeneratedRegex(@"^(?<path>.+)\((?<position>\d+,\d+)\): error (?<id>CS\d+)")]
-    private static partial Regex DiagnosticPattern();
+    private static void AssertWarningsAreTheCompilerErrors(TestWorkspace ws, IReadOnlyList<string> warnings) =>
+        WarningAssert.AreTheCompilerErrors(ws, warnings);
 
     private static TestWorkspace CreateCounters() => TestWorkspace.CreateSolution(
         new TestWorkspace.ProjectSpec("Lib", [("Counters.cs", Library)]),

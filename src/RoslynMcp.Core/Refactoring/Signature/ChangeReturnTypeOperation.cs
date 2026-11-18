@@ -1,7 +1,5 @@
-using System.Globalization;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
-using Microsoft.CodeAnalysis.FindSymbols;
 using RoslynMcp.Contracts.Enums;
 using RoslynMcp.Contracts.Errors;
 using RoslynMcp.Contracts.Models;
@@ -125,7 +123,6 @@ public sealed class ChangeReturnTypeOperation : RefactoringOperationBase<ChangeR
         var solution = Context.Solution;
         var family = await MemberFamily.FindAsync(symbol, semanticModel.Compilation, solution, cancellationToken);
         var edits = new SyntaxEdits();
-        var affected = new HashSet<DocumentId>();
         var declarations = new List<(Document Document, SyntaxNode Declaration, TypeSyntax OldType, SyntaxAnnotation Annotation)>();
 
         foreach (var member in family.Members)
@@ -149,23 +146,12 @@ public sealed class ChangeReturnTypeOperation : RefactoringOperationBase<ChangeR
 
                 edits.Add(declaringDocument.Id, oldType, _ => written);
                 declarations.Add((declaringDocument, node, oldType, annotation));
-                affected.Add(declaringDocument.Id);
             }
-
-            // Where an implementing or derived type may stop compiling, and where the member is used.
-            foreach (var typeDeclaration in member.Symbol.ContainingType.DeclaringSyntaxReferences)
-            {
-                if (solution.GetDocument(typeDeclaration.SyntaxTree) is { } typeDocument)
-                    affected.Add(typeDocument.Id);
-            }
-
-            foreach (var referenced in await SymbolFinder.FindReferencesAsync(member.Symbol, solution, cancellationToken))
-                affected.UnionWith(referenced.Locations.Select(l => l.Document.Id));
         }
 
-        var errorsBefore = await GetErrorsAsync(solution, affected, cancellationToken);
+        var affected = family.AffectedDocuments(solution, await family.FindReferencesAsync(solution, cancellationToken));
         var newSolution = await edits.ApplyAsync(solution, cancellationToken);
-        var warnings = NewErrors(errorsBefore, await GetErrorsAsync(newSolution, affected, cancellationToken));
+        var warnings = await IntroducedErrors.FindAsync(solution, newSolution, affected, cancellationToken);
 
         if (@params.Preview)
         {
@@ -215,68 +201,6 @@ public sealed class ChangeReturnTypeOperation : RefactoringOperationBase<ChangeR
         BasePropertyDeclarationSyntax property => property.Type,
         _ => null
     };
-
-    /// <summary>
-    /// The compiler errors in <paramref name="documents"/>, each once, as the compiler writes
-    /// them: <c>path(line,column): error id: message</c>.
-    /// </summary>
-    private static async Task<List<(string Key, string Text)>> GetErrorsAsync(
-        Solution solution,
-        IEnumerable<DocumentId> documents,
-        CancellationToken cancellationToken)
-    {
-        var errors = new List<(string Path, int Line, int Column, string Key, string Text)>();
-        foreach (var id in documents)
-        {
-            if (solution.GetDocument(id) is not { } document ||
-                await document.GetSemanticModelAsync(cancellationToken) is not { } model)
-            {
-                continue;
-            }
-
-            foreach (var diagnostic in model.GetDiagnostics(cancellationToken: cancellationToken)
-                .Where(d => d.Severity == DiagnosticSeverity.Error))
-            {
-                var span = diagnostic.Location.GetLineSpan();
-                var (line, column) = (span.StartLinePosition.Line + 1, span.StartLinePosition.Character + 1);
-                var message = diagnostic.GetMessage(CultureInfo.InvariantCulture);
-                errors.Add((
-                    span.Path,
-                    line,
-                    column,
-                    $"{span.Path}|{line}|{diagnostic.Id}|{message}",
-                    $"{span.Path}({line},{column}): error {diagnostic.Id}: {message}"));
-            }
-        }
-
-        // A file shared by several projects (multi-targeting) reports its errors once per project.
-        return errors
-            .DistinctBy(e => e.Text)
-            .OrderBy(e => e.Path, StringComparer.OrdinalIgnoreCase)
-            .ThenBy(e => e.Line)
-            .ThenBy(e => e.Column)
-            .Select(e => (e.Key, e.Text))
-            .ToList();
-    }
-
-    /// <summary>
-    /// The errors in <paramref name="after"/> that were not there before. Errors are compared
-    /// without their column, which a longer or shorter type name shifts.
-    /// </summary>
-    private static IReadOnlyList<string>? NewErrors(List<(string Key, string Text)> before, List<(string Key, string Text)> after)
-    {
-        var remaining = before.GroupBy(e => e.Key).ToDictionary(g => g.Key, g => g.Count());
-        var added = new List<string>();
-        foreach (var (key, text) in after)
-        {
-            if (remaining.TryGetValue(key, out var count) && count > 0)
-                remaining[key] = count - 1;
-            else
-                added.Add(text);
-        }
-
-        return added.Count == 0 ? null : added;
-    }
 
     private static async Task<List<PendingChange>> CreatePendingChangesAsync(
         Solution newSolution,

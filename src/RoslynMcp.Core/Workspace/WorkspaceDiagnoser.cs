@@ -54,7 +54,9 @@ public static class WorkspaceDiagnoser
                     analyzerIssues = context.GeneratorLoadIssues.ToList();
                 }
 
-                var diagnostics = context.LoadDiagnostics.ToList();
+                // The workspace keeps appending to these while projects are re-evaluated, so a
+                // long-lived cached workspace reports the same diagnostic again and again.
+                var diagnostics = context.LoadDiagnostics.DistinctBy(d => (d.Kind, d.Message)).ToList();
                 warnings.AddRange(diagnostics
                     .Where(d => d.Kind == WorkspaceDiagnosticKind.Failure)
                     .Select(d => "Workspace load failure: " + d.Message));

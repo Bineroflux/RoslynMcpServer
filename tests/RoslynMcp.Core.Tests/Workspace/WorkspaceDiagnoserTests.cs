@@ -77,7 +77,8 @@ public sealed class WorkspaceDiagnoserTests
         Assert.Equal("net8.0", lib.TargetFramework);
         Assert.Empty(lib.AnalyzerLoadFailures);
 
-        // Failures are warnings in any mode; plain workspace warnings only show in the details.
+        // Failures are warnings in any mode, each reported once; plain workspace warnings only
+        // show in the details.
         Assert.Equal(2, result.Warnings.Count);
         Assert.Contains("Workspace load failure: restore failed for Lib", result.Warnings);
         Assert.Equal(2, result.Workspace.ProjectCount);
@@ -148,7 +149,11 @@ public sealed class WorkspaceDiagnoserTests
             loadDiagnostics:
             [
                 new WorkspaceDiagnostic(WorkspaceDiagnosticKind.Failure, "restore failed for Lib"),
-                new WorkspaceDiagnostic(WorkspaceDiagnosticKind.Warning, "a warning")
+                new WorkspaceDiagnostic(WorkspaceDiagnosticKind.Warning, "a warning"),
+                // Re-evaluations of a cached workspace report the same diagnostics again.
+                new WorkspaceDiagnostic(WorkspaceDiagnosticKind.Failure, "restore failed for Lib"),
+                new WorkspaceDiagnostic(WorkspaceDiagnosticKind.Warning, "a warning"),
+                new WorkspaceDiagnostic(WorkspaceDiagnosticKind.Failure, "restore failed for Lib")
             ]);
     }
 

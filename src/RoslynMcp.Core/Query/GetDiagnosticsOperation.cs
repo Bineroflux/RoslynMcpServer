@@ -268,10 +268,7 @@ public sealed class GetDiagnosticsOperation : QueryOperationBase<GetDiagnosticsP
         if (string.IsNullOrEmpty(spanPath))
             return false;
 
-        return string.Equals(
-            PathResolver.NormalizePath(spanPath),
-            normalizedSourceFile,
-            StringComparison.OrdinalIgnoreCase);
+        return PathResolver.PathComparer.Equals(PathResolver.NormalizePath(spanPath), normalizedSourceFile);
     }
 
     private static bool PassesSeverityFilter(DiagnosticSeverity severity, DiagnosticSeverityFilter filter)
@@ -375,7 +372,7 @@ public sealed class GetDiagnosticsOperation : QueryOperationBase<GetDiagnosticsP
     /// </summary>
     private static Compilation StripGeneratedTrees(Project project, Compilation compilation)
     {
-        var documentPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var documentPaths = new HashSet<string>(PathResolver.PathComparer);
         foreach (var doc in project.Documents)
         {
             if (!string.IsNullOrEmpty(doc.FilePath))

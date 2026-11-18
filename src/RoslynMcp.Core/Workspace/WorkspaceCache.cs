@@ -30,8 +30,8 @@ public sealed class WorkspaceCache : IDisposable
     private static readonly string[] ProjectFileExtensions =
         { ".csproj", ".sln", ".slnx", ".props", ".targets" };
 
-    private readonly ConcurrentDictionary<string, CachedEntry> _entries = new(StringComparer.OrdinalIgnoreCase);
-    private readonly ConcurrentDictionary<string, SemaphoreSlim> _loadGuards = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, CachedEntry> _entries = new(PathResolver.PathComparer);
+    private readonly ConcurrentDictionary<string, SemaphoreSlim> _loadGuards = new(PathResolver.PathComparer);
     private readonly TimeSpan _idleTtl;
     private readonly Timer _sweepTimer;
     private bool _disposed;
@@ -269,7 +269,7 @@ public sealed class WorkspaceCache : IDisposable
         private readonly List<FileSystemWatcher> _watchers = new();
         // Per-project monotonic generation used to debounce structural re-evaluations: a
         // burst of add/remove events for one project coalesces into a single re-eval.
-        private readonly ConcurrentDictionary<string, long> _reevalGeneration = new(StringComparer.OrdinalIgnoreCase);
+        private readonly ConcurrentDictionary<string, long> _reevalGeneration = new(PathResolver.PathComparer);
         private long _state;
         private long _lastAccessTicks;
         private int _torndown;

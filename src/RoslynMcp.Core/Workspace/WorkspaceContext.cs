@@ -118,7 +118,9 @@ public sealed class WorkspaceContext : IDisposable
     public ReferenceTracker CreateReferenceTracker() => new(this);
 
     /// <summary>
-    /// Gets a document by its file path.
+    /// Gets a document by its file path. The path may be spelled any equivalent way: both
+    /// sides are normalized and compared like <c>PathResolver.PathsEqual</c>, so 8.3
+    /// short names, mixed separators, <c>..</c> segments and (on Windows) letter case match.
     /// </summary>
     /// <param name="filePath">Absolute path to the file.</param>
     /// <returns>Document if found, null otherwise.</returns>
@@ -127,7 +129,8 @@ public sealed class WorkspaceContext : IDisposable
         var normalizedPath = PathResolver.NormalizePath(filePath);
         return _solution.Projects
             .SelectMany(p => p.Documents)
-            .FirstOrDefault(d => PathResolver.NormalizePath(d.FilePath ?? "") == normalizedPath);
+            .FirstOrDefault(d => !string.IsNullOrEmpty(d.FilePath)
+                && PathResolver.PathComparer.Equals(PathResolver.NormalizePath(d.FilePath), normalizedPath));
     }
 
     /// <summary>
@@ -221,10 +224,7 @@ public sealed class WorkspaceContext : IDisposable
                 foreach (var doc in project.Documents)
                 {
                     if (doc.FilePath == null) continue;
-                    if (!string.Equals(
-                            PathResolver.NormalizePath(doc.FilePath),
-                            normalized,
-                            StringComparison.OrdinalIgnoreCase))
+                    if (!PathResolver.PathComparer.Equals(PathResolver.NormalizePath(doc.FilePath), normalized))
                         continue;
 
                     sol = sol.WithDocumentText(doc.Id, sourceText, PreservationMode.PreserveIdentity);
@@ -281,8 +281,8 @@ public sealed class WorkspaceContext : IDisposable
             // Existing in-memory projects for this csproj. A multi-targeted project shares
             // its file path across one entry per target framework, matched 1:1 below.
             var candidates = sol.Projects
-                .Where(p => p.FilePath != null && string.Equals(
-                    PathResolver.NormalizePath(p.FilePath), normalizedProjectPath, StringComparison.OrdinalIgnoreCase))
+                .Where(p => p.FilePath != null &&
+                    PathResolver.PathComparer.Equals(PathResolver.NormalizePath(p.FilePath), normalizedProjectPath))
                 .ToList();
 
             var changed = false;
@@ -297,11 +297,11 @@ public sealed class WorkspaceContext : IDisposable
                         $"Re-evaluated project '{fresh.Name}' did not map to exactly one loaded project.");
                 }
 
-                var freshDocs = new Dictionary<string, DocumentInfo>(StringComparer.OrdinalIgnoreCase);
+                var freshDocs = new Dictionary<string, DocumentInfo>(PathResolver.PathComparer);
                 foreach (var d in fresh.Documents)
                     if (d.FilePath != null) freshDocs[PathResolver.NormalizePath(d.FilePath)] = d;
 
-                var existingDocs = new Dictionary<string, DocumentId>(StringComparer.OrdinalIgnoreCase);
+                var existingDocs = new Dictionary<string, DocumentId>(PathResolver.PathComparer);
                 foreach (var d in existing.Documents)
                     if (d.FilePath != null) existingDocs[PathResolver.NormalizePath(d.FilePath)] = d.Id;
 
@@ -397,8 +397,8 @@ public sealed class WorkspaceContext : IDisposable
 
         // A load surfaces referenced projects too; keep only the project we re-evaluated.
         return evaluated
-            .Where(i => i.FilePath != null && string.Equals(
-                PathResolver.NormalizePath(i.FilePath), normalizedProjectPath, StringComparison.OrdinalIgnoreCase))
+            .Where(i => i.FilePath != null &&
+                PathResolver.PathComparer.Equals(PathResolver.NormalizePath(i.FilePath), normalizedProjectPath))
             .ToList();
     }
 
@@ -412,7 +412,7 @@ public sealed class WorkspaceContext : IDisposable
     internal IReadOnlyCollection<string> FindProjectFilesForPath(string filePath)
     {
         var normalized = PathResolver.NormalizePath(filePath);
-        var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var result = new HashSet<string>(PathResolver.PathComparer);
         string? deepestProjectFile = null;
         var deepestDirLen = -1;
 
@@ -423,8 +423,8 @@ public sealed class WorkspaceContext : IDisposable
 
             foreach (var doc in project.Documents)
             {
-                if (doc.FilePath != null && string.Equals(
-                        PathResolver.NormalizePath(doc.FilePath), normalized, StringComparison.OrdinalIgnoreCase))
+                if (doc.FilePath != null &&
+                    PathResolver.PathComparer.Equals(PathResolver.NormalizePath(doc.FilePath), normalized))
                 {
                     result.Add(projFile);
                     break;
@@ -542,12 +542,12 @@ public sealed class WorkspaceContext : IDisposable
 
     private static bool IsSameOrDescendant(string candidate, string ancestor)
     {
-        if (string.Equals(candidate, ancestor, StringComparison.OrdinalIgnoreCase))
+        if (PathResolver.PathComparer.Equals(candidate, ancestor))
             return true;
 
         var sep = Path.DirectorySeparatorChar;
         var prefix = ancestor.Length > 0 && ancestor[^1] == sep ? ancestor : ancestor + sep;
-        return candidate.StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
+        return candidate.StartsWith(prefix, PathResolver.PathComparison);
     }
 
     /// <summary>

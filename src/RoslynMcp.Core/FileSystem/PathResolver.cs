@@ -47,6 +47,13 @@ public static class PathResolver
         OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
 
     /// <summary>
+    /// The <see cref="StringComparison"/> of <see cref="PathComparer"/>, for prefix and
+    /// substring checks on normalized paths.
+    /// </summary>
+    public static StringComparison PathComparison { get; } =
+        OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+
+    /// <summary>
     /// Makes a path relative to a base path.
     /// </summary>
     /// <param name="basePath">Base path (directory).</param>

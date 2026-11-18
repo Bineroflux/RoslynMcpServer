@@ -205,6 +205,20 @@ public sealed class WorkspaceCache : IDisposable
         stale.OnLeaseReleased();
     }
 
+    /// <summary>
+    /// Invalidates <paramref name="entry"/> on behalf of its own watcher callbacks: removes it
+    /// from the cache only if it is still the entry published for <paramref name="key"/>, and
+    /// tears it down either way. A callback can still be running after its entry was
+    /// invalidated and a successor loaded (it checked the tombstone when it started, and a
+    /// re-evaluation runs for a while); removing by key alone would evict that fresh successor
+    /// and force another full reload.
+    /// </summary>
+    private void InvalidateEntry(string key, CachedEntry entry)
+    {
+        _entries.TryRemove(new KeyValuePair<string, CachedEntry>(key, entry));
+        entry.BeginTeardown();
+    }
+
     private void Sweep()
     {
         if (_disposed) return;
@@ -467,7 +481,7 @@ public sealed class WorkspaceCache : IDisposable
                     // access re-load from scratch.
                     _cache.LogCallback?.Invoke(
                         $"Project file '{fullPath}' changed ({changeType}); invalidating cache entry '{_key}'.");
-                    _cache.Invalidate(_key);
+                    _cache.InvalidateEntry(_key, this);
                     return;
                 }
 
@@ -487,7 +501,7 @@ public sealed class WorkspaceCache : IDisposable
                 {
                     _cache.LogCallback?.Invoke(
                         $"Razor/CSHTML file {changeType} '{fullPath}'; invalidating '{_key}'.");
-                    _cache.Invalidate(_key);
+                    _cache.InvalidateEntry(_key, this);
                     return;
                 }
 
@@ -573,7 +587,7 @@ public sealed class WorkspaceCache : IDisposable
                         // differ, which an in-place text update can't capture.
                         _cache.LogCallback?.Invoke(
                             $"File-based program directives changed in '{filePath}'; invalidating '{_key}' to rebuild.");
-                        _cache.Invalidate(_key);
+                        _cache.InvalidateEntry(_key, this);
                         break;
 
                     case DiskSyncOutcome.NotTracked when looksNew && !IsUnderIntermediateOutput(filePath):
@@ -633,7 +647,7 @@ public sealed class WorkspaceCache : IDisposable
                 // Fall back to a full reload so we never serve a stale document set.
                 _cache.LogErrorCallback?.Invoke(
                     $"Incremental re-evaluation of '{projectKey}' failed; invalidating '{_key}'.", ex);
-                _cache.Invalidate(_key);
+                _cache.InvalidateEntry(_key, this);
             }
         }
 

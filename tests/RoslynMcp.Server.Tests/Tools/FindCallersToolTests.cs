@@ -58,6 +58,14 @@ public class FindCallersToolTests
         Assert.Contains("sourceFile", requiredFields);
     }
 
+    [Theory]
+    [InlineData("callerFile", "string")]
+    [InlineData("projectPath", "string")]
+    public void GetDefinition_HasScopingParameters(string name, string type)
+    {
+        SchemaAssert.HasOptionalProperty(_tool, name, type);
+    }
+
     [Fact]
     public async Task ExecuteAsync_NullArguments_ReturnsError()
     {

@@ -279,7 +279,7 @@ These tools analyze your code without making changes. Use them to understand cod
 | `get_code_metrics` | Calculate code metrics: cyclomatic complexity, lines of code, maintainability index, class coupling, depth of inheritance. | `sourceFile`, `symbolName`, `line` |
 | `analyze_control_flow` | Analyze control flow for a code region: start/end point reachability, return statements, and exit points. | `sourceFile`, `startLine`, `endLine` |
 | `analyze_data_flow` | Analyze data flow for a code region: variables read/written inside, data flowing in/out, captured variables. | `sourceFile`, `startLine`, `endLine` |
-| `find_callers` | Find all callers of a symbol across the entire solution. | `sourceFile`, `symbolName`, `line`, `column`, `maxResults` |
+| `find_callers` | Find all callers of a symbol across the entire solution, or within one file or project. | `sourceFile`, `symbolName`, `line`, `column`, `maxResults`, `callerFile`, `projectPath` |
 | `get_type_hierarchy` | Retrieve the type hierarchy (base types and/or derived types) for a given type. | `sourceFile`, `symbolName`, `line`, `column`, `direction` |
 | `get_document_outline` | Get a hierarchical outline of all symbols in a file (namespaces, types, members). | `sourceFile` |
 

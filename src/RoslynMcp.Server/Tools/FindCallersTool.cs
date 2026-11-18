@@ -69,6 +69,16 @@ public sealed class FindCallersTool : IToolHandler
                 type = "integer",
                 description = "Maximum number of callers to return",
                 minimum = 1
+            },
+            callerFile = new
+            {
+                type = "string",
+                description = "Absolute path to a .cs file. Only call sites located in it."
+            },
+            projectPath = new
+            {
+                type = "string",
+                description = "Absolute path to a project file of the solution. Only call sites located in that project (all its target frameworks)."
             }
         },
         additionalProperties = false
@@ -95,7 +105,9 @@ public sealed class FindCallersTool : IToolHandler
                 SymbolName = args.SymbolName,
                 Line = args.Line,
                 Column = args.Column,
-                MaxResults = args.MaxResults
+                MaxResults = args.MaxResults,
+                CallerFile = args.CallerFile,
+                ProjectPath = args.ProjectPath
             };
 
             var result = await operation.ExecuteAsync(@params, cancellationToken);
@@ -127,5 +139,7 @@ public sealed class FindCallersTool : IToolHandler
         public int? Line { get; init; }
         public int? Column { get; init; }
         public int? MaxResults { get; init; }
+        public string? CallerFile { get; init; }
+        public string? ProjectPath { get; init; }
     }
 }

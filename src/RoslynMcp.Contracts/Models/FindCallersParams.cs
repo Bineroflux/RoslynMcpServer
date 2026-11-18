@@ -29,4 +29,15 @@ public sealed class FindCallersParams
     /// Maximum number of callers to return.
     /// </summary>
     public int? MaxResults { get; init; }
+
+    /// <summary>
+    /// Absolute path to a source file. Only call sites located in it.
+    /// </summary>
+    public string? CallerFile { get; init; }
+
+    /// <summary>
+    /// Absolute path to a project file of the solution. Only call sites located in that
+    /// project (every target framework of it).
+    /// </summary>
+    public string? ProjectPath { get; init; }
 }

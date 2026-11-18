@@ -26,6 +26,8 @@ public class QueryFilterOptionsTests
     [InlineData("find-references", "--include-declaration")]
     [InlineData("find-references", "--reference-file")]
     [InlineData("find-references", "--project-path")]
+    [InlineData("find-callers", "--caller-file")]
+    [InlineData("find-callers", "--project-path")]
     public void ToolHelp_ListsTheOption(string toolName, string option)
     {
         var tool = ToolRegistry.BuildDefault().GetTool(toolName)!;

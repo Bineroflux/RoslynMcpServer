@@ -4,6 +4,7 @@ using RoslynMcp.Contracts.Errors;
 using RoslynMcp.Contracts.Models;
 using RoslynMcp.Core.FileSystem;
 using RoslynMcp.Core.Query.Base;
+using RoslynMcp.Core.Query.Utilities;
 using RoslynMcp.Core.Refactoring;
 using RoslynMcp.Core.Workspace;
 
@@ -45,6 +46,9 @@ public sealed class FindCallersOperation : QueryOperationBase<FindCallersParams,
 
         if (!File.Exists(@params.SourceFile))
             throw new RefactoringException(ErrorCodes.SourceFileNotFound, $"Source file not found: {@params.SourceFile}");
+
+        QueryScope.ValidateFilePath(@params.CallerFile, "callerFile");
+        QueryScope.ValidateProjectPath(@params.ProjectPath);
     }
 
     /// <inheritdoc />
@@ -57,7 +61,15 @@ public sealed class FindCallersOperation : QueryOperationBase<FindCallersParams,
             @params.SourceFile, @params.SymbolName, @params.Line, @params.Column, cancellationToken);
 
         var symbol = resolved.Symbol;
-        var callerResults = await SymbolFinder.FindCallersAsync(symbol, Context.Solution, cancellationToken);
+
+        // The scopes filter every call site before it is counted, and narrow the documents searched.
+        var fileScope = QueryScope.ResolveFile(Context.Solution, @params.CallerFile, "callerFile");
+        var projectScope = QueryScope.ResolveProject(Context.Solution, @params.ProjectPath);
+        var searchDocuments = await QueryScope.GetSearchDocumentsAsync(fileScope, projectScope, cancellationToken);
+
+        var callerResults = searchDocuments is null
+            ? await SymbolFinder.FindCallersAsync(symbol, Context.Solution, cancellationToken)
+            : await SymbolFinder.FindCallersAsync(symbol, Context.Solution, searchDocuments, cancellationToken);
 
         var callers = new List<CallerInfo>();
         var totalCount = 0;
@@ -68,11 +80,19 @@ public sealed class FindCallersOperation : QueryOperationBase<FindCallersParams,
             foreach (var location in caller.Locations)
             {
                 if (!location.IsInSource) continue;
+
+                var lineSpan = location.GetLineSpan();
+                if (fileScope is not null && !fileScope.ContainsFile(lineSpan.Path)) continue;
+                if (projectScope is not null &&
+                    !projectScope.Contains(Context.Solution.GetDocument(location.SourceTree), lineSpan.Path))
+                {
+                    continue;
+                }
+
                 totalCount++;
 
                 if (callers.Count < maxResults)
                 {
-                    var lineSpan = location.GetLineSpan();
                     var snippet = await GetSnippetAsync(location, cancellationToken);
 
                     callers.Add(new CallerInfo

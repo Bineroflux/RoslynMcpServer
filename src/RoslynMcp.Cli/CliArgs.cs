@@ -95,6 +95,16 @@ public static class CliArgs
         return new ParsedArgs { ShowHelp = true };
     }
 
+    /// <summary>
+    /// The solution path resolved against the current directory, the way a command line
+    /// names files (<c>roslyn-cli MySolution.sln ...</c>). The workspace only accepts
+    /// absolute paths. Null stays null.
+    /// </summary>
+    public static string? ResolveSolutionPath(string? solutionPath) =>
+        string.IsNullOrWhiteSpace(solutionPath) || Path.IsPathRooted(solutionPath)
+            ? solutionPath
+            : Path.GetFullPath(solutionPath);
+
     private static (Dictionary<string, string> options, string format, bool verbose) ParseOptions(
         string[] args, int startIndex)
     {

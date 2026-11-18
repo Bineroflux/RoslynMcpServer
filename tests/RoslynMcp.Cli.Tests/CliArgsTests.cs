@@ -160,4 +160,21 @@ public class CliArgsTests
         Assert.Equal("DoStuff", result.Options["new-name"]);
         Assert.Equal("true", result.Options["preview"]);
     }
+
+    [Fact]
+    public void ResolveSolutionPath_ResolvesARelativePathAgainstTheCurrentDirectory()
+    {
+        var resolved = CliArgs.ResolveSolutionPath(Path.Combine("src", "MySolution.sln"));
+
+        Assert.Equal(Path.Combine(Environment.CurrentDirectory, "src", "MySolution.sln"), resolved);
+    }
+
+    [Fact]
+    public void ResolveSolutionPath_LeavesAnAbsolutePathAndNullAlone()
+    {
+        var absolute = Path.Combine(Path.GetTempPath(), "My.sln");
+
+        Assert.Equal(absolute, CliArgs.ResolveSolutionPath(absolute));
+        Assert.Null(CliArgs.ResolveSolutionPath(null));
+    }
 }

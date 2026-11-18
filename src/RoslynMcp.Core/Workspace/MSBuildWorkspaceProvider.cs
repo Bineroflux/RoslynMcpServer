@@ -100,6 +100,13 @@ public sealed class MSBuildWorkspaceProvider : IWorkspaceProvider, IDisposable
                 "Project or solution path is required.");
         }
 
+        if (!PathResolver.IsAbsolutePath(projectOrSolutionPath))
+        {
+            throw new RefactoringException(
+                ErrorCodes.InvalidSourcePath,
+                $"Path must be absolute: {projectOrSolutionPath}");
+        }
+
         if (!PathResolver.IsValidWorkspacePath(projectOrSolutionPath))
         {
             throw new RefactoringException(

@@ -95,7 +95,7 @@ try
     // Open a timing scope so WorkspaceTimingContext.RecordLoadMs reaches the
     // operation bases. Must start before the CreateContextAsync await.
     using var timingScope = WorkspaceTimingContext.BeginScope();
-    using var context = await workspaceProvider.CreateContextAsync(parsed.SolutionPath!, cts.Token);
+    using var context = await workspaceProvider.CreateContextAsync(CliArgs.ResolveSolutionPath(parsed.SolutionPath)!, cts.Token);
 
     if (parsed.Verbose)
         Console.Error.WriteLine($"[verbose] Solution loaded. Executing tool: {parsed.ToolName}");
@@ -163,8 +163,8 @@ Task<DiagnoseResult> ExecuteDiagnoseAsync(
 {
     // The solution may come positionally or as --solution-path; --verbose is both the CLI's
     // logging flag and diagnose's own option.
-    var solutionPath = args.SolutionPath
-        ?? (args.Options.TryGetValue("solution-path", out var path) ? path : null);
+    var solutionPath = CliArgs.ResolveSolutionPath(args.SolutionPath
+        ?? (args.Options.TryGetValue("solution-path", out var path) ? path : null));
     var verbose = args.Verbose
         || (args.Options.TryGetValue("verbose", out var value) && bool.TryParse(value, out var flag) && flag);
 

@@ -25,7 +25,7 @@ public sealed class DiagnoseToolTests
 
         var result = await CallDiagnoseAsync(dispatcher, "{}");
 
-        Assert.Equal(42, registered.Count);
+        Assert.Equal(43, registered.Count);
         Assert.Equal(registered, result.GetProperty("capabilities").EnumerateArray().Select(c => c.GetString()));
     }
 

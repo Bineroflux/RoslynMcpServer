@@ -46,7 +46,7 @@ public sealed class ToolEntry
 }
 
 /// <summary>
-/// Maps tool names to execution delegates for all 42 Roslyn tools.
+/// Maps tool names to execution delegates for all 43 Roslyn tools.
 /// </summary>
 public sealed class ToolRegistry
 {
@@ -138,7 +138,7 @@ public sealed class ToolRegistry
         _tools.Values.OrderBy(t => t.Category).ThenBy(t => t.Name).ToList();
 
     /// <summary>
-    /// Build the default registry with all 42 tools registered.
+    /// Build the default registry with all 43 tools registered.
     /// </summary>
     public static ToolRegistry BuildDefault()
     {
@@ -249,7 +249,7 @@ public sealed class ToolRegistry
         r.RegisterQuery<SearchSymbolsOperation, SearchSymbolsParams, SearchSymbolsResult>(
             "search-symbols", "Search for symbols by name pattern");
 
-        // ── Query: Analysis (6) ──────────────────────────────────────
+        // ── Query: Analysis (7) ──────────────────────────────────────
         r.RegisterQuery<GetDiagnosticsOperation, GetDiagnosticsParams, GetDiagnosticsResult>(
             "get-diagnostics", "Get compiler diagnostics for the solution or a file");
         r.RegisterQuery<GetCodeMetricsOperation, GetCodeMetricsParams, GetCodeMetricsResult>(
@@ -262,6 +262,8 @@ public sealed class ToolRegistry
             "get-document-outline", "Get a structural outline of a C# document");
         r.RegisterQuery<GetSymbolInfoOperation, GetSymbolInfoParams, DetailedSymbolInfo>(
             "get-symbol-info", "Get detailed information about a symbol at a position");
+        r.RegisterQuery<FindUnusedSymbolsOperation, FindUnusedSymbolsParams, FindUnusedSymbolsResult>(
+            "find-unused-symbols", "List types and members nothing references (candidates: reflection is invisible)");
 
         // ── Query: Type Hierarchy (1) ────────────────────────────────
         r.RegisterQuery<GetTypeHierarchyOperation, GetTypeHierarchyParams, GetTypeHierarchyResult>(

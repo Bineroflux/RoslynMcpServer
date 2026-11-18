@@ -8,7 +8,7 @@
 
 Let AI assistants like Claude safely refactor your C# codebase using the same Roslyn compiler platform that powers Visual Studio.
 
-Roslyn MCP Server is a [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server that exposes **42 Roslyn-powered tools** to AI assistants and other MCP clients. It combines 20 refactoring operations, 5 code navigation tools, 6 analysis and metrics tools, 4 code generation tools, and 7 code conversion tools -- giving your AI deep code intelligence, comprehensive refactoring, and modern C# syntax transformations with full solution-wide reference tracking and preview support.
+Roslyn MCP Server is a [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server that exposes **43 Roslyn-powered tools** to AI assistants and other MCP clients. It combines 20 refactoring operations, 5 code navigation tools, 7 analysis and metrics tools, 4 code generation tools, and 7 code conversion tools -- giving your AI deep code intelligence, comprehensive refactoring, and modern C# syntax transformations with full solution-wide reference tracking and preview support.
 
 ---
 
@@ -31,7 +31,7 @@ Roslyn MCP Server is a [Model Context Protocol (MCP)](https://modelcontextprotoc
 
 ## Why RoslynMcpServer?
 
-- **42 tools** -- refactoring, navigation, analysis, generation, and conversion tools, the most comprehensive Roslyn MCP server available
+- **43 tools** -- refactoring, navigation, analysis, generation, and conversion tools, the most comprehensive Roslyn MCP server available
 - **Preview mode on every operation** -- see exactly what will change before applying
 - **Atomic file writes with rollback** -- if any file write fails, all changes are reverted
 - **Solution-wide reference updates** -- renames and moves propagate across your entire solution
@@ -105,7 +105,7 @@ Claude will use the `rename_symbol` tool to rename the class and update every re
 
 ## Standalone CLI
 
-All 42 tools are also available as a standalone CLI for use in scripts, CI/CD pipelines, and terminals without an AI assistant.
+All 43 tools are also available as a standalone CLI for use in scripts, CI/CD pipelines, and terminals without an AI assistant.
 
 ### Install
 
@@ -285,6 +285,7 @@ These tools analyze your code without making changes. Use them to understand cod
 | `find_callers` | Find all callers of a symbol across the entire solution, or within one file or project. | `sourceFile`, `symbolName`, `line`, `column`, `maxResults`, `callerFile`, `projectPath` |
 | `get_type_hierarchy` | Retrieve the type hierarchy (base types and/or derived types, all or only direct ones) for a given type. | `sourceFile`, `symbolName`, `line`, `column`, `direction`, `transitive`, `maxResults` |
 | `get_document_outline` | Get a hierarchical outline of all symbols in a file (namespaces, types, members), optionally limited by depth, kind or name. | `sourceFile`, `maxDepth`, `kindFilter`, `nameFilter`, `maxResults` |
+| `find_unused_symbols` | List types and members declared in source that nothing references outside their own declaration. By default only symbols not visible outside their assembly, leaving out overrides, interface implementations, entry points, operators, parameterless constructors and attributed members. The results are candidates: reflection, serialization, XAML/Razor bindings and other assemblies are invisible. | `projectPath`, `sourceFile`, `kindFilter`, `includePublic`, `includeAttributed`, `maxResults` |
 
 ### Code Generation
 

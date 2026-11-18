@@ -66,6 +66,7 @@ public sealed class McpRequestDispatcher
         _toolRegistry.Register(new GetDiagnosticsTool(workspaceProvider));
         _toolRegistry.Register(new GetCodeMetricsTool(workspaceProvider));
         _toolRegistry.Register(new AnalyzeControlFlowTool(workspaceProvider));
+        _toolRegistry.Register(new FindUnusedSymbolsTool(workspaceProvider));
 
         // Navigation & Hierarchy Tools
         _toolRegistry.Register(new FindCallersTool(workspaceProvider));

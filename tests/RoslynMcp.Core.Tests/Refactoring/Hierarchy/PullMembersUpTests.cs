@@ -88,6 +88,39 @@ public sealed class PullMembersUpTests
     }
 
     [Fact]
+    public async Task RemovingEveryMemberButTheLast_LeavesNoBlankLineAfterTheBrace()
+    {
+        using var ws = TestWorkspace.Create(("C.cs", Lf("""
+            public class Base
+            {
+            }
+
+            public class Derived : Base
+            {
+                private int _legs = 4;
+
+                public int Legs() => _legs;
+
+                /// <summary>Kept.</summary>
+                public string Fetch() => "stick";
+
+                public int Twice() => Legs() * 2;
+            }
+            """)));
+
+        var result = await PullAsync(ws, "C.cs", "Derived", ["_legs", "Legs", "Twice"]);
+
+        Assert.True(result.Success, result.Error?.Message);
+        Assert.EndsWith(Lf("""
+            public class Derived : Base
+            {
+                /// <summary>Kept.</summary>
+                public string Fetch() => "stick";
+            }
+            """), ws.ReadFile("C.cs"));
+    }
+
+    [Fact]
     public async Task OneOfSeveralVariables_MovesAlone()
     {
         using var ws = TestWorkspace.Create(("C.cs", Lf("""

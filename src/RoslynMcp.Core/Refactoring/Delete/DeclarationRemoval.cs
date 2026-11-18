@@ -53,12 +53,59 @@ internal static class DeclarationRemoval
             return TextSpan.FromBounds(before, after);
         }
 
+        var (first, last) = Lines(text, node, end);
+        return LinesSpan(text, first, last);
+    }
+
+    /// <summary>
+    /// The text to remove to delete all of <paramref name="nodes"/> (declarations as for
+    /// <see cref="Span"/>). Declarations on lines of their own that follow each other, with only
+    /// blank lines between them, are removed as one block, so the blank lines around the block are
+    /// judged once: deleting all members but the last leaves no blank line after <c>{</c>.
+    /// </summary>
+    public static List<TextSpan> Spans(SourceText text, IEnumerable<SyntaxNode> nodes)
+    {
+        var spans = new List<TextSpan>();
+        var blocks = new List<(int First, int Last)>();
+        foreach (var node in nodes)
+        {
+            var end = node is EnumMemberDeclarationSyntax enumMember ? EndWithComma(enumMember) : node.Span.End;
+            if (node is VariableDeclaratorSyntax || !OwnsItsLines(text, node, end))
+                spans.Add(Span(text, node));
+            else
+                blocks.Add(Lines(text, node, end));
+        }
+
+        var merged = new List<(int First, int Last)>();
+        foreach (var block in blocks.OrderBy(b => b.First))
+        {
+            if (merged.Count > 0 && Enumerable.Range(merged[^1].Last + 1, Math.Max(0, block.First - merged[^1].Last - 1)).All(l => IsBlank(text.Lines[l])))
+                merged[^1] = (merged[^1].First, Math.Max(merged[^1].Last, block.Last));
+            else
+                merged.Add(block);
+        }
+
+        spans.AddRange(merged.Select(block => LinesSpan(text, block.First, block.Last)));
+        return spans;
+    }
+
+    /// <summary>The lines a declaration owns: its own and the comment lines directly above it.</summary>
+    private static (int First, int Last) Lines(SourceText text, SyntaxNode node, int end)
+    {
         var root = node.SyntaxTree.GetRoot();
         var first = text.Lines.GetLineFromPosition(node.SpanStart).LineNumber;
         while (first > 0 && text.Lines[first - 1].Start >= node.FullSpan.Start && IsCommentLine(text, root, text.Lines[first - 1]))
             first--;
 
-        var last = text.Lines.GetLineFromPosition(end).LineNumber;
+        return (first, text.Lines.GetLineFromPosition(end).LineNumber);
+    }
+
+    /// <summary>
+    /// Lines <paramref name="first"/> to <paramref name="last"/>, with one adjacent blank line when
+    /// that keeps blank lines from piling up or following <c>{</c> or preceding <c>}</c>.
+    /// </summary>
+    private static TextSpan LinesSpan(SourceText text, int first, int last)
+    {
         var start = text.Lines[first].Start;
         var stop = text.Lines[last].EndIncludingLineBreak;
 

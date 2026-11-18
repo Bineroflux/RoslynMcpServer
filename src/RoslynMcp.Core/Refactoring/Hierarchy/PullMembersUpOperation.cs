@@ -807,10 +807,9 @@ public sealed class PullMembersUpOperation : RefactoringOperationBase<PullMember
                 continue;
 
             var text = await document.GetTextAsync(cancellationToken);
-            var spans = marked.Select(node => DeclarationRemoval.Span(text, node)).ToList();
-            foreach (var (node, span) in marked.Zip(spans))
+            foreach (var node in marked)
             {
-                var lines = text.Lines.GetLinePositionSpan(span);
+                var lines = text.Lines.GetLinePositionSpan(DeclarationRemoval.Span(text, node));
                 changes.Add(new PendingChange
                 {
                     File = document.FilePath ?? document.Name,
@@ -822,7 +821,7 @@ public sealed class PullMembersUpOperation : RefactoringOperationBase<PullMember
                 });
             }
 
-            solution = solution.WithDocumentText(id, DeclarationRemoval.Remove(text, spans));
+            solution = solution.WithDocumentText(id, DeclarationRemoval.Remove(text, DeclarationRemoval.Spans(text, marked)));
         }
 
         return (solution, changes);

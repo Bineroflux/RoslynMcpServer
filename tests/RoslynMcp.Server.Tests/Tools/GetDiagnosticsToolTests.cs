@@ -100,6 +100,15 @@ public class GetDiagnosticsToolTests
     }
 
     [Fact]
+    public void GetDefinition_SaysAnalyzerDiagnosticsAreNotReported()
+    {
+        var properties = JsonDocument.Parse(JsonSerializer.Serialize(_tool.InputSchema)).RootElement.GetProperty("properties");
+
+        Assert.Contains("analyzers are not run", _tool.Description);
+        Assert.Contains("IDE/CA", properties.GetProperty("diagnosticIds").GetProperty("description").GetString());
+    }
+
+    [Fact]
     public void TargetFrameworks_IsOmittedFromTheJsonUnlessSet()
     {
         var plain = new DiagnosticInfo { Id = "CS0168", Message = "m", Severity = "Warning" };

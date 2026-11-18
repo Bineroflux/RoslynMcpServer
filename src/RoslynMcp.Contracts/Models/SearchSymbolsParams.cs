@@ -11,7 +11,7 @@ public sealed class SearchSymbolsParams
     public required string Query { get; init; }
 
     /// <summary>
-    /// Optional filter by symbol kind (e.g., "Class", "Method", "Property").
+    /// Optional filter by symbol kind (e.g., "Class", "Method", "Property", "Namespace").
     /// </summary>
     public string? KindFilter { get; init; }
 

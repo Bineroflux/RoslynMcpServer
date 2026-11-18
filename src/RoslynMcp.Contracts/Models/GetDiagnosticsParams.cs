@@ -24,6 +24,8 @@ public sealed class GetDiagnosticsParams
 
     /// <summary>
     /// Diagnostic IDs to include (e.g. CS0168), case-insensitive. If null or empty, all IDs.
+    /// Only compiler, source-generator, Razor and RMCP diagnostics are reported (analyzers are
+    /// not run), so IDE/CA IDs never match.
     /// </summary>
     public IReadOnlyList<string>? DiagnosticIds { get; init; }
 

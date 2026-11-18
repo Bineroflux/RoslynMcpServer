@@ -28,7 +28,7 @@ public sealed class GetDiagnosticsTool : IToolHandler
     public string Name => "get_diagnostics";
 
     /// <inheritdoc />
-    public string Description => "Get compiler diagnostics (errors, warnings) for the solution or a specific file. Useful for checking compilation status before or after refactoring. Sorted by file, line and column; diagnostics without a file come first.";
+    public string Description => "Get compiler diagnostics (errors, warnings) for the solution or a specific file. Useful for checking compilation status before or after refactoring. Reports compiler (CS), source-generator and Razor (RZ) diagnostics plus RMCP workspace notes; IDE/CA analyzers are not run. Sorted by file, line and column; diagnostics without a file come first.";
 
     /// <inheritdoc />
     public object InputSchema => new
@@ -62,7 +62,7 @@ public sealed class GetDiagnosticsTool : IToolHandler
             {
                 type = "array",
                 items = new { type = "string" },
-                description = "Only these diagnostic IDs (e.g. CS0168), case-insensitive"
+                description = "Only these diagnostic IDs (e.g. CS0168), case-insensitive. IDE/CA analyzer IDs never match: analyzers are not run."
             },
             excludeDiagnosticIds = new
             {

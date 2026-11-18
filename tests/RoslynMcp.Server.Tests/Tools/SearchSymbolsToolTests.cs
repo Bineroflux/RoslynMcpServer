@@ -72,6 +72,17 @@ public class SearchSymbolsToolTests
     }
 
     [Theory]
+    [InlineData("Class")]
+    [InlineData("Constant")]
+    [InlineData("Namespace")]
+    public void GetDefinition_KindFilterListsTheKinds(string kind)
+    {
+        var properties = JsonDocument.Parse(JsonSerializer.Serialize(_tool.InputSchema)).RootElement.GetProperty("properties");
+
+        Assert.Contains(kind, properties.GetProperty("kindFilter").GetProperty("description").GetString());
+    }
+
+    [Theory]
     [InlineData("exactMatch", "boolean")]
     [InlineData("caseSensitive", "boolean")]
     [InlineData("projectPath", "string")]

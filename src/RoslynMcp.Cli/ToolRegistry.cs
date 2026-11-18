@@ -47,7 +47,7 @@ public sealed class ToolEntry
 }
 
 /// <summary>
-/// Maps tool names to execution delegates for all 45 Roslyn tools.
+/// Maps tool names to execution delegates for all 46 Roslyn tools.
 /// </summary>
 public sealed class ToolRegistry
 {
@@ -139,7 +139,7 @@ public sealed class ToolRegistry
         _tools.Values.OrderBy(t => t.Category).ThenBy(t => t.Name).ToList();
 
     /// <summary>
-    /// Build the default registry with all 45 tools registered.
+    /// Build the default registry with all 46 tools registered.
     /// </summary>
     public static ToolRegistry BuildDefault()
     {
@@ -165,9 +165,11 @@ public sealed class ToolRegistry
         r.RegisterRefactoring<RenameNamespaceOperation, RenameNamespaceParams>(
             "rename-namespace", "Rename a namespace and its sub-namespaces solution-wide (optionally moving files to matching folders)");
 
-        // ── Refactoring: Inline (1) ───────────────────────────────────
+        // ── Refactoring: Inline (2) ───────────────────────────────────
         r.RegisterRefactoring<InlineVariableOperation, InlineVariableParams>(
             "inline-variable", "Inline a variable, replacing all references with its value");
+        r.RegisterRefactoring<InlineMethodOperation, InlineMethodParams>(
+            "inline-method", "Replace calls to a method with its body (one call or all), then delete it");
 
         // ── Refactoring: Delete (1) ───────────────────────────────────
         r.RegisterRefactoring<SafeDeleteOperation, SafeDeleteParams>(

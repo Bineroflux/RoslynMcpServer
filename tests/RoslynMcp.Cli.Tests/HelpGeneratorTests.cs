@@ -15,11 +15,11 @@ public class HelpGeneratorTests
     }
 
     [Fact]
-    public void GenerateGlobalHelp_Lists45Tools()
+    public void GenerateGlobalHelp_Lists46Tools()
     {
         var registry = ToolRegistry.BuildDefault();
         var help = HelpGenerator.GenerateGlobalHelp(registry);
-        Assert.Contains("Total: 45 tools", help);
+        Assert.Contains("Total: 46 tools", help);
     }
 
     [Fact]

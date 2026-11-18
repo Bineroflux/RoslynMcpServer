@@ -8,7 +8,7 @@
 
 Let AI assistants like Claude safely refactor your C# codebase using the same Roslyn compiler platform that powers Visual Studio.
 
-Roslyn MCP Server is a [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server that exposes **45 Roslyn-powered tools** to AI assistants and other MCP clients. It combines 22 refactoring operations, 5 code navigation tools, 7 analysis and metrics tools, 4 code generation tools, and 7 code conversion tools -- giving your AI deep code intelligence, comprehensive refactoring, and modern C# syntax transformations with full solution-wide reference tracking and preview support.
+Roslyn MCP Server is a [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server that exposes **46 Roslyn-powered tools** to AI assistants and other MCP clients. It combines 23 refactoring operations, 5 code navigation tools, 7 analysis and metrics tools, 4 code generation tools, and 7 code conversion tools -- giving your AI deep code intelligence, comprehensive refactoring, and modern C# syntax transformations with full solution-wide reference tracking and preview support.
 
 ---
 
@@ -31,7 +31,7 @@ Roslyn MCP Server is a [Model Context Protocol (MCP)](https://modelcontextprotoc
 
 ## Why RoslynMcpServer?
 
-- **45 tools** -- refactoring, navigation, analysis, generation, and conversion tools, the most comprehensive Roslyn MCP server available
+- **46 tools** -- refactoring, navigation, analysis, generation, and conversion tools, the most comprehensive Roslyn MCP server available
 - **Preview mode on every operation** -- see exactly what will change before applying
 - **Atomic file writes with rollback** -- if any file write fails, all changes are reverted
 - **Solution-wide reference updates** -- renames and moves propagate across your entire solution
@@ -105,7 +105,7 @@ Claude will use the `rename_symbol` tool to rename the class and update every re
 
 ## Standalone CLI
 
-All 45 tools are also available as a standalone CLI for use in scripts, CI/CD pipelines, and terminals without an AI assistant.
+All 46 tools are also available as a standalone CLI for use in scripts, CI/CD pipelines, and terminals without an AI assistant.
 
 ### Install
 
@@ -218,6 +218,7 @@ All tools accept a `solutionPath` parameter (absolute path to a `.sln`, `.slnx`,
 | Tool | Description | Key Parameters |
 |------|-------------|----------------|
 | `inline_variable` | Inline a local variable by replacing all usages with its initializer value. | `sourceFile`, `variableName`, `line` |
+| `inline_method` | Replace calls to a method with its body: every call, or one picked by `callLine` (`callFile`, `callColumn`), then delete the method when nothing references it any more (`deleteMethod`, default `true` when inlining every call and `false` for one call). A body that is an expression or a single `return` inlines into any expression; a `void` method's statements replace calls that are statements of their own. Arguments are substituted (parenthesized and cast where needed, defaults filled in, type arguments substituted, the receiver replacing `this`), or stored in locals first, in their original order, when moving, repeating or dropping them could change what happens; body locals that would clash are renamed. Calls that can't take those locals (expression-bodied members, initializers, conditional evaluation), whose body uses members not accessible there, or where a name would bind to something else are left and listed in `warnings`, with any compiler errors. Refuses recursive, virtual, abstract, override, interface, partial, extern, async, iterator and unsafe methods, `ref`/`out`/`in` parameters, and other block bodies. | `sourceFile`, `methodName`, `line`, `callFile`, `callLine`, `callColumn`, `deleteMethod` |
 
 ### Delete
 

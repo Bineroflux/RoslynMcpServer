@@ -128,6 +128,9 @@ public static class ErrorCodes
     /// <summary>Project file not part of loaded solution.</summary>
     public const string ProjectNotInWorkspace = "2021";
 
+    /// <summary>No call of the method at the requested location, or none at all.</summary>
+    public const string CallSiteNotFound = "2022";
+
     // ============================================
     // Semantic Errors (3xxx)
     // ============================================
@@ -358,6 +361,24 @@ public static class ErrorCodes
     /// The namespace also contains types from referenced assemblies, which cannot be renamed.
     /// </summary>
     public const string NamespaceInMetadata = "3131";
+
+    // --------------------------------------------
+    // Inline Method Errors (3140-3149)
+    // --------------------------------------------
+
+    /// <summary>
+    /// The method cannot be inlined anywhere: its body has an unsupported shape (several
+    /// statements before a return, a return in a void body, an iterator, unsafe code) or the
+    /// method is recursive, virtual, partial, extern or takes ref/out/in parameters.
+    /// </summary>
+    public const string MethodNotInlinable = "3140";
+
+    /// <summary>
+    /// A call cannot be inlined where it is (e.g. it needs temporary variables in an expression
+    /// that cannot take statements, or the body uses members the call site cannot access);
+    /// the message says why.
+    /// </summary>
+    public const string CallNotInlinable = "3141";
 
     // ============================================
     // System Errors (4xxx)

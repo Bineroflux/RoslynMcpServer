@@ -119,18 +119,28 @@ internal sealed class SyntaxEdits
         return edits.TryAdd(node, edit);
     }
 
+    /// <summary>The documents with edits.</summary>
+    public IReadOnlyCollection<DocumentId> Documents => _edits.Keys;
+
     /// <summary>
     /// Applies the edits to <paramref name="solution"/>, then simplifies the type names marked
     /// for it; line endings and the rest of each file stay as they were.
     /// </summary>
-    public async Task<Solution> ApplyAsync(Solution solution, CancellationToken cancellationToken)
+    /// <param name="solution">The solution the edited nodes belong to.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <param name="finish">A last change to each edited document's root before it is simplified and formatted.</param>
+    public async Task<Solution> ApplyAsync(
+        Solution solution,
+        CancellationToken cancellationToken,
+        Func<DocumentId, SyntaxNode, SyntaxNode>? finish = null)
     {
         var result = solution;
         foreach (var (id, edits) in _edits)
         {
             var root = await solution.GetDocument(id)!.GetSyntaxRootAsync(cancellationToken)
                 ?? throw new RefactoringException(ErrorCodes.RoslynError, "Could not parse file.");
-            result = result.WithDocumentSyntaxRoot(id, root.ReplaceNodes(edits.Keys, (original, rewritten) => edits[original](rewritten)));
+            var newRoot = root.ReplaceNodes(edits.Keys, (original, rewritten) => edits[original](rewritten));
+            result = result.WithDocumentSyntaxRoot(id, finish == null ? newRoot : finish(id, newRoot));
         }
 
         foreach (var id in _edits.Keys)

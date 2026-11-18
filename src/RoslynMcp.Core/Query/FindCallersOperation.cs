@@ -71,12 +71,12 @@ public sealed class FindCallersOperation : QueryOperationBase<FindCallersParams,
             ? await SymbolFinder.FindCallersAsync(symbol, Context.Solution, cancellationToken)
             : await SymbolFinder.FindCallersAsync(symbol, Context.Solution, searchDocuments, cancellationToken);
 
-        var callers = new List<CallerInfo>();
-        var totalCount = 0;
         var maxResults = @params.MaxResults ?? int.MaxValue;
 
+        var callSites = new List<(ISymbol Caller, string CallerName, Location Location, FileLinePositionSpan Span)>();
         foreach (var caller in callerResults)
         {
+            var callerName = caller.CallingSymbol.ToDisplayString();
             foreach (var location in caller.Locations)
             {
                 if (!location.IsInSource) continue;
@@ -89,23 +89,32 @@ public sealed class FindCallersOperation : QueryOperationBase<FindCallersParams,
                     continue;
                 }
 
-                totalCount++;
-
-                if (callers.Count < maxResults)
-                {
-                    var snippet = await GetSnippetAsync(location, cancellationToken);
-
-                    callers.Add(new CallerInfo
-                    {
-                        CallerName = caller.CallingSymbol.Name,
-                        CallerFullyQualifiedName = caller.CallingSymbol.ToDisplayString(),
-                        File = lineSpan.Path,
-                        Line = lineSpan.StartLinePosition.Line + 1,
-                        Column = lineSpan.StartLinePosition.Character + 1,
-                        Snippet = snippet
-                    });
-                }
+                callSites.Add((caller.CallingSymbol, callerName, location, lineSpan));
             }
+        }
+
+        // SymbolFinder's order varies between calls; sort by call site so maxResults keeps
+        // the same first N every time.
+        var ordered = ResultOrder.ByLocation(
+            callSites,
+            c => c.Span.Path,
+            c => c.Span.StartLinePosition.Line,
+            c => c.Span.StartLinePosition.Character,
+            c => c.CallerName);
+        var totalCount = ordered.Count;
+
+        var callers = new List<CallerInfo>();
+        foreach (var (caller, callerName, location, lineSpan) in ordered.Take(maxResults))
+        {
+            callers.Add(new CallerInfo
+            {
+                CallerName = caller.Name,
+                CallerFullyQualifiedName = callerName,
+                File = lineSpan.Path,
+                Line = lineSpan.StartLinePosition.Line + 1,
+                Column = lineSpan.StartLinePosition.Character + 1,
+                Snippet = await GetSnippetAsync(location, cancellationToken)
+            });
         }
 
         var result = new FindCallersResult

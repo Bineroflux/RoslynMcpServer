@@ -5,6 +5,7 @@ using RoslynMcp.Contracts.Errors;
 using RoslynMcp.Contracts.Models;
 using RoslynMcp.Core.FileSystem;
 using RoslynMcp.Core.Query.Base;
+using RoslynMcp.Core.Query.Utilities;
 using RoslynMcp.Core.Refactoring;
 using RoslynMcp.Core.Workspace;
 
@@ -105,13 +106,11 @@ public sealed class GetTypeHierarchyOperation : QueryOperationBase<GetTypeHierar
                 : await SymbolFinder.FindDerivedClassesAsync(
                     typeSymbol, Context.Solution, transitive, cancellationToken: cancellationToken);
 
-            var maxResults = @params.MaxResults ?? int.MaxValue;
-            foreach (var d in derived)
-            {
-                derivedTotalCount++;
-                if (derivedTypes.Count < maxResults)
-                    derivedTypes.Add(CreateEntry(d));
-            }
+            // SymbolFinder's order varies between calls; sort by location so maxResults
+            // keeps the same first N every time.
+            var ordered = ResultOrder.SymbolsByLocation(derived);
+            derivedTotalCount = ordered.Count;
+            derivedTypes.AddRange(ordered.Take(@params.MaxResults ?? int.MaxValue).Select(CreateEntry));
         }
 
         // Interfaces (always included)

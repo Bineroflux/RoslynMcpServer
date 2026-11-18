@@ -28,7 +28,7 @@ public sealed class GetTypeHierarchyTool : IToolHandler
     public string Name => "get_type_hierarchy";
 
     /// <inheritdoc />
-    public string Description => "Get the type hierarchy for a C# type: base types (ancestors), derived types (descendants), and implemented interfaces.";
+    public string Description => "Get the type hierarchy for a C# type: base types (ancestors), derived types (descendants, sorted by file and line), and implemented interfaces.";
 
     /// <inheritdoc />
     public object InputSchema => new

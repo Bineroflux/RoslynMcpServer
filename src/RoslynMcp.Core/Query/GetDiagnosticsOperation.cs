@@ -231,8 +231,17 @@ public sealed class GetDiagnosticsOperation : QueryOperationBase<GetDiagnosticsP
             }
         }
 
-        // Filter before truncating, so totalCount counts every match.
-        var matching = diagnostics.Where(contentFilter.Matches).ToList();
+        // Sort, since compilations bind method bodies concurrently and projects are
+        // independent: diagnostics without a file (RMCP0001/RMCP0002, project-level) first,
+        // then by file, line, column, ID and message. Filter before truncating, so
+        // totalCount counts every match.
+        var matching = ResultOrder.ByLocation(
+                diagnostics.Where(contentFilter.Matches),
+                d => d.File,
+                d => d.Line ?? 0,
+                d => d.Column ?? 0,
+                d => d.Id + "\0" + d.Message)
+            .ToList();
         var maxResults = @params.MaxResults ?? int.MaxValue;
         var returned = matching.Count > maxResults ? matching.Take(maxResults).ToList() : matching;
 

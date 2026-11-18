@@ -28,7 +28,7 @@ public sealed class GetDiagnosticsTool : IToolHandler
     public string Name => "get_diagnostics";
 
     /// <inheritdoc />
-    public string Description => "Get compiler diagnostics (errors, warnings) for the solution or a specific file. Useful for checking compilation status before or after refactoring.";
+    public string Description => "Get compiler diagnostics (errors, warnings) for the solution or a specific file. Useful for checking compilation status before or after refactoring. Sorted by file, line and column; diagnostics without a file come first.";
 
     /// <inheritdoc />
     public object InputSchema => new

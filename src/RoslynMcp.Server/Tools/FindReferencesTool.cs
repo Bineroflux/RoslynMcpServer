@@ -28,7 +28,7 @@ public sealed class FindReferencesTool : IToolHandler
     public string Name => "find_references";
 
     /// <inheritdoc />
-    public string Description => "Find all references to a C# symbol across the solution. Returns file locations, context snippets, and whether each reference is a definition or usage.";
+    public string Description => "Find all references to a C# symbol across the solution. Returns file locations, context snippets, and whether each reference is a definition or usage. Sorted: declarations first, then usages by file, line and column.";
 
     /// <inheritdoc />
     public object InputSchema => new

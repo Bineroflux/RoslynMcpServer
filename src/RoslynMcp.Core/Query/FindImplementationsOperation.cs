@@ -4,6 +4,7 @@ using RoslynMcp.Contracts.Errors;
 using RoslynMcp.Contracts.Models;
 using RoslynMcp.Core.FileSystem;
 using RoslynMcp.Core.Query.Base;
+using RoslynMcp.Core.Query.Utilities;
 using RoslynMcp.Core.Refactoring;
 using RoslynMcp.Core.Resolution;
 using RoslynMcp.Core.Workspace;
@@ -68,12 +69,15 @@ public sealed class FindImplementationsOperation : QueryOperationBase<FindImplem
                 symbol, Context.Solution, cancellationToken: cancellationToken)
             : await FindDirectImplementationsAsync(symbol, cancellationToken);
 
-        var totalCount = 0;
+        // SymbolFinder's order varies between calls; sort by location so maxResults keeps
+        // the same first N every time. Implementations without a source location (from
+        // metadata) are counted but not listed.
+        var ordered = ResultOrder.SymbolsByLocation(implSymbols);
+        var totalCount = ordered.Count;
 
-        foreach (var impl in implSymbols)
+        foreach (var impl in ordered)
         {
-            totalCount++;
-            if (implementations.Count >= maxResults) continue;
+            if (implementations.Count >= maxResults) break;
 
             var location = impl.Locations.FirstOrDefault(l => l.IsInSource);
             if (location == null) continue;

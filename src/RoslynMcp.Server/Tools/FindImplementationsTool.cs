@@ -28,7 +28,7 @@ public sealed class FindImplementationsTool : IToolHandler
     public string Name => "find_implementations";
 
     /// <inheritdoc />
-    public string Description => "Find all implementations of a C# interface, abstract class, or virtual/abstract member across the solution.";
+    public string Description => "Find all implementations of a C# interface, abstract class, or virtual/abstract member across the solution, sorted by file and line.";
 
     /// <inheritdoc />
     public object InputSchema => new

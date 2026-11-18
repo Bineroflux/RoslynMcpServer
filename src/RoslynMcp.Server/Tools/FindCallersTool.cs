@@ -28,7 +28,7 @@ public sealed class FindCallersTool : IToolHandler
     public string Name => "find_callers";
 
     /// <inheritdoc />
-    public string Description => "Find all callers of a C# method or symbol across the solution. Returns the calling symbol name, file location, and a code snippet for each call site.";
+    public string Description => "Find all callers of a C# method or symbol across the solution. Returns the calling symbol name, file location, and a code snippet for each call site, sorted by file, line and column.";
 
     /// <inheritdoc />
     public object InputSchema => new

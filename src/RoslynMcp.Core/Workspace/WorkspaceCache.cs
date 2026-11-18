@@ -282,7 +282,11 @@ public sealed class WorkspaceCache : IDisposable
 
         private readonly WorkspaceCache _cache;
         private readonly string _key;
-        private readonly List<FileSystemWatcher> _watchers = new();
+        // Published once by StartWatching and taken (swapped for null) by whichever teardown
+        // path gets there first: BeginTeardown, the deferred Teardown on the last lease release
+        // and the sweeper's eviction can run on different threads at once, and must never
+        // enumerate one collection while another clears it.
+        private FileSystemWatcher[]? _watchers;
         // Per-project monotonic generation used to debounce structural re-evaluations: a
         // burst of add/remove events for one project coalesces into a single re-eval.
         private readonly ConcurrentDictionary<string, long> _reevalGeneration = new(PathResolver.PathComparer);
@@ -398,6 +402,7 @@ public sealed class WorkspaceCache : IDisposable
 
         public void StartWatching()
         {
+            var started = new List<FileSystemWatcher>();
             var dirs = Context.GetWatchDirectories();
             foreach (var dir in dirs)
             {
@@ -418,7 +423,7 @@ public sealed class WorkspaceCache : IDisposable
                     watcher.Renamed += OnFileRenamed;
                     watcher.Error += OnWatcherError;
                     watcher.EnableRaisingEvents = true;
-                    _watchers.Add(watcher);
+                    started.Add(watcher);
                 }
                 catch (Exception ex)
                 {
@@ -427,11 +432,23 @@ public sealed class WorkspaceCache : IDisposable
                         $"Could not start file watcher for '{dir}'", ex);
                 }
             }
+
+            Interlocked.Exchange(ref _watchers, started.ToArray());
+
+            // The entry is published before its watchers start, so it may have been torn down
+            // meanwhile, finding nothing to dispose; then dispose them here. (A teardown that
+            // tombstones the entry after this check still disposes them: the final Teardown
+            // runs once the lease our caller holds is released.)
+            if (IsTombstoned(Volatile.Read(ref _state)))
+                DisposeWatchers();
         }
 
         private void DisposeWatchers()
         {
-            foreach (var watcher in _watchers)
+            var watchers = Interlocked.Exchange(ref _watchers, null);
+            if (watchers == null) return;
+
+            foreach (var watcher in watchers)
             {
                 try
                 {
@@ -440,7 +457,6 @@ public sealed class WorkspaceCache : IDisposable
                 }
                 catch { /* ignore */ }
             }
-            _watchers.Clear();
         }
 
         private void OnWatcherError(object sender, ErrorEventArgs e)

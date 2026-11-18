@@ -1,7 +1,4 @@
-using System.Text.Json;
 using RoslynMcp.Cli;
-using RoslynMcp.Contracts.Enums;
-using RoslynMcp.Contracts.Errors;
 using RoslynMcp.Contracts.Models;
 using RoslynMcp.Core.Workspace;
 
@@ -80,7 +77,7 @@ try
     // Special handling for diagnose (needs IWorkspaceProvider, not WorkspaceContext)
     if (parsed.ToolName.Equals("diagnose", StringComparison.OrdinalIgnoreCase))
     {
-        var diagnoseResult = await ExecuteDiagnoseAsync(workspaceProvider, parsed, cts.Token);
+        var diagnoseResult = await ExecuteDiagnoseAsync(workspaceProvider, registry, parsed, cts.Token);
         OutputResult(diagnoseResult, parsed.Format);
         return diagnoseResult is DiagnoseResult dr && dr.Healthy ? ExitSuccess : ExitToolError;
     }
@@ -158,76 +155,22 @@ bool IsEnvironmentError(Exception ex)
            ex.Message.Contains("SDK", StringComparison.OrdinalIgnoreCase);
 }
 
-async Task<DiagnoseResult> ExecuteDiagnoseAsync(
+Task<DiagnoseResult> ExecuteDiagnoseAsync(
     MSBuildWorkspaceProvider provider,
+    ToolRegistry tools,
     ParsedArgs args,
     CancellationToken ct)
 {
-    var envDiag = provider.CheckEnvironment();
-    var errors = new List<RefactoringError>();
+    // The solution may come positionally or as --solution-path; --verbose is both the CLI's
+    // logging flag and diagnose's own option.
+    var solutionPath = args.SolutionPath
+        ?? (args.Options.TryGetValue("solution-path", out var path) ? path : null);
+    var verbose = args.Verbose
+        || (args.Options.TryGetValue("verbose", out var value) && bool.TryParse(value, out var flag) && flag);
 
-    if (!envDiag.MsBuildFound)
-    {
-        errors.Add(RefactoringError.Create(
-            ErrorCodes.MsBuildNotFound,
-            envDiag.ErrorMessage ?? "MSBuild not found"));
-    }
-
-    var roslynVersion = typeof(Microsoft.CodeAnalysis.Compilation)
-        .Assembly.GetName().Version?.ToString();
-
-    WorkspaceStatus workspaceStatus;
-    if (!string.IsNullOrEmpty(args.SolutionPath))
-    {
-        try
-        {
-            using var context = await provider.CreateContextAsync(args.SolutionPath, ct);
-            workspaceStatus = new WorkspaceStatus
-            {
-                State = WorkspaceState.Ready,
-                SolutionLoaded = true,
-                SolutionPath = context.LoadedPath,
-                ProjectCount = context.Solution.Projects.Count(),
-                DocumentCount = context.Solution.Projects.Sum(p => p.Documents.Count())
-            };
-        }
-        catch (Exception ex)
-        {
-            workspaceStatus = new WorkspaceStatus
-            {
-                State = WorkspaceState.Error,
-                SolutionLoaded = false
-            };
-            errors.Add(RefactoringError.Create(
-                ErrorCodes.SolutionLoadFailed, ex.Message));
-        }
-    }
-    else
-    {
-        workspaceStatus = new WorkspaceStatus
-        {
-            State = WorkspaceState.Unloaded,
-            SolutionLoaded = false
-        };
-    }
-
-    return new DiagnoseResult
-    {
-        Healthy = envDiag.MsBuildFound && errors.Count == 0,
-        Components = new ComponentStatus
-        {
-            RoslynAvailable = true,
-            RoslynVersion = roslynVersion,
-            MsBuildFound = envDiag.MsBuildFound,
-            MsBuildVersion = envDiag.MsBuildVersion,
-            DotnetSdkAvailable = !string.IsNullOrEmpty(envDiag.DotnetSdkVersion),
-            DotnetSdkVersion = envDiag.DotnetSdkVersion
-        },
-        Workspace = workspaceStatus,
-        Capabilities = envDiag.MsBuildFound
-            ? ["move_type_to_file", "move_type_to_namespace", "diagnose"]
-            : ["diagnose"],
-        Errors = errors,
-        Warnings = []
-    };
+    return WorkspaceDiagnoser.RunAsync(
+        provider,
+        new DiagnoseParams { SolutionPath = solutionPath, Verbose = verbose },
+        tools.GetAllTools().Select(t => t.Name),
+        ct);
 }

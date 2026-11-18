@@ -39,6 +39,7 @@ public static class CliArgs
     /// Syntax: roslyn-cli [--help]
     ///         roslyn-cli &lt;tool-name&gt; --help
     ///         roslyn-cli &lt;solution-path&gt; &lt;tool-name&gt; [--option value ...]
+    ///         roslyn-cli &lt;tool-name&gt; [--option value ...]  (tools that need no solution)
     /// </remarks>
     public static ParsedArgs Parse(string[] args)
     {
@@ -78,6 +79,16 @@ public static class CliArgs
                 Format = format,
                 Verbose = verbose
             };
+        }
+
+        // Detect: roslyn-cli <tool-name> [--opts], for tools that need no solution (diagnose).
+        if (!args[0].StartsWith("--") && !LooksLikeFilePath(args[0]))
+        {
+            var (options, format, verbose) = ParseOptions(args, startIndex: 1);
+            if (options.Remove("help"))
+                return new ParsedArgs { ToolName = args[0], ShowToolHelp = true };
+
+            return new ParsedArgs { ToolName = args[0], Options = options, Format = format, Verbose = verbose };
         }
 
         // Fallback: show help

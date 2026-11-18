@@ -64,6 +64,12 @@ public sealed class WorkspaceContext : IDisposable
     /// </summary>
     public IReadOnlyList<string> GeneratorLoadIssues { get; }
 
+    /// <summary>
+    /// Diagnostics the workspace reported while loading (and while re-evaluating projects
+    /// since). Empty for workspaces not loaded through MSBuild.
+    /// </summary>
+    public IReadOnlyCollection<WorkspaceDiagnostic> LoadDiagnostics { get; }
+
     internal WorkspaceContext(
         Microsoft.CodeAnalysis.Workspace workspace,
         Solution solution,
@@ -72,7 +78,8 @@ public sealed class WorkspaceContext : IDisposable
         IReadOnlyList<string>? generatorLoadIssues = null,
         IDisposable? analyzerAssemblyLoader = null,
         IReadOnlyDictionary<string, string>? msbuildProperties = null,
-        FileBasedProgramInfo? fileBasedProgram = null)
+        FileBasedProgramInfo? fileBasedProgram = null,
+        IReadOnlyCollection<WorkspaceDiagnostic>? loadDiagnostics = null)
     {
         _workspace = workspace;
         _solution = solution;
@@ -84,6 +91,7 @@ public sealed class WorkspaceContext : IDisposable
         _fileBasedProgram = fileBasedProgram;
         LoadedPath = loadedPath;
         GeneratorLoadIssues = generatorLoadIssues ?? Array.Empty<string>();
+        LoadDiagnostics = loadDiagnostics ?? Array.Empty<WorkspaceDiagnostic>();
         State = WorkspaceState.Ready;
     }
 

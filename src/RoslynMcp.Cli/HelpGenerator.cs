@@ -62,7 +62,7 @@ public static class HelpGenerator
         if (tool.RequiresWorkspace)
             sb.AppendLine($"  roslyn-cli <solution-path> {tool.Name} [--option value ...]");
         else
-            sb.AppendLine($"  roslyn-cli <solution-path> {tool.Name} [--option value ...]  (solution is optional)");
+            sb.AppendLine($"  roslyn-cli [<solution-path>] {tool.Name} [--option value ...]  (solution is optional)");
         sb.AppendLine();
 
         var props = tool.ParamsType.GetProperties(BindingFlags.Public | BindingFlags.Instance);

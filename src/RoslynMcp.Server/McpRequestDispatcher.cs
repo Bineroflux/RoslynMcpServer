@@ -25,7 +25,7 @@ public sealed class McpRequestDispatcher
 
         _toolRegistry.Register(new MoveTypeToFileTool(workspaceProvider));
         _toolRegistry.Register(new MoveTypeToNamespaceTool(workspaceProvider));
-        _toolRegistry.Register(new DiagnoseTool(workspaceProvider));
+        _toolRegistry.Register(new DiagnoseTool(workspaceProvider, _toolRegistry.GetToolNames));
 
         // Phase 1 - Tier 1 Operations
         _toolRegistry.Register(new RenameSymbolTool(workspaceProvider));

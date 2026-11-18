@@ -5,6 +5,7 @@ using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.Diagnostics;
 using Microsoft.CodeAnalysis.MSBuild;
 using RoslynMcp.Contracts.Errors;
+using RoslynMcp.Contracts.Models;
 using RoslynMcp.Core.FileSystem;
 using RoslynMcp.Core.Refactoring;
 
@@ -18,7 +19,7 @@ public sealed class MSBuildWorkspaceProvider : IWorkspaceProvider, IDisposable
 {
     private static bool _msBuildRegistered;
     private static readonly object _registrationLock = new();
-    private static VisualStudioInstance? _registeredInstance;
+    private static MsBuildSelection? _registration;
 
     /// <summary>
     /// Optional logging callback for diagnostics.
@@ -279,7 +280,8 @@ public sealed class MSBuildWorkspaceProvider : IWorkspaceProvider, IDisposable
             generatorLoadIssues: generatorIssues.Count == 0 ? null : generatorIssues,
             analyzerAssemblyLoader: analyzerLoader,
             msbuildProperties: properties,
-            fileBasedProgram: fileBasedProgram);
+            fileBasedProgram: fileBasedProgram,
+            loadDiagnostics: diagnostics);
     }
 
     /// <summary>
@@ -580,37 +582,44 @@ public sealed class MSBuildWorkspaceProvider : IWorkspaceProvider, IDisposable
     }
 
     /// <inheritdoc />
+    /// <remarks>
+    /// Reports the MSBuild this process registered, or, before the first workspace load,
+    /// the one <see cref="EnsureMsBuildRegistered"/> would register: both go through
+    /// <see cref="SelectMsBuild"/>, so "found" here means a load can register it.
+    /// </remarks>
     public EnvironmentDiagnostics CheckEnvironment()
     {
+        var runtimeVersion = Environment.Version.ToString();
         try
         {
-            var instances = MSBuildLocator.QueryVisualStudioInstances().ToArray();
-
-            if (instances.Length == 0)
-            {
-                return new EnvironmentDiagnostics
-                {
-                    MsBuildFound = false,
-                    ErrorMessage = "MSBuild not found. Install Visual Studio, Build Tools, or .NET SDK."
-                };
-            }
-
-            var preferred = SelectPreferredInstance(instances);
+            var selection = _registration ?? SelectMsBuild();
+            var registeredPath = _registration?.Selected?.Info.MsBuildPath
+                ?? (MSBuildLocator.IsRegistered ? LoadedMsBuildDirectory() : null);
+            var msBuildPath = registeredPath ?? selection.Selected?.Info.MsBuildPath;
 
             return new EnvironmentDiagnostics
             {
-                MsBuildFound = true,
-                MsBuildVersion = preferred.Version.ToString(),
-                MsBuildPath = preferred.MSBuildPath,
-                DotnetSdkVersion = Environment.Version.ToString(),
-                SearchPaths = instances.Select(i => i.MSBuildPath).ToList()
+                MsBuildFound = msBuildPath != null || MSBuildLocator.IsRegistered,
+                MsBuildPath = msBuildPath,
+                MsBuildVersion = msBuildPath == null ? null : ReadMsBuildVersion(msBuildPath),
+                DotnetSdkVersion = (msBuildPath == null ? null : SdkFolderVersion(msBuildPath))
+                    ?? DotNetSdkLocator.SelectNewest(DotNetSdkLocator.FindAll(selection.SearchRoots), Environment.Version.Major)?.Version,
+                DotnetRuntimeVersion = runtimeVersion,
+                ErrorMessage = msBuildPath == null && !MSBuildLocator.IsRegistered
+                    ? $"MSBuild not found. Install Visual Studio, Build Tools, or .NET SDK. {selection.Reason}"
+                    : null,
+                Instances = selection.Candidates.Select(c => c.Info).ToList(),
+                SelectionReason = selection.Reason,
+                RegisteredMsBuildPath = registeredPath,
+                SdkSearchRoots = selection.SearchRoots
             };
         }
         catch (Exception ex)
         {
             return new EnvironmentDiagnostics
             {
-                MsBuildFound = false,
+                MsBuildFound = MSBuildLocator.IsRegistered,
+                DotnetRuntimeVersion = runtimeVersion,
                 ErrorMessage = ex.Message
             };
         }
@@ -634,24 +643,12 @@ public sealed class MSBuildWorkspaceProvider : IWorkspaceProvider, IDisposable
                 return;
             }
 
-            LogCallback?.Invoke("Querying Visual Studio instances for MSBuild...");
-            var instances = MSBuildLocator.QueryVisualStudioInstances().ToArray();
-            LogCallback?.Invoke($"Found {instances.Length} MSBuild instance(s).");
+            LogCallback?.Invoke("Looking for MSBuild...");
+            var selection = SelectMsBuild();
+            LogCallback?.Invoke($"Found {selection.Candidates.Count} MSBuild candidate(s). {selection.Reason}");
 
-            if (instances.Length == 0)
+            if (selection.Selected is not { } selected)
             {
-                // Try to find .NET SDK manually
-                LogCallback?.Invoke("No instances found, searching for .NET SDK manually...");
-                var sdkPath = FindDotNetSdk();
-                if (sdkPath != null)
-                {
-                    LogCallback?.Invoke($"Found .NET SDK at: {sdkPath}");
-                    MSBuildLocator.RegisterMSBuildPath(sdkPath);
-                    LogCallback?.Invoke("MSBuild registered via .NET SDK path.");
-                    _msBuildRegistered = true;
-                    return;
-                }
-
                 var errorMsg = "MSBuild not found. Install Visual Studio, Build Tools, or .NET SDK.";
                 LogErrorCallback?.Invoke(errorMsg, null);
                 throw new RefactoringException(
@@ -659,50 +656,90 @@ public sealed class MSBuildWorkspaceProvider : IWorkspaceProvider, IDisposable
                     errorMsg);
             }
 
-            _registeredInstance = SelectPreferredInstance(instances);
-            LogCallback?.Invoke($"Selected MSBuild instance: {_registeredInstance.Name} v{_registeredInstance.Version} at {_registeredInstance.MSBuildPath}");
-            MSBuildLocator.RegisterInstance(_registeredInstance);
+            LogCallback?.Invoke($"Selected MSBuild: {selected.Info.Name} {selected.Info.Version} at {selected.Info.MsBuildPath}");
+            if (selected.Instance != null)
+                MSBuildLocator.RegisterInstance(selected.Instance);
+            else
+                MSBuildLocator.RegisterMSBuildPath(selected.Info.MsBuildPath);
+
             LogCallback?.Invoke("MSBuild registered successfully.");
+            _registration = selection;
             _msBuildRegistered = true;
         }
     }
 
-    private static string? FindDotNetSdk()
-    {
-        var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
-        var sdkBase = Path.Combine(programFiles, "dotnet", "sdk");
-
-        if (!Directory.Exists(sdkBase))
-        {
-            return null;
-        }
-
-        // Pick the newest SDK this process can host. Compare parsed versions, not folder
-        // names: ordinally "9.0.321" sorts above "11.0.100". An SDK whose major version is
-        // newer than our runtime ships MSBuild assemblies we cannot load, so skip it.
-        var runtimeMajor = Environment.Version.Major;
-        return Directory.GetDirectories(sdkBase)
-            .Select(dir => (Dir: dir, Version: TryParseSdkVersion(Path.GetFileName(dir))))
-            .Where(sdk => sdk.Version != null && sdk.Version.Major <= runtimeMajor)
-            .OrderByDescending(sdk => sdk.Version)
-            .Select(sdk => sdk.Dir)
-            .FirstOrDefault();
-    }
+    /// <summary>
+    /// An MSBuild that could load projects, and the MSBuildLocator instance behind it (null
+    /// for an SDK found by probing).
+    /// </summary>
+    private sealed record MsBuildCandidate(MsBuildInstanceInfo Info, VisualStudioInstance? Instance);
 
     /// <summary>
-    /// Parses an SDK folder name such as <c>11.0.100</c> or <c>11.0.100-rc.2.26501.1</c>
-    /// (the prerelease label is ignored), or returns <see langword="null"/>.
+    /// Every MSBuild found, the one to use (if any) and why.
     /// </summary>
-    private static Version? TryParseSdkVersion(string? folderName)
+    private sealed record MsBuildSelection(
+        IReadOnlyList<MsBuildCandidate> Candidates,
+        MsBuildCandidate? Selected,
+        string Reason,
+        IReadOnlyList<string> SearchRoots);
+
+    /// <summary>
+    /// Picks the MSBuild to register. MSBuildLocator's instances come first, preferring a
+    /// .NET SDK over Visual Studio and then the highest version; when it finds none, the
+    /// SDKs under the usual dotnet roots are probed and the newest one this runtime can host
+    /// is used (see <see cref="DotNetSdkLocator"/>).
+    /// </summary>
+    private static MsBuildSelection SelectMsBuild()
     {
-        if (string.IsNullOrEmpty(folderName))
+        var roots = DotNetSdkLocator.GetSearchRoots();
+        var instances = MSBuildLocator.QueryVisualStudioInstances().ToArray();
+        if (instances.Length > 0)
         {
-            return null;
+            var preferred = SelectPreferredInstance(instances);
+            var candidates = instances
+                .Select(i => new MsBuildCandidate(
+                    new MsBuildInstanceInfo
+                    {
+                        Name = i.Name,
+                        Version = i.DiscoveryType == DiscoveryType.DotNetSdk
+                            ? SdkFolderVersion(i.MSBuildPath) ?? i.Version.ToString()
+                            : i.Version.ToString(),
+                        MsBuildVersion = ReadMsBuildVersion(i.MSBuildPath),
+                        MsBuildPath = i.MSBuildPath,
+                        DiscoveryType = i.DiscoveryType.ToString(),
+                        Selected = ReferenceEquals(i, preferred)
+                    },
+                    i))
+                .ToList();
+            var reason = preferred.DiscoveryType == DiscoveryType.DotNetSdk
+                ? $"MSBuildLocator found {instances.Length} instance(s); a .NET SDK is preferred over Visual Studio, then the highest version."
+                : $"MSBuildLocator found {instances.Length} instance(s) but no .NET SDK; the highest Visual Studio version is used.";
+            return new MsBuildSelection(candidates, candidates.Single(c => c.Info.Selected), reason, roots);
         }
 
-        var dash = folderName.IndexOf('-');
-        var core = dash >= 0 ? folderName[..dash] : folderName;
-        return Version.TryParse(core, out var version) ? version : null;
+        var runtimeMajor = Environment.Version.Major;
+        var sdks = DotNetSdkLocator.FindAll(roots);
+        var newest = DotNetSdkLocator.SelectNewest(sdks, runtimeMajor);
+        var probed = sdks
+            .Select(sdk => new MsBuildCandidate(
+                new MsBuildInstanceInfo
+                {
+                    Name = ".NET SDK",
+                    Version = sdk.Version,
+                    MsBuildVersion = ReadMsBuildVersion(sdk.Path),
+                    MsBuildPath = sdk.Path,
+                    DiscoveryType = "SdkDirectoryProbe",
+                    Selected = ReferenceEquals(sdk, newest),
+                    Note = DotNetSdkLocator.CanHost(sdk, runtimeMajor)
+                        ? null
+                        : $"needs a newer runtime than {Environment.Version}, so its MSBuild cannot be loaded"
+                },
+                null))
+            .ToList();
+        var probeReason = newest != null
+            ? $"MSBuildLocator found no instance; the newest SDK under the probed dotnet roots that the {Environment.Version} runtime can host is used."
+            : $"MSBuildLocator found no instance, and no SDK the {Environment.Version} runtime can host was found under: {string.Join(", ", roots)}.";
+        return new MsBuildSelection(probed, probed.SingleOrDefault(c => c.Info.Selected), probeReason, roots);
     }
 
     private static VisualStudioInstance SelectPreferredInstance(VisualStudioInstance[] instances)
@@ -713,4 +750,47 @@ public sealed class MSBuildWorkspaceProvider : IWorkspaceProvider, IDisposable
             .ThenByDescending(i => i.Version)
             .First();
     }
+
+    /// <summary>
+    /// The SDK version an MSBuild directory belongs to, when it is <c>&lt;root&gt;/sdk/&lt;version&gt;</c>.
+    /// </summary>
+    private static string? SdkFolderVersion(string msBuildPath)
+    {
+        var dir = Path.TrimEndingDirectorySeparator(msBuildPath);
+        return string.Equals(Path.GetFileName(Path.GetDirectoryName(dir)), "sdk", StringComparison.OrdinalIgnoreCase)
+            ? Path.GetFileName(dir)
+            : null;
+    }
+
+    /// <summary>
+    /// The product version of <c>Microsoft.Build.dll</c> in <paramref name="msBuildPath"/>
+    /// (e.g. <c>18.12.2</c>, without the commit hash), or null.
+    /// </summary>
+    private static string? ReadMsBuildVersion(string msBuildPath)
+    {
+        try
+        {
+            var dll = Path.Combine(msBuildPath, "Microsoft.Build.dll");
+            if (!File.Exists(dll))
+                return null;
+
+            var info = FileVersionInfo.GetVersionInfo(dll);
+            var version = string.IsNullOrEmpty(info.ProductVersion) ? info.FileVersion : info.ProductVersion;
+            return version?.Split('+')[0];
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Directory of the Microsoft.Build assembly loaded in this process, for an MSBuild that
+    /// someone else registered.
+    /// </summary>
+    private static string? LoadedMsBuildDirectory() =>
+        AppDomain.CurrentDomain.GetAssemblies()
+            .FirstOrDefault(a => a.GetName().Name == "Microsoft.Build" && !string.IsNullOrEmpty(a.Location)) is { } assembly
+            ? Path.GetDirectoryName(assembly.Location)
+            : null;
 }

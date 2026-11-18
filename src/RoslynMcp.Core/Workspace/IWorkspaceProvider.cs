@@ -1,3 +1,5 @@
+using RoslynMcp.Contracts.Models;
+
 namespace RoslynMcp.Core.Workspace;
 
 /// <summary>
@@ -30,24 +32,30 @@ public interface IWorkspaceProvider
 public sealed class EnvironmentDiagnostics
 {
     /// <summary>
-    /// Whether MSBuild was found.
+    /// Whether an MSBuild that can load projects was found (or is already registered).
     /// </summary>
     public required bool MsBuildFound { get; init; }
 
     /// <summary>
-    /// MSBuild version if found.
+    /// Version of that MSBuild's <c>Microsoft.Build.dll</c> (e.g. <c>18.12.2</c>).
     /// </summary>
     public string? MsBuildVersion { get; init; }
 
     /// <summary>
-    /// MSBuild path if found.
+    /// That MSBuild's directory.
     /// </summary>
     public string? MsBuildPath { get; init; }
 
     /// <summary>
-    /// .NET SDK version if found.
+    /// Version of the .NET SDK the MSBuild belongs to; for a Visual Studio MSBuild, the newest
+    /// SDK found.
     /// </summary>
     public string? DotnetSdkVersion { get; init; }
+
+    /// <summary>
+    /// Version of the .NET runtime this process runs on.
+    /// </summary>
+    public required string DotnetRuntimeVersion { get; init; }
 
     /// <summary>
     /// Any error message if environment check failed.
@@ -55,7 +63,22 @@ public sealed class EnvironmentDiagnostics
     public string? ErrorMessage { get; init; }
 
     /// <summary>
-    /// Paths that were searched for MSBuild.
+    /// Every MSBuild instance found, the selected one marked.
     /// </summary>
-    public IReadOnlyList<string>? SearchPaths { get; init; }
+    public IReadOnlyList<MsBuildInstanceInfo> Instances { get; init; } = [];
+
+    /// <summary>
+    /// Why the selected instance was chosen (or why none was).
+    /// </summary>
+    public string? SelectionReason { get; init; }
+
+    /// <summary>
+    /// MSBuild directory registered in this process, or null before the first load.
+    /// </summary>
+    public string? RegisteredMsBuildPath { get; init; }
+
+    /// <summary>
+    /// dotnet roots probed for SDKs.
+    /// </summary>
+    public IReadOnlyList<string> SdkSearchRoots { get; init; } = [];
 }

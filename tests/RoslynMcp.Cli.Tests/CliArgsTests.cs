@@ -72,6 +72,27 @@ public class CliArgsTests
         Assert.Equal("Error", result.Options["severity-filter"]);
     }
 
+    [Theory]
+    [InlineData(new[] { "diagnose" }, false)]
+    [InlineData(new[] { "diagnose", "--verbose" }, true)]
+    public void ToolWithoutSolution_IsParsed(string[] args, bool verbose)
+    {
+        // diagnose needs no solution; it used to fall through to the global help.
+        var result = CliArgs.Parse(args);
+        Assert.False(result.ShowHelp);
+        Assert.Equal("diagnose", result.ToolName);
+        Assert.Null(result.SolutionPath);
+        Assert.Equal(verbose, result.Verbose);
+    }
+
+    [Fact]
+    public void ToolWithoutSolution_TakesSolutionPathAsAnOption()
+    {
+        var result = CliArgs.Parse(["diagnose", "--solution-path", "My.sln"]);
+        Assert.Equal("diagnose", result.ToolName);
+        Assert.Equal("My.sln", result.Options["solution-path"]);
+    }
+
     [Fact]
     public void FormatWithAToolValue_IsPassedToTheTool()
     {

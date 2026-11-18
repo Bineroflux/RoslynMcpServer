@@ -1,5 +1,4 @@
 using System.Text.Json;
-using RoslynMcp.Contracts.Enums;
 using RoslynMcp.Contracts.Models;
 using RoslynMcp.Core.Workspace;
 using RoslynMcp.Server.Transport;
@@ -12,14 +11,18 @@ namespace RoslynMcp.Server.Tools;
 public sealed class DiagnoseTool : IToolHandler
 {
     private readonly IWorkspaceProvider _workspaceProvider;
+    private readonly Func<IEnumerable<string>> _toolNames;
     private readonly JsonSerializerOptions _jsonOptions;
 
     /// <summary>
     /// Creates a new diagnose tool.
     /// </summary>
-    public DiagnoseTool(IWorkspaceProvider workspaceProvider)
+    /// <param name="workspaceProvider">Workspace provider to check.</param>
+    /// <param name="toolNames">The registered tools, reported as capabilities.</param>
+    public DiagnoseTool(IWorkspaceProvider workspaceProvider, Func<IEnumerable<string>> toolNames)
     {
         _workspaceProvider = workspaceProvider;
+        _toolNames = toolNames;
         _jsonOptions = ToolJsonOptions.Default;
     }
 
@@ -27,7 +30,7 @@ public sealed class DiagnoseTool : IToolHandler
     public string Name => "diagnose";
 
     /// <inheritdoc />
-    public string Description => "Check the health of the Roslyn MCP server environment and workspace status.";
+    public string Description => "Check the health of the Roslyn MCP server environment (Roslyn, MSBuild, .NET SDK and runtime versions) and optionally test-load a solution.";
 
     /// <inheritdoc />
     public object InputSchema => new
@@ -43,7 +46,7 @@ public sealed class DiagnoseTool : IToolHandler
             verbose = new
             {
                 type = "boolean",
-                description = "Include detailed diagnostic information",
+                description = "Also report every MSBuild instance found and why one was selected, the registered MSBuild path, and for solutionPath each project's target framework, document count, analyzer/generator references and load failures, plus workspace load diagnostics",
                 @default = false
             }
         },
@@ -57,87 +60,14 @@ public sealed class DiagnoseTool : IToolHandler
         {
             var args = arguments.HasValue
                 ? JsonSerializer.Deserialize<DiagnoseArgs>(arguments.Value.GetRawText(), _jsonOptions)
-                : new DiagnoseArgs();
-
+                : null;
             args ??= new DiagnoseArgs();
 
-            // Check environment
-            var envDiag = _workspaceProvider.CheckEnvironment();
-
-            var errors = new List<Contracts.Errors.RefactoringError>();
-            var warnings = new List<string>();
-
-            if (!envDiag.MsBuildFound)
-            {
-                errors.Add(Contracts.Errors.RefactoringError.Create(
-                    Contracts.Errors.ErrorCodes.MsBuildNotFound,
-                    envDiag.ErrorMessage ?? "MSBuild not found"));
-            }
-
-            // Check Roslyn
-            var roslynVersion = typeof(Microsoft.CodeAnalysis.Compilation).Assembly.GetName().Version?.ToString();
-
-            // Try to load solution if provided
-            WorkspaceStatus workspaceStatus;
-            if (!string.IsNullOrEmpty(args.SolutionPath))
-            {
-                try
-                {
-                    using var context = await _workspaceProvider.CreateContextAsync(
-                        args.SolutionPath,
-                        cancellationToken);
-
-                    workspaceStatus = new WorkspaceStatus
-                    {
-                        State = WorkspaceState.Ready,
-                        SolutionLoaded = true,
-                        SolutionPath = context.LoadedPath,
-                        ProjectCount = context.Solution.Projects.Count(),
-                        DocumentCount = context.Solution.Projects.Sum(p => p.Documents.Count())
-                    };
-                }
-                catch (Exception ex)
-                {
-                    workspaceStatus = new WorkspaceStatus
-                    {
-                        State = WorkspaceState.Error,
-                        SolutionLoaded = false
-                    };
-                    errors.Add(Contracts.Errors.RefactoringError.Create(
-                        Contracts.Errors.ErrorCodes.SolutionLoadFailed,
-                        ex.Message));
-                }
-            }
-            else
-            {
-                workspaceStatus = new WorkspaceStatus
-                {
-                    State = WorkspaceState.Unloaded,
-                    SolutionLoaded = false
-                };
-            }
-
-            var capabilities = envDiag.MsBuildFound
-                ? new[] { "move_type_to_file", "move_type_to_namespace", "diagnose" }
-                : new[] { "diagnose" };
-
-            var result = new DiagnoseResult
-            {
-                Healthy = envDiag.MsBuildFound && errors.Count == 0,
-                Components = new ComponentStatus
-                {
-                    RoslynAvailable = true,
-                    RoslynVersion = roslynVersion,
-                    MsBuildFound = envDiag.MsBuildFound,
-                    MsBuildVersion = envDiag.MsBuildVersion,
-                    DotnetSdkAvailable = !string.IsNullOrEmpty(envDiag.DotnetSdkVersion),
-                    DotnetSdkVersion = envDiag.DotnetSdkVersion
-                },
-                Workspace = workspaceStatus,
-                Capabilities = capabilities,
-                Errors = errors,
-                Warnings = warnings
-            };
+            var result = await WorkspaceDiagnoser.RunAsync(
+                _workspaceProvider,
+                new DiagnoseParams { SolutionPath = args.SolutionPath, Verbose = args.Verbose ?? false },
+                _toolNames(),
+                cancellationToken);
 
             var json = JsonSerializer.Serialize(result, _jsonOptions);
             return ToolResult.Success(json);

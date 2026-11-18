@@ -273,7 +273,12 @@ internal static class FileBasedProgramProject
             WorkingDirectory = workingDir,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
-            RedirectStandardInput = stdin is not null,
+            // Always redirect stdin, even with nothing to send. Inheriting it would hand the
+            // child the MCP server's own protocol channel: a child that reads stdin could
+            // swallow JSON-RPC bytes, and Git for Windows' MSYS runtime blocks at startup
+            // probing an inherited synchronous pipe while the server has a read pending on
+            // it, which deadlocked the load until it timed out.
+            RedirectStandardInput = true,
             UseShellExecute = false,
             CreateNoWindow = true,
         };
@@ -288,20 +293,25 @@ internal static class FileBasedProgramProject
         try
         {
             if (stdin is not null)
-            {
                 await process.StandardInput.WriteAsync(stdin.AsMemory(), linked.Token);
-                process.StandardInput.Close();
-            }
+            process.StandardInput.Close();
+
             var stdoutTask = process.StandardOutput.ReadToEndAsync(linked.Token);
             var stderrTask = process.StandardError.ReadToEndAsync(linked.Token);
             await process.WaitForExitAsync(linked.Token);
             return (process.ExitCode, await stdoutTask, await stderrTask);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException ex)
         {
             try { if (!process.HasExited) process.Kill(entireProcessTree: true); }
             catch { /* best effort */ }
-            throw;
+
+            // Only the caller's token means "abort the load". Our own timeout is an ordinary
+            // failure of this one step, so best-effort steps (git exclude) can skip it and a
+            // run-api timeout falls back to the ad-hoc workspace instead of failing the call.
+            if (ct.IsCancellationRequested) throw;
+            throw new TimeoutException(
+                $"'{fileName} {string.Join(' ', args)}' did not finish within {timeout.TotalSeconds:0} s.", ex);
         }
     }
 

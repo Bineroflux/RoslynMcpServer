@@ -36,7 +36,7 @@ Paste error messages or logs here
 ## 🖥️ Environment
 
 - **OS**: [e.g., Windows 11, Ubuntu 22.04, macOS 14]
-- **.NET Version**: [e.g., .NET 9.0.0]
+- **.NET Version**: [e.g., .NET 11.0.100 SDK]
 - **Roslyn MCP Server Version**: [e.g., 0.1.0]
 - **MCP Client**: [e.g., Claude Desktop, custom client]
 

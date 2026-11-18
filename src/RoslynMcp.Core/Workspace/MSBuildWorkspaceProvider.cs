@@ -677,20 +677,32 @@ public sealed class MSBuildWorkspaceProvider : IWorkspaceProvider, IDisposable
             return null;
         }
 
-        // Find the latest SDK version
-        var sdkVersions = Directory.GetDirectories(sdkBase)
-            .Select(Path.GetFileName)
-            .Where(d => d != null && char.IsDigit(d[0]))
-            .OrderByDescending(v => v)
-            .ToList();
+        // Pick the newest SDK this process can host. Compare parsed versions, not folder
+        // names: ordinally "9.0.321" sorts above "11.0.100". An SDK whose major version is
+        // newer than our runtime ships MSBuild assemblies we cannot load, so skip it.
+        var runtimeMajor = Environment.Version.Major;
+        return Directory.GetDirectories(sdkBase)
+            .Select(dir => (Dir: dir, Version: TryParseSdkVersion(Path.GetFileName(dir))))
+            .Where(sdk => sdk.Version != null && sdk.Version.Major <= runtimeMajor)
+            .OrderByDescending(sdk => sdk.Version)
+            .Select(sdk => sdk.Dir)
+            .FirstOrDefault();
+    }
 
-        if (sdkVersions.Count == 0)
+    /// <summary>
+    /// Parses an SDK folder name such as <c>11.0.100</c> or <c>11.0.100-rc.2.26501.1</c>
+    /// (the prerelease label is ignored), or returns <see langword="null"/>.
+    /// </summary>
+    private static Version? TryParseSdkVersion(string? folderName)
+    {
+        if (string.IsNullOrEmpty(folderName))
         {
             return null;
         }
 
-        var latestSdk = Path.Combine(sdkBase, sdkVersions[0]!);
-        return Directory.Exists(latestSdk) ? latestSdk : null;
+        var dash = folderName.IndexOf('-');
+        var core = dash >= 0 ? folderName[..dash] : folderName;
+        return Version.TryParse(core, out var version) ? version : null;
     }
 
     private static VisualStudioInstance SelectPreferredInstance(VisualStudioInstance[] instances)

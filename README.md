@@ -45,7 +45,7 @@ Roslyn MCP Server is a [Model Context Protocol (MCP)](https://modelcontextprotoc
 
 Before installing, make sure you have:
 
-1. **.NET 10 SDK or later** -- [Download here](https://dotnet.microsoft.com/download/dotnet/10.0)
+1. **.NET 11 SDK or later** -- [Download here](https://dotnet.microsoft.com/download/dotnet/11.0)
 2. **A C# solution (`.sln` or `.slnx`) or project (`.csproj`) to work with**
 
 Verify your .NET SDK version:
@@ -54,7 +54,7 @@ Verify your .NET SDK version:
 dotnet --version
 ```
 
-The output should be `10.0.x` or higher.
+The output should be `11.0.x` or higher.
 
 ---
 
@@ -190,7 +190,7 @@ Config file locations:
 
 ## Available Tools
 
-All tools accept a `solutionPath` parameter (absolute path to a `.sln`, `.slnx`, or `.csproj` file). You can also point it at a single standalone `.cs` file — for example a .NET 10 [file-based program](https://learn.microsoft.com/dotnet/core/whats-new/dotnet-10/sdk#file-based-apps) you'd run with `dotnet run file.cs`. The SDK turns it into a project (via `dotnet run-api`) which is loaded through MSBuildWorkspace, so it behaves like a real project: the SDK's default analyzers and source generators run (`[GeneratedRegex]` works even with no directives), and `#:package`/`#:project`/`#:sdk`/`#:property` directives resolve — with `#:project` references navigable as source, and the repo's full MSBuild context (`Directory.Build.props`, `global.json`, `NuGet.config`, …) honored exactly as `dotnet run` does. The transient `<file>.cs.csproj` is created next to the file only while it loads (git-ignored via `.git/info/exclude`, then deleted). The first load builds/restores once (then it's cached); a recent .NET 10 SDK is required for directive resolution. Refactoring tools also accept a `preview` parameter (set to `true` to see changes without applying them).
+All tools accept a `solutionPath` parameter (absolute path to a `.sln`, `.slnx`, or `.csproj` file). You can also point it at a single standalone `.cs` file — for example a .NET 10 [file-based program](https://learn.microsoft.com/dotnet/core/whats-new/dotnet-10/sdk#file-based-apps) you'd run with `dotnet run file.cs`. The SDK turns it into a project (via `dotnet run-api`) which is loaded through MSBuildWorkspace, so it behaves like a real project: the SDK's default analyzers and source generators run (`[GeneratedRegex]` works even with no directives), and `#:package`/`#:project`/`#:sdk`/`#:property` directives resolve — with `#:project` references navigable as source, and the repo's full MSBuild context (`Directory.Build.props`, `global.json`, `NuGet.config`, …) honored exactly as `dotnet run` does. The transient `<file>.cs.csproj` is created next to the file only while it loads (git-ignored via `.git/info/exclude`, then deleted). The first load builds/restores once (then it's cached); a .NET 10 or later SDK is required for directive resolution. Refactoring tools also accept a `preview` parameter (set to `true` to see changes without applying them).
 
 ### Move and Rename
 
@@ -323,8 +323,8 @@ Copies are per-process and cleaned up automatically -- on workspace eviction, on
 If you see errors about the SDK not being found:
 
 1. Verify the SDK is installed: `dotnet --list-sdks`
-2. Make sure .NET 10 or later appears in the list
-3. If not, install it from [https://dotnet.microsoft.com/download/dotnet/10.0](https://dotnet.microsoft.com/download/dotnet/10.0)
+2. Make sure .NET 11 or later appears in the list
+3. If not, install it from [https://dotnet.microsoft.com/download/dotnet/11.0](https://dotnet.microsoft.com/download/dotnet/11.0)
 
 ### MSBuild or solution loading issues
 

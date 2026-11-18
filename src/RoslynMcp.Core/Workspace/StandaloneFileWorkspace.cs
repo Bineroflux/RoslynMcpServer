@@ -18,8 +18,8 @@ namespace RoslynMcp.Core.Workspace;
 /// <c>#:project</c> references. This ad-hoc path is used only when that materialization
 /// can't run (e.g. <c>dotnet run-api</c> unavailable or a build failure): the file is loaded
 /// into an in-memory <see cref="AdhocWorkspace"/> with references to the host's framework
-/// assemblies (this server runs on net10.0, so its trusted-platform-assembly set is the
-/// net10.0 reference surface) and the implicit global usings <c>Microsoft.NET.Sdk</c>
+/// assemblies (this server runs on net11.0, so its trusted-platform-assembly set is the
+/// net11.0 reference surface) and the implicit global usings <c>Microsoft.NET.Sdk</c>
 /// injects. In this degraded mode <c>#:package</c>/<c>#:project</c> symbols and source
 /// generators do not resolve, but the file's own symbols and diagnostics still work.
 /// </remarks>

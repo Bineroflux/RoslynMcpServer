@@ -22,7 +22,7 @@ jobs:
     - name: Setup .NET
       uses: actions/setup-dotnet@v5
       with:
-        dotnet-version: '9.0.x'
+        dotnet-version: '11.0.x'
 
     - name: Display .NET version
       run: dotnet --version
@@ -34,14 +34,14 @@ jobs:
       run: dotnet build RoslynMcp.sln -c Release --no-restore
 
     - name: Run tests
-      run: dotnet test RoslynMcp.sln -c Release --no-build --verbosity normal --logger "trx;LogFileName=test-results.trx"
+      run: dotnet test --solution RoslynMcp.sln -c Release --no-build --report-xunit-trx --results-directory TestResults
 
     - name: Upload test results
       if: always()
       uses: actions/upload-artifact@v6
       with:
         name: test-results-${{ matrix.os }}
-        path: '**/test-results.trx'
+        path: 'TestResults/*.trx'
 
   build-summary:
     name: Build Summary

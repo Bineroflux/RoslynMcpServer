@@ -17,7 +17,7 @@ jobs:
     - name: Setup .NET
       uses: actions/setup-dotnet@v5
       with:
-        dotnet-version: '9.0.x'
+        dotnet-version: '11.0.x'
 
     - name: Restore dependencies
       run: dotnet restore RoslynMcp.sln
@@ -26,7 +26,7 @@ jobs:
       run: dotnet build RoslynMcp.sln -c Release --no-restore
 
     - name: Run tests
-      run: dotnet test RoslynMcp.sln -c Release --no-build --verbosity normal
+      run: dotnet test --solution RoslynMcp.sln -c Release --no-build
 
     - name: Pack RoslynMcp.Contracts
       run: dotnet pack src/RoslynMcp.Contracts/RoslynMcp.Contracts.csproj -c Release --no-build -o ./packages

@@ -368,9 +368,17 @@ public sealed class ShadowCopyAnalyzerTests
         File.WriteAllText(Path.Combine(dir, "sub", "copy.dll"), "not really a dll");
 
         ShadowCopyAnalyzerAssemblyLoader.EnqueueRetiredDirectoryForTest(dir);
-        ShadowCopyAnalyzerAssemblyLoader.ReclaimRetiredDirectoriesForTest();
 
-        Assert.False(Directory.Exists(dir), "A retired, unmapped directory should be reclaimed.");
+        // Reclaims are one-at-a-time and a call made while another runs (a loader being
+        // disposed by a parallel test) returns without doing anything; the directory stays
+        // queued for the next reclaim. So retry, as the next mid-session reclaim would.
+        var reclaimed = SpinWait.SpinUntil(() =>
+        {
+            ShadowCopyAnalyzerAssemblyLoader.ReclaimRetiredDirectoriesForTest();
+            return !Directory.Exists(dir);
+        }, TimeSpan.FromSeconds(10));
+
+        Assert.True(reclaimed, "A retired, unmapped directory should be reclaimed.");
     }
 
     [Theory]

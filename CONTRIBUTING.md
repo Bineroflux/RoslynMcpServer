@@ -10,7 +10,7 @@ Be respectful, inclusive, and professional in all interactions.
 
 ### Prerequisites
 
-- .NET 9.0 SDK or later
+- .NET 11 SDK or later
 - Git
 - A code editor (Visual Studio, VS Code, or Rider recommended)
 

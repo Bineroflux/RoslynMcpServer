@@ -8,6 +8,7 @@ using RoslynMcp.Contracts.Errors;
 using RoslynMcp.Contracts.Models;
 using RoslynMcp.Core.FileSystem;
 using RoslynMcp.Core.Refactoring.Base;
+using RoslynMcp.Core.Refactoring.Hierarchy;
 using RoslynMcp.Core.Refactoring.Utilities;
 using RoslynMcp.Core.Workspace;
 
@@ -16,6 +17,12 @@ namespace RoslynMcp.Core.Refactoring.Extract;
 /// <summary>
 /// Extracts members to a new base class.
 /// </summary>
+/// <remarks>
+/// Members are picked by name like pull_members_up picks them (every overload of a method,
+/// field-like events, indexers as <c>this</c>, one variable of <c>int a, b;</c>); a private member
+/// becomes protected and a <c>private protected</c> one stays. A member that uses members of the
+/// type staying behind is refused with the members it uses.
+/// </remarks>
 public sealed class ExtractBaseClassOperation : RefactoringOperationBase<ExtractBaseClassParams>
 {
     /// <summary>
@@ -117,8 +124,31 @@ public sealed class ExtractBaseClassOperation : RefactoringOperationBase<Extract
                 $"Type '{@params.BaseClassName}' already exists.");
         }
 
-        // Find members to extract
-        var membersToExtract = FindMembersToExtract(typeDeclaration, @params.Members, semanticModel);
+        // Find members to extract; what they use has to come along.
+        var selected = MovedMembers.Select(typeSymbol, @params.Members, cancellationToken);
+        if (selected.FirstOrDefault(s => !typeDeclaration.Span.Contains(s.Declaration.Span) || s.Declaration.SyntaxTree != typeDeclaration.SyntaxTree) is { } elsewhere)
+        {
+            throw new RefactoringException(
+                ErrorCodes.MemberNotMoveable,
+                $"'{elsewhere.Symbols[0].ToDisplayString()}' is declared in another part of '{@params.TypeName}'.");
+        }
+
+        var moved = selected.SelectMany(s => s.Symbols).ToList();
+        var dependencies = MovedMembers.Dependencies(
+            selected.SelectMany(s => s.IsWhole ? [s.Declaration] : s.Variables.Cast<SyntaxNode>()), typeSymbol, moved, semanticModel, cancellationToken);
+        if (dependencies.Count > 0)
+        {
+            throw new RefactoringException(
+                ErrorCodes.MemberDependsOnDerived,
+                $"The members use {string.Join(", ", dependencies.Select(d => $"'{d.ToDisplayString()}'"))}, which would stay in '{@params.TypeName}'. Extract them too.",
+                new Dictionary<string, object> { ["dependencies"] = dependencies.Select(d => d.Name).Distinct().ToList() });
+        }
+
+        var membersToExtract = selected
+            .Select(s => s.Chosen(s.Declaration))
+            .Select((member, i) => member.WithModifiers(
+                MovedMembers.MovedModifiers(member.Modifiers, selected[i].Symbols[0], @params.BaseClassName, sameAssembly: true).Modifiers))
+            .ToList();
 
         // Generate base class
         var baseClass = GenerateBaseClass(
@@ -132,7 +162,7 @@ public sealed class ExtractBaseClassOperation : RefactoringOperationBase<Extract
         // If preview mode, return without applying
         if (@params.Preview)
         {
-            return CreatePreviewResult(operationId, @params, membersToExtract, baseClass, namespaceName);
+            return CreatePreviewResult(operationId, @params, moved, baseClass, namespaceName);
         }
 
         // Apply changes
@@ -177,10 +207,12 @@ public sealed class ExtractBaseClassOperation : RefactoringOperationBase<Extract
                     .AddBaseType(updatedTypeDecl, SyntaxFactory.ParseTypeName(@params.BaseClassName));
                 newTypeDecl = newTypeDecl.WithBaseList(GeneratedCodeFormatter.Mark(newTypeDecl.BaseList!));
 
-                // Remove extracted members from derived class
-                var memberNames = @params.Members.ToHashSet();
+                // Remove extracted members from derived class: whole declarations, or the extracted
+                // variables of a field declared with others. The members are where they were.
+                var byIndex = selected.ToDictionary(s => typeDeclaration.Members.IndexOf(s.Declaration));
                 var newMembers = newTypeDecl.Members
-                    .Where(m => !ShouldRemoveMember(m, memberNames))
+                    .Select((m, i) => byIndex.TryGetValue(i, out var s) ? s.Remaining(m) : m)
+                    .OfType<MemberDeclarationSyntax>()
                     .ToList();
 
                 newTypeDecl = newTypeDecl.WithMembers(SyntaxFactory.List(newMembers));
@@ -215,56 +247,6 @@ public sealed class ExtractBaseClassOperation : RefactoringOperationBase<Extract
             0);
     }
 
-    private static List<MemberDeclarationSyntax> FindMembersToExtract(
-        ClassDeclarationSyntax typeDeclaration,
-        IReadOnlyList<string> memberNames,
-        SemanticModel semanticModel)
-    {
-        // A name selects every member with that name (all overloads of a method): the derived
-        // class loses all of them, so the base class has to receive all of them.
-        var nameSet = new HashSet<string>(memberNames);
-        var found = new HashSet<string>();
-        var result = new List<MemberDeclarationSyntax>();
-
-        foreach (var member in typeDeclaration.Members)
-        {
-            var name = GetMemberName(member);
-            if (name != null && nameSet.Contains(name))
-            {
-                result.Add(member);
-                found.Add(name);
-            }
-        }
-
-        nameSet.ExceptWith(found);
-        if (nameSet.Count > 0)
-        {
-            throw new RefactoringException(
-                ErrorCodes.MemberNotFound,
-                $"Members not found: {string.Join(", ", nameSet)}");
-        }
-
-        return result;
-    }
-
-    private static string? GetMemberName(MemberDeclarationSyntax member)
-    {
-        return member switch
-        {
-            MethodDeclarationSyntax m => m.Identifier.Text,
-            PropertyDeclarationSyntax p => p.Identifier.Text,
-            FieldDeclarationSyntax f => f.Declaration.Variables.FirstOrDefault()?.Identifier.Text,
-            EventDeclarationSyntax e => e.Identifier.Text,
-            _ => null
-        };
-    }
-
-    private static bool ShouldRemoveMember(MemberDeclarationSyntax member, HashSet<string> memberNames)
-    {
-        var name = GetMemberName(member);
-        return name != null && memberNames.Contains(name);
-    }
-
     private static ClassDeclarationSyntax GenerateBaseClass(
         string className,
         List<MemberDeclarationSyntax> members,
@@ -276,42 +258,10 @@ public sealed class ExtractBaseClassOperation : RefactoringOperationBase<Extract
             modifiers.Add(SyntaxFactory.Token(SyntaxKind.AbstractKeyword));
         }
 
-        // Make members protected if they're private
-        var adjustedMembers = members.Select(m => AdjustMemberAccessibility(m)).ToList();
-
         return SyntaxFactory.ClassDeclaration(className)
             .WithModifiers(SyntaxFactory.TokenList(modifiers))
-            .WithMembers(SyntaxFactory.List(adjustedMembers))
+            .WithMembers(SyntaxFactory.List(members))
             .NormalizeWhitespace();
-    }
-
-    private static MemberDeclarationSyntax AdjustMemberAccessibility(MemberDeclarationSyntax member)
-    {
-        // If private, make protected
-        var modifiers = member switch
-        {
-            MethodDeclarationSyntax m => m.Modifiers,
-            PropertyDeclarationSyntax p => p.Modifiers,
-            FieldDeclarationSyntax f => f.Modifiers,
-            _ => default
-        };
-
-        if (modifiers.Any(SyntaxKind.PrivateKeyword))
-        {
-            var newModifiers = SyntaxFactory.TokenList(
-                modifiers.Where(m => !m.IsKind(SyntaxKind.PrivateKeyword))
-                         .Prepend(SyntaxFactory.Token(SyntaxKind.ProtectedKeyword)));
-
-            return member switch
-            {
-                MethodDeclarationSyntax m => m.WithModifiers(newModifiers),
-                PropertyDeclarationSyntax p => p.WithModifiers(newModifiers),
-                FieldDeclarationSyntax f => f.WithModifiers(newModifiers),
-                _ => member
-            };
-        }
-
-        return member;
     }
 
     private static async Task<Solution> CreateBaseClassInNewFileAsync(
@@ -374,11 +324,11 @@ public sealed class ExtractBaseClassOperation : RefactoringOperationBase<Extract
     private static RefactoringResult CreatePreviewResult(
         Guid operationId,
         ExtractBaseClassParams @params,
-        List<MemberDeclarationSyntax> members,
+        List<ISymbol> members,
         ClassDeclarationSyntax baseClass,
         string? namespaceName)
     {
-        var memberNames = string.Join(", ", members.Select(m => GetMemberName(m)));
+        var memberNames = string.Join(", ", members.Select(m => m is IPropertySymbol { IsIndexer: true } ? "this" : m.Name).Distinct());
         var baseClassCode = baseClass.NormalizeWhitespace().ToFullString();
 
         var targetFile = @params.TargetFile ?? @params.SourceFile;

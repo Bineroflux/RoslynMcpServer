@@ -211,7 +211,7 @@ All tools accept a `solutionPath` parameter (absolute path to a `.sln`, `.slnx`,
 | `extract_variable` | Extract an expression to a local variable. | `sourceFile`, `startLine`, `startColumn`, `endLine`, `endColumn`, `variableName`, `useVar` |
 | `extract_constant` | Extract a literal value to a named constant. | `sourceFile`, `startLine`, `startColumn`, `endLine`, `endColumn`, `constantName`, `visibility`, `replaceAll` |
 | `extract_interface` | Extract an interface from a class's public members. | `sourceFile`, `typeName`, `interfaceName`, `members`, `targetFile` |
-| `extract_base_class` | Extract members to a new base class. | `sourceFile`, `typeName`, `baseClassName`, `members`, `targetFile`, `makeAbstract` |
+| `extract_base_class` | Extract members to a new base class. Members are picked by name like `pull_members_up` picks them (every overload, field-like events, `this` for indexers, one variable of `int a, b;`); private members become protected, `private protected` ones stay. Refused when a member uses members that would stay behind (they are listed). | `sourceFile`, `typeName`, `baseClassName`, `members`, `targetFile`, `makeAbstract` |
 
 ### Hierarchy
 

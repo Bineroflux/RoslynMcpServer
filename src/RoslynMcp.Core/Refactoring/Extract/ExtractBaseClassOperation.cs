@@ -220,7 +220,10 @@ public sealed class ExtractBaseClassOperation : RefactoringOperationBase<Extract
         IReadOnlyList<string> memberNames,
         SemanticModel semanticModel)
     {
+        // A name selects every member with that name (all overloads of a method): the derived
+        // class loses all of them, so the base class has to receive all of them.
         var nameSet = new HashSet<string>(memberNames);
+        var found = new HashSet<string>();
         var result = new List<MemberDeclarationSyntax>();
 
         foreach (var member in typeDeclaration.Members)
@@ -229,10 +232,11 @@ public sealed class ExtractBaseClassOperation : RefactoringOperationBase<Extract
             if (name != null && nameSet.Contains(name))
             {
                 result.Add(member);
-                nameSet.Remove(name);
+                found.Add(name);
             }
         }
 
+        nameSet.ExceptWith(found);
         if (nameSet.Count > 0)
         {
             throw new RefactoringException(

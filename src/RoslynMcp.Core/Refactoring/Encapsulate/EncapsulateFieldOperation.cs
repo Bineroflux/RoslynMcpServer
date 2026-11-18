@@ -117,7 +117,8 @@ public sealed class EncapsulateFieldOperation : RefactoringOperationBase<Encapsu
         var property = SyntaxGenerationHelper.CreatePropertyFromField(
             fieldSymbol,
             propertyName,
-            @params.ReadOnly);
+            @params.ReadOnly,
+            semanticModel.GetNullableContext(fieldDeclaration.SpanStart).AnnotationsEnabled());
 
         if (isStatic)
         {

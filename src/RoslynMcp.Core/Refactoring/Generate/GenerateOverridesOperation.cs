@@ -116,8 +116,11 @@ public sealed class GenerateOverridesOperation : RefactoringOperationBase<Genera
                 "No overridable members found in base classes.");
         }
 
-        // Generate overrides
-        var overrides = GenerateOverrideMembers(membersToOverride, @params.CallBase, typeSymbol);
+        // Generate overrides (appended at the end of the type)
+        var nullableAnnotations = semanticModel
+            .GetNullableContext(typeDeclaration.CloseBraceToken.SpanStart)
+            .AnnotationsEnabled();
+        var overrides = GenerateOverrideMembers(membersToOverride, @params.CallBase, typeSymbol, nullableAnnotations);
 
         // If preview mode, return without applying
         if (@params.Preview)
@@ -157,7 +160,8 @@ public sealed class GenerateOverridesOperation : RefactoringOperationBase<Genera
     private static List<MemberDeclarationSyntax> GenerateOverrideMembers(
         List<ISymbol> members,
         bool callBase,
-        INamedTypeSymbol emittingType)
+        INamedTypeSymbol emittingType,
+        bool nullableAnnotations)
     {
         var overrides = new List<MemberDeclarationSyntax>();
 
@@ -172,19 +176,22 @@ public sealed class GenerateOverridesOperation : RefactoringOperationBase<Genera
                     explicitInterface: false,
                     callBase: callBase && !method.IsAbstract,
                     throwNotImplemented: method.IsAbstract,
-                    emittingType),
+                    emittingType,
+                    nullableAnnotations),
                 IPropertySymbol { IsIndexer: true } indexer => SyntaxGenerationHelper.CreateIndexerStub(
                     indexer,
                     explicitInterface: false,
                     throwNotImplemented: indexer.IsAbstract,
                     callBase: callBase && !indexer.IsAbstract,
-                    emittingType),
+                    emittingType,
+                    nullableAnnotations),
                 IPropertySymbol property => SyntaxGenerationHelper.CreatePropertyStub(
                     property,
                     explicitInterface: false,
                     throwNotImplemented: property.IsAbstract,
                     callBase: callBase && !property.IsAbstract,
-                    emittingType),
+                    emittingType,
+                    nullableAnnotations),
                 _ => null
             };
 

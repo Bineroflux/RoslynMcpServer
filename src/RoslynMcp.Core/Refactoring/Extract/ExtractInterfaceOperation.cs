@@ -125,10 +125,16 @@ public sealed class ExtractInterfaceOperation : RefactoringOperationBase<Extract
                 "No extractable public members found.");
         }
 
-        // Generate interface declaration
+        // Generate interface declaration. It goes into a new file (project-level nullable
+        // context) or right before the type.
+        var inNewFile = @params.TargetFile != null && !PathResolver.PathsEqual(@params.TargetFile, @params.SourceFile);
+        var nullableAnnotations = inNewFile
+            ? semanticModel.Compilation.Options.NullableContextOptions.AnnotationsEnabled()
+            : semanticModel.GetNullableContext(typeDeclaration.SpanStart).AnnotationsEnabled();
         var interfaceDecl = SyntaxGenerationHelper.CreateInterfaceDeclaration(
             @params.InterfaceName,
-            membersToExtract);
+            membersToExtract,
+            nullableAnnotations);
 
         // Get namespace
         var namespaceName = typeSymbol.ContainingNamespace?.ToDisplayString();
@@ -141,13 +147,13 @@ public sealed class ExtractInterfaceOperation : RefactoringOperationBase<Extract
 
         // Apply changes
         Solution newSolution;
-        if (@params.TargetFile != null && !PathResolver.PathsEqual(@params.TargetFile, @params.SourceFile))
+        if (inNewFile)
         {
             // Create new file with interface
             newSolution = await CreateInterfaceInNewFileAsync(
                 document.Project.Solution,
                 document.Project,
-                @params.TargetFile,
+                @params.TargetFile!,
                 interfaceDecl,
                 namespaceName,
                 root,

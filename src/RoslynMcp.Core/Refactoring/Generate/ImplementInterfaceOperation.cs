@@ -110,11 +110,15 @@ public sealed class ImplementInterfaceOperation : RefactoringOperationBase<Imple
                 "All interface members are already implemented.");
         }
 
-        // Generate implementations
+        // Generate implementations (appended at the end of the type)
+        var nullableAnnotations = semanticModel
+            .GetNullableContext(typeDeclaration.CloseBraceToken.SpanStart)
+            .AnnotationsEnabled();
         var implementations = GenerateImplementations(
             unimplementedMembers,
             @params.ExplicitImplementation,
-            @params.ThrowNotImplemented);
+            @params.ThrowNotImplemented,
+            nullableAnnotations);
 
         // If preview mode, return without applying
         if (@params.Preview)
@@ -174,7 +178,8 @@ public sealed class ImplementInterfaceOperation : RefactoringOperationBase<Imple
     private static List<MemberDeclarationSyntax> GenerateImplementations(
         List<ISymbol> members,
         bool explicitImplementation,
-        bool throwNotImplemented)
+        bool throwNotImplemented,
+        bool nullableAnnotations)
     {
         var implementations = new List<MemberDeclarationSyntax>();
 
@@ -186,18 +191,22 @@ public sealed class ImplementInterfaceOperation : RefactoringOperationBase<Imple
                     method,
                     explicitImplementation,
                     callBase: false,
-                    throwNotImplemented),
+                    throwNotImplemented,
+                    nullableAnnotations: nullableAnnotations),
                 IPropertySymbol { IsIndexer: true } indexer => SyntaxGenerationHelper.CreateIndexerStub(
                     indexer,
                     explicitImplementation,
-                    throwNotImplemented),
+                    throwNotImplemented,
+                    nullableAnnotations: nullableAnnotations),
                 IPropertySymbol property => SyntaxGenerationHelper.CreatePropertyStub(
                     property,
                     explicitImplementation,
-                    throwNotImplemented),
+                    throwNotImplemented,
+                    nullableAnnotations: nullableAnnotations),
                 IEventSymbol evt => SyntaxGenerationHelper.CreateEventStub(
                     evt,
-                    explicitImplementation),
+                    explicitImplementation,
+                    nullableAnnotations),
                 _ => null
             };
 

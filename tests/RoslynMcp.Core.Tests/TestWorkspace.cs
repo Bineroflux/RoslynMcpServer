@@ -121,14 +121,23 @@ internal sealed class TestWorkspace : IDisposable
     /// Compiles the <c>.cs</c> files currently on disk and returns the errors, each
     /// rendered with its location so a failing assertion shows what broke.
     /// </summary>
-    public IReadOnlyList<string> GetDiskCompilationErrors()
+    public IReadOnlyList<string> GetDiskCompilationErrors() =>
+        GetDiskCompilationDiagnostics(DiagnosticSeverity.Error);
+
+    /// <summary>
+    /// Like <see cref="GetDiskCompilationErrors"/>, but warnings included.
+    /// </summary>
+    public IReadOnlyList<string> GetDiskCompilationWarningsAndErrors() =>
+        GetDiskCompilationDiagnostics(DiagnosticSeverity.Warning);
+
+    private IReadOnlyList<string> GetDiskCompilationDiagnostics(DiagnosticSeverity minimum)
     {
         var trees = System.IO.Directory.GetFiles(Directory, "*.cs", SearchOption.AllDirectories)
             .Select(path => CSharpSyntaxTree.ParseText(File.ReadAllText(path), ParseOptions, path));
 
         return CSharpCompilation.Create("DiskCheck", trees, _references, CompilationOptions)
             .GetDiagnostics()
-            .Where(d => d.Severity == DiagnosticSeverity.Error)
+            .Where(d => d.Severity >= minimum)
             .Select(d => d.ToString())
             .ToList();
     }

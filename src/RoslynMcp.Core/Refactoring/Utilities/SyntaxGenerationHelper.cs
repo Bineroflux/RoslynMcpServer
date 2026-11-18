@@ -13,9 +13,20 @@ namespace RoslynMcp.Core.Refactoring.Utilities;
 /// (CS0115); overrides keep the overridden member's accessibility (CS0507). Parameters keep
 /// their <c>ref</c>/<c>out</c>/<c>in</c>/<c>ref readonly</c> and <c>scoped</c> modifiers,
 /// without which the stub would not implement or override anything.
+/// <para>
+/// Every <c>nullableAnnotations</c> parameter says whether nullable annotations are enabled
+/// where the generated code goes. Only then are reference types written with <c>?</c>;
+/// otherwise a member declared in annotated code (e.g. <c>object.Equals(object?)</c>) would
+/// put annotations into a nullable-disabled file (CS8632).
+/// </para>
 /// </remarks>
 public static class SyntaxGenerationHelper
 {
+    private static readonly SymbolDisplayFormat AnnotatedTypeFormat = SymbolDisplayFormat.CSharpErrorMessageFormat;
+
+    private static readonly SymbolDisplayFormat ObliviousTypeFormat =
+        AnnotatedTypeFormat.RemoveMiscellaneousOptions(SymbolDisplayMiscellaneousOptions.IncludeNullableReferenceTypeModifier);
+
     /// <summary>
     /// Creates a method stub for interface implementation or override.
     /// </summary>
@@ -27,13 +38,15 @@ public static class SyntaxGenerationHelper
     /// Type that will declare the stub. An override of a <c>protected internal</c> member from
     /// another assembly is emitted as <c>protected</c> (CS0507).
     /// </param>
+    /// <param name="nullableAnnotations">Whether nullable annotations are enabled where the stub goes.</param>
     /// <returns>Method declaration syntax.</returns>
     public static MethodDeclarationSyntax CreateMethodStub(
         IMethodSymbol method,
         bool explicitInterface = false,
         bool callBase = false,
         bool throwNotImplemented = true,
-        INamedTypeSymbol? emittingType = null)
+        INamedTypeSymbol? emittingType = null,
+        bool nullableAnnotations = true)
     {
         BlockSyntax body;
         if (callBase && !method.IsAbstract)
@@ -46,16 +59,15 @@ public static class SyntaxGenerationHelper
         }
         else
         {
-            body = CreateDefaultMethodBody(method);
+            body = CreateDefaultMethodBody(method, nullableAnnotations);
         }
 
         var methodDecl = SyntaxFactory.MethodDeclaration(
-                CreateReturnType(method.ReturnType, method.ReturnsByRef, method.ReturnsByRefReadonly),
+                CreateReturnType(method.ReturnType, method.ReturnsByRef, method.ReturnsByRefReadonly, nullableAnnotations),
                 method.Name)
             .WithModifiers(CreateModifiers(method, explicitInterface, emittingType))
-            .WithExplicitInterfaceSpecifier(CreateExplicitInterfaceSpecifier(method, explicitInterface))
-            .WithParameterList(SyntaxFactory.ParameterList(
-                SyntaxFactory.SeparatedList(method.Parameters.Select(CreateParameter))))
+            .WithExplicitInterfaceSpecifier(CreateExplicitInterfaceSpecifier(method, explicitInterface, nullableAnnotations))
+            .WithParameterList(CreateParameterList(method.Parameters, nullableAnnotations))
             .WithBody(body);
 
         // Add type parameters if generic
@@ -78,20 +90,22 @@ public static class SyntaxGenerationHelper
     /// <param name="throwNotImplemented">If true, throws NotImplementedException in accessors.</param>
     /// <param name="callBase">If true, the accessors of a non-abstract property delegate to <c>base.Property</c>.</param>
     /// <param name="emittingType">Type that will declare the stub (see <see cref="CreateMethodStub"/>).</param>
+    /// <param name="nullableAnnotations">Whether nullable annotations are enabled where the stub goes.</param>
     /// <returns>Property declaration syntax.</returns>
     public static PropertyDeclarationSyntax CreatePropertyStub(
         IPropertySymbol property,
         bool explicitInterface = false,
         bool throwNotImplemented = true,
         bool callBase = false,
-        INamedTypeSymbol? emittingType = null)
+        INamedTypeSymbol? emittingType = null,
+        bool nullableAnnotations = true)
     {
         return SyntaxFactory.PropertyDeclaration(
-                CreateReturnType(property.Type, property.ReturnsByRef, property.ReturnsByRefReadonly),
+                CreateReturnType(property.Type, property.ReturnsByRef, property.ReturnsByRefReadonly, nullableAnnotations),
                 property.Name)
             .WithModifiers(CreateModifiers(property, explicitInterface, emittingType))
-            .WithExplicitInterfaceSpecifier(CreateExplicitInterfaceSpecifier(property, explicitInterface))
-            .WithAccessorList(CreateAccessorList(property, explicitInterface, throwNotImplemented, callBase, emittingType))
+            .WithExplicitInterfaceSpecifier(CreateExplicitInterfaceSpecifier(property, explicitInterface, nullableAnnotations))
+            .WithAccessorList(CreateAccessorList(property, explicitInterface, throwNotImplemented, callBase, emittingType, nullableAnnotations))
             .NormalizeWhitespace();
     }
 
@@ -103,21 +117,22 @@ public static class SyntaxGenerationHelper
     /// <param name="throwNotImplemented">If true, throws NotImplementedException in accessors.</param>
     /// <param name="callBase">If true, the accessors of a non-abstract indexer delegate to <c>base[...]</c>.</param>
     /// <param name="emittingType">Type that will declare the stub (see <see cref="CreateMethodStub"/>).</param>
+    /// <param name="nullableAnnotations">Whether nullable annotations are enabled where the stub goes.</param>
     /// <returns>Indexer declaration syntax.</returns>
     public static IndexerDeclarationSyntax CreateIndexerStub(
         IPropertySymbol indexer,
         bool explicitInterface = false,
         bool throwNotImplemented = true,
         bool callBase = false,
-        INamedTypeSymbol? emittingType = null)
+        INamedTypeSymbol? emittingType = null,
+        bool nullableAnnotations = true)
     {
         return SyntaxFactory.IndexerDeclaration(
-                CreateReturnType(indexer.Type, indexer.ReturnsByRef, indexer.ReturnsByRefReadonly))
+                CreateReturnType(indexer.Type, indexer.ReturnsByRef, indexer.ReturnsByRefReadonly, nullableAnnotations))
             .WithModifiers(CreateModifiers(indexer, explicitInterface, emittingType))
-            .WithExplicitInterfaceSpecifier(CreateExplicitInterfaceSpecifier(indexer, explicitInterface))
-            .WithParameterList(SyntaxFactory.BracketedParameterList(
-                SyntaxFactory.SeparatedList(indexer.Parameters.Select(CreateParameter))))
-            .WithAccessorList(CreateAccessorList(indexer, explicitInterface, throwNotImplemented, callBase, emittingType))
+            .WithExplicitInterfaceSpecifier(CreateExplicitInterfaceSpecifier(indexer, explicitInterface, nullableAnnotations))
+            .WithParameterList(CreateBracketedParameterList(indexer.Parameters, nullableAnnotations))
+            .WithAccessorList(CreateAccessorList(indexer, explicitInterface, throwNotImplemented, callBase, emittingType, nullableAnnotations))
             .NormalizeWhitespace();
     }
 
@@ -126,21 +141,21 @@ public static class SyntaxGenerationHelper
     /// </summary>
     /// <param name="eventSymbol">The event to implement.</param>
     /// <param name="explicitInterface">If true, creates explicit interface implementation.</param>
+    /// <param name="nullableAnnotations">Whether nullable annotations are enabled where the stub goes.</param>
     /// <returns>Event declaration syntax.</returns>
     public static EventDeclarationSyntax CreateEventStub(
         IEventSymbol eventSymbol,
-        bool explicitInterface = false)
+        bool explicitInterface = false,
+        bool nullableAnnotations = true)
     {
-        var eventType = SyntaxFactory.ParseTypeName(eventSymbol.Type.ToDisplayString());
-
         var addAccessor = SyntaxFactory.AccessorDeclaration(SyntaxKind.AddAccessorDeclaration)
             .WithBody(SyntaxFactory.Block());
         var removeAccessor = SyntaxFactory.AccessorDeclaration(SyntaxKind.RemoveAccessorDeclaration)
             .WithBody(SyntaxFactory.Block());
 
-        return SyntaxFactory.EventDeclaration(eventType, eventSymbol.Name)
+        return SyntaxFactory.EventDeclaration(CreateTypeSyntax(eventSymbol.Type, nullableAnnotations), eventSymbol.Name)
             .WithModifiers(CreateModifiers(eventSymbol, explicitInterface, emittingType: null))
-            .WithExplicitInterfaceSpecifier(CreateExplicitInterfaceSpecifier(eventSymbol, explicitInterface))
+            .WithExplicitInterfaceSpecifier(CreateExplicitInterfaceSpecifier(eventSymbol, explicitInterface, nullableAnnotations))
             .WithAccessorList(SyntaxFactory.AccessorList(
                 SyntaxFactory.List(new[] { addAccessor, removeAccessor })))
             .NormalizeWhitespace();
@@ -168,14 +183,14 @@ public static class SyntaxGenerationHelper
     /// Creates a field declaration from a property.
     /// </summary>
     /// <param name="property">The property to back with a field.</param>
+    /// <param name="nullableAnnotations">Whether nullable annotations are enabled where the field goes.</param>
     /// <returns>Field declaration syntax.</returns>
-    public static FieldDeclarationSyntax CreateBackingField(IPropertySymbol property)
+    public static FieldDeclarationSyntax CreateBackingField(IPropertySymbol property, bool nullableAnnotations = true)
     {
         var fieldName = "_" + char.ToLowerInvariant(property.Name[0]) + property.Name.Substring(1);
-        var fieldType = SyntaxFactory.ParseTypeName(property.Type.ToDisplayString());
 
         return SyntaxFactory.FieldDeclaration(
-            SyntaxFactory.VariableDeclaration(fieldType)
+            SyntaxFactory.VariableDeclaration(CreateTypeSyntax(property.Type, nullableAnnotations))
                 .WithVariables(SyntaxFactory.SingletonSeparatedList(
                     SyntaxFactory.VariableDeclarator(fieldName))))
             .WithModifiers(SyntaxFactory.TokenList(SyntaxFactory.Token(SyntaxKind.PrivateKeyword)))
@@ -188,14 +203,14 @@ public static class SyntaxGenerationHelper
     /// <param name="field">The field to encapsulate.</param>
     /// <param name="propertyName">Name for the property.</param>
     /// <param name="readOnly">If true, creates read-only property.</param>
+    /// <param name="nullableAnnotations">Whether nullable annotations are enabled where the property goes.</param>
     /// <returns>Property declaration syntax.</returns>
     public static PropertyDeclarationSyntax CreatePropertyFromField(
         IFieldSymbol field,
         string propertyName,
-        bool readOnly = false)
+        bool readOnly = false,
+        bool nullableAnnotations = true)
     {
-        var propertyType = SyntaxFactory.ParseTypeName(field.Type.ToDisplayString());
-
         var getAccessor = SyntaxFactory.AccessorDeclaration(SyntaxKind.GetAccessorDeclaration)
             .WithBody(SyntaxFactory.Block(
                 SyntaxFactory.ReturnStatement(SyntaxFactory.IdentifierName(field.Name))));
@@ -214,7 +229,7 @@ public static class SyntaxGenerationHelper
             accessors.Add(setAccessor);
         }
 
-        return SyntaxFactory.PropertyDeclaration(propertyType, propertyName)
+        return SyntaxFactory.PropertyDeclaration(CreateTypeSyntax(field.Type, nullableAnnotations), propertyName)
             .WithModifiers(SyntaxFactory.TokenList(SyntaxFactory.Token(SyntaxKind.PublicKeyword)))
             .WithAccessorList(SyntaxFactory.AccessorList(SyntaxFactory.List(accessors)))
             .NormalizeWhitespace();
@@ -225,10 +240,12 @@ public static class SyntaxGenerationHelper
     /// </summary>
     /// <param name="interfaceName">Name of the interface.</param>
     /// <param name="members">Members to include in interface.</param>
+    /// <param name="nullableAnnotations">Whether nullable annotations are enabled where the interface goes.</param>
     /// <returns>Interface declaration syntax.</returns>
     public static InterfaceDeclarationSyntax CreateInterfaceDeclaration(
         string interfaceName,
-        IEnumerable<ISymbol> members)
+        IEnumerable<ISymbol> members,
+        bool nullableAnnotations = true)
     {
         var memberSyntax = new List<MemberDeclarationSyntax>();
 
@@ -236,9 +253,9 @@ public static class SyntaxGenerationHelper
         {
             MemberDeclarationSyntax? syntax = member switch
             {
-                IMethodSymbol method => CreateInterfaceMethod(method),
-                IPropertySymbol prop => CreateInterfaceProperty(prop),
-                IEventSymbol evt => CreateInterfaceEvent(evt),
+                IMethodSymbol method => CreateInterfaceMethod(method, nullableAnnotations),
+                IPropertySymbol prop => CreateInterfaceProperty(prop, nullableAnnotations),
+                IEventSymbol evt => CreateInterfaceEvent(evt, nullableAnnotations),
                 _ => null
             };
 
@@ -268,13 +285,19 @@ public static class SyntaxGenerationHelper
             _ => true
         };
 
-    private static MethodDeclarationSyntax CreateInterfaceMethod(IMethodSymbol method)
+    /// <summary>
+    /// Writes <paramref name="type"/> as a type name, with <c>?</c> on annotated reference
+    /// types only when <paramref name="nullableAnnotations"/> is set.
+    /// </summary>
+    internal static TypeSyntax CreateTypeSyntax(ITypeSymbol type, bool nullableAnnotations) =>
+        SyntaxFactory.ParseTypeName(type.ToDisplayString(nullableAnnotations ? AnnotatedTypeFormat : ObliviousTypeFormat));
+
+    private static MethodDeclarationSyntax CreateInterfaceMethod(IMethodSymbol method, bool nullableAnnotations)
     {
         var methodDecl = SyntaxFactory.MethodDeclaration(
-                CreateReturnType(method.ReturnType, method.ReturnsByRef, method.ReturnsByRefReadonly),
+                CreateReturnType(method.ReturnType, method.ReturnsByRef, method.ReturnsByRefReadonly, nullableAnnotations),
                 method.Name)
-            .WithParameterList(SyntaxFactory.ParameterList(
-                SyntaxFactory.SeparatedList(method.Parameters.Select(CreateParameter))))
+            .WithParameterList(CreateParameterList(method.Parameters, nullableAnnotations))
             .WithSemicolonToken(SyntaxFactory.Token(SyntaxKind.SemicolonToken));
 
         if (method.TypeParameters.Length > 0)
@@ -293,7 +316,7 @@ public static class SyntaxGenerationHelper
     /// included: a <c>private set</c> would otherwise become an interface setter the class
     /// cannot implement. Init-only setters stay <c>init</c>.
     /// </summary>
-    private static BasePropertyDeclarationSyntax? CreateInterfaceProperty(IPropertySymbol property)
+    private static BasePropertyDeclarationSyntax? CreateInterfaceProperty(IPropertySymbol property, bool nullableAnnotations)
     {
         var accessors = new List<AccessorDeclarationSyntax>();
 
@@ -314,24 +337,21 @@ public static class SyntaxGenerationHelper
             return null;
         }
 
-        var type = CreateReturnType(property.Type, property.ReturnsByRef, property.ReturnsByRefReadonly);
+        var type = CreateReturnType(property.Type, property.ReturnsByRef, property.ReturnsByRefReadonly, nullableAnnotations);
         var accessorList = SyntaxFactory.AccessorList(SyntaxFactory.List(accessors));
 
         return property.IsIndexer
             ? SyntaxFactory.IndexerDeclaration(type)
-                .WithParameterList(SyntaxFactory.BracketedParameterList(
-                    SyntaxFactory.SeparatedList(property.Parameters.Select(CreateParameter))))
+                .WithParameterList(CreateBracketedParameterList(property.Parameters, nullableAnnotations))
                 .WithAccessorList(accessorList)
             : SyntaxFactory.PropertyDeclaration(type, property.Name)
                 .WithAccessorList(accessorList);
     }
 
-    private static EventDeclarationSyntax CreateInterfaceEvent(IEventSymbol eventSymbol)
+    private static EventDeclarationSyntax CreateInterfaceEvent(IEventSymbol eventSymbol, bool nullableAnnotations)
     {
         // Interface events use field syntax
-        return SyntaxFactory.EventDeclaration(
-                SyntaxFactory.ParseTypeName(eventSymbol.Type.ToDisplayString()),
-                eventSymbol.Name)
+        return SyntaxFactory.EventDeclaration(CreateTypeSyntax(eventSymbol.Type, nullableAnnotations), eventSymbol.Name)
             .WithSemicolonToken(SyntaxFactory.Token(SyntaxKind.SemicolonToken));
     }
 
@@ -364,9 +384,12 @@ public static class SyntaxGenerationHelper
         return SyntaxFactory.TokenList(modifiers);
     }
 
-    private static ExplicitInterfaceSpecifierSyntax? CreateExplicitInterfaceSpecifier(ISymbol member, bool explicitInterface) =>
+    private static ExplicitInterfaceSpecifierSyntax? CreateExplicitInterfaceSpecifier(
+        ISymbol member,
+        bool explicitInterface,
+        bool nullableAnnotations) =>
         IsExplicit(member, explicitInterface)
-            ? SyntaxFactory.ExplicitInterfaceSpecifier(SyntaxFactory.ParseName(member.ContainingType.ToDisplayString()))
+            ? SyntaxFactory.ExplicitInterfaceSpecifier((NameSyntax)CreateTypeSyntax(member.ContainingType, nullableAnnotations))
             : null;
 
     private static bool IsExplicit(ISymbol member, bool explicitInterface) =>
@@ -406,7 +429,8 @@ public static class SyntaxGenerationHelper
         bool explicitInterface,
         bool throwNotImplemented,
         bool callBase,
-        INamedTypeSymbol? emittingType)
+        INamedTypeSymbol? emittingType,
+        bool nullableAnnotations)
     {
         var useBase = callBase && !property.IsAbstract;
         var returnsByRef = property.ReturnsByRef || property.ReturnsByRefReadonly;
@@ -425,7 +449,7 @@ public static class SyntaxGenerationHelper
             {
                 body = throwNotImplemented || returnsByRef
                     ? CreateThrowNotImplementedBody()
-                    : CreateDefaultReturnBody(property.Type);
+                    : CreateDefaultReturnBody(property.Type, nullableAnnotations);
             }
 
             accessors.Add(CreateAccessor(SyntaxKind.GetAccessorDeclaration, getter, property, body, explicitInterface, emittingType));
@@ -487,9 +511,13 @@ public static class SyntaxGenerationHelper
                 SyntaxFactory.BaseExpression(),
                 SyntaxFactory.IdentifierName(property.Name));
 
-    private static TypeSyntax CreateReturnType(ITypeSymbol type, bool returnsByRef, bool returnsByRefReadonly)
+    private static TypeSyntax CreateReturnType(
+        ITypeSymbol type,
+        bool returnsByRef,
+        bool returnsByRefReadonly,
+        bool nullableAnnotations)
     {
-        var typeSyntax = SyntaxFactory.ParseTypeName(type.ToDisplayString());
+        var typeSyntax = CreateTypeSyntax(type, nullableAnnotations);
 
         if (returnsByRefReadonly)
         {
@@ -502,7 +530,19 @@ public static class SyntaxGenerationHelper
         return returnsByRef ? SyntaxFactory.RefType(typeSyntax) : typeSyntax;
     }
 
-    private static ParameterSyntax CreateParameter(IParameterSymbol parameter)
+    private static ParameterListSyntax CreateParameterList(
+        IEnumerable<IParameterSymbol> parameters,
+        bool nullableAnnotations) =>
+        SyntaxFactory.ParameterList(SyntaxFactory.SeparatedList(
+            parameters.Select(p => CreateParameter(p, nullableAnnotations))));
+
+    private static BracketedParameterListSyntax CreateBracketedParameterList(
+        IEnumerable<IParameterSymbol> parameters,
+        bool nullableAnnotations) =>
+        SyntaxFactory.BracketedParameterList(SyntaxFactory.SeparatedList(
+            parameters.Select(p => CreateParameter(p, nullableAnnotations))));
+
+    private static ParameterSyntax CreateParameter(IParameterSymbol parameter, bool nullableAnnotations)
     {
         var modifiers = new List<SyntaxToken>();
 
@@ -538,7 +578,7 @@ public static class SyntaxGenerationHelper
 
         return SyntaxFactory.Parameter(SyntaxFactory.Identifier(parameter.Name))
             .WithModifiers(SyntaxFactory.TokenList(modifiers))
-            .WithType(SyntaxFactory.ParseTypeName(parameter.Type.ToDisplayString()));
+            .WithType(CreateTypeSyntax(parameter.Type, nullableAnnotations));
     }
 
     /// <summary>
@@ -596,7 +636,7 @@ public static class SyntaxGenerationHelper
     /// <summary>
     /// Default-return body that also assigns every <c>out</c> parameter (CS0177).
     /// </summary>
-    private static BlockSyntax CreateDefaultMethodBody(IMethodSymbol method)
+    private static BlockSyntax CreateDefaultMethodBody(IMethodSymbol method, bool nullableAnnotations)
     {
         var outAssignments = method.Parameters
             .Where(p => p.RefKind == RefKind.Out)
@@ -606,11 +646,11 @@ public static class SyntaxGenerationHelper
                     SyntaxFactory.IdentifierName(p.Name),
                     SyntaxFactory.LiteralExpression(SyntaxKind.DefaultLiteralExpression))));
 
-        var body = CreateDefaultReturnBody(method.ReturnType);
+        var body = CreateDefaultReturnBody(method.ReturnType, nullableAnnotations);
         return body.WithStatements(SyntaxFactory.List(outAssignments.Concat(body.Statements)));
     }
 
-    private static BlockSyntax CreateDefaultReturnBody(ITypeSymbol returnType)
+    private static BlockSyntax CreateDefaultReturnBody(ITypeSymbol returnType, bool nullableAnnotations)
     {
         if (returnType.SpecialType == SpecialType.System_Void)
         {
@@ -624,8 +664,7 @@ public static class SyntaxGenerationHelper
         }
         else
         {
-            defaultExpr = SyntaxFactory.DefaultExpression(
-                SyntaxFactory.ParseTypeName(returnType.ToDisplayString()));
+            defaultExpr = SyntaxFactory.DefaultExpression(CreateTypeSyntax(returnType, nullableAnnotations));
         }
 
         return SyntaxFactory.Block(SyntaxFactory.ReturnStatement(defaultExpr));

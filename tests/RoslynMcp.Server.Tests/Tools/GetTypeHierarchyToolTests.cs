@@ -58,6 +58,14 @@ public class GetTypeHierarchyToolTests
         Assert.Contains("sourceFile", requiredFields);
     }
 
+    [Theory]
+    [InlineData("transitive", "boolean")]
+    [InlineData("maxResults", "integer")]
+    public void GetDefinition_HasDescendantOptions(string name, string type)
+    {
+        SchemaAssert.HasOptionalProperty(_tool, name, type);
+    }
+
     [Fact]
     public async Task ExecuteAsync_NullArguments_ReturnsError()
     {

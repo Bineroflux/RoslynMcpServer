@@ -29,4 +29,11 @@ public sealed class FindImplementationsParams
     /// Maximum number of implementations to return.
     /// </summary>
     public int? MaxResults { get; init; }
+
+    /// <summary>
+    /// Whether implementations through a base class or a derived interface are included.
+    /// Default: true; false returns only types that list the interface themselves (and, for
+    /// an interface member, their implementations of it).
+    /// </summary>
+    public bool? Transitive { get; init; }
 }

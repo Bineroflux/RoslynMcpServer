@@ -266,7 +266,7 @@ These read-only tools let you explore and understand your codebase without makin
 | `find_references` | Find all references to a symbol across the entire solution, or within one file or project. Returns file locations, context snippets, and write/definition indicators. | `sourceFile`, `symbolName`, `line`, `column`, `maxResults`, `includeDeclaration`, `referenceFile`, `projectPath` |
 | `go_to_definition` | Navigate to the source definition of a symbol. Supports partial classes with multiple definition locations. | `sourceFile`, `symbolName`, `line`, `column` |
 | `get_symbol_info` | Get detailed metadata for any symbol: kind, accessibility, modifiers, base types, interfaces, members, parameters, return type, and XML documentation. | `sourceFile`, `symbolName`, `line`, `column` |
-| `find_implementations` | Find all implementations of an interface or overrides of an abstract/virtual member. | `sourceFile`, `symbolName`, `line`, `column`, `maxResults` |
+| `find_implementations` | Find all implementations of an interface or overrides of an abstract/virtual member, or only the direct ones. | `sourceFile`, `symbolName`, `line`, `column`, `maxResults`, `transitive` |
 | `search_symbols` | Search for symbols by name across the entire workspace: substring or exact, optionally case-sensitive. Filter by kind (class, method, property, etc.), project, namespace or file. | `query`, `kindFilter`, `maxResults`, `exactMatch`, `caseSensitive`, `projectPath`, `namespaceFilter`, `sourceFile` |
 
 ### Analysis & Metrics
@@ -280,7 +280,7 @@ These tools analyze your code without making changes. Use them to understand cod
 | `analyze_control_flow` | Analyze control flow for a code region: start/end point reachability, return statements, and exit points. | `sourceFile`, `startLine`, `endLine` |
 | `analyze_data_flow` | Analyze data flow for a code region: variables read/written inside, data flowing in/out, captured variables. | `sourceFile`, `startLine`, `endLine` |
 | `find_callers` | Find all callers of a symbol across the entire solution, or within one file or project. | `sourceFile`, `symbolName`, `line`, `column`, `maxResults`, `callerFile`, `projectPath` |
-| `get_type_hierarchy` | Retrieve the type hierarchy (base types and/or derived types) for a given type. | `sourceFile`, `symbolName`, `line`, `column`, `direction` |
+| `get_type_hierarchy` | Retrieve the type hierarchy (base types and/or derived types, all or only direct ones) for a given type. | `sourceFile`, `symbolName`, `line`, `column`, `direction`, `transitive`, `maxResults` |
 | `get_document_outline` | Get a hierarchical outline of all symbols in a file (namespaces, types, members). | `sourceFile` |
 
 ### Code Generation

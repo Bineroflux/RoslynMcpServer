@@ -91,6 +91,12 @@ public class FindImplementationsToolTests
         Assert.True(properties.TryGetProperty("maxResults", out _));
     }
 
+    [Fact]
+    public void GetDefinition_HasTransitiveParameter()
+    {
+        SchemaAssert.HasOptionalProperty(_tool, "transitive", "boolean");
+    }
+
     #endregion
 
     #region ExecuteAsync Argument Validation Tests

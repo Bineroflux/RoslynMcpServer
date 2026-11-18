@@ -50,6 +50,9 @@ public sealed class GetTypeHierarchyOperation : QueryOperationBase<GetTypeHierar
 
         if (!File.Exists(@params.SourceFile))
             throw new RefactoringException(ErrorCodes.SourceFileNotFound, $"Source file not found: {@params.SourceFile}");
+
+        if (@params.MaxResults.HasValue && @params.MaxResults.Value < 1)
+            throw new RefactoringException(ErrorCodes.MissingRequiredParam, "maxResults must be >= 1.");
     }
 
     /// <inheritdoc />
@@ -76,6 +79,7 @@ public sealed class GetTypeHierarchyOperation : QueryOperationBase<GetTypeHierar
         var direction = ParseDirection(@params.Direction);
         var baseTypes = new List<TypeHierarchyEntry>();
         var derivedTypes = new List<TypeHierarchyEntry>();
+        var derivedTotalCount = 0;
         var interfaces = new List<TypeHierarchyEntry>();
 
         // Walk ancestors
@@ -90,18 +94,23 @@ public sealed class GetTypeHierarchyOperation : QueryOperationBase<GetTypeHierar
         }
 
         // Find descendants. FindDerivedClassesAsync finds nothing for an interface, whose
-        // descendants are the interfaces extending it and the types implementing it.
+        // descendants are the interfaces extending it and the types implementing it. Not
+        // transitive, each search keeps only the types that name the type in their base list.
         if (direction is HierarchyDirection.Descendants or HierarchyDirection.Both)
         {
+            var transitive = @params.Transitive ?? true;
             var derived = typeSymbol.TypeKind == TypeKind.Interface
-                ? (await SymbolFinder.FindDerivedInterfacesAsync(typeSymbol, Context.Solution, cancellationToken: cancellationToken))
-                    .Concat(await SymbolFinder.FindImplementationsAsync(typeSymbol, Context.Solution, cancellationToken: cancellationToken))
+                ? (await SymbolFinder.FindDerivedInterfacesAsync(typeSymbol, Context.Solution, transitive, cancellationToken: cancellationToken))
+                    .Concat(await SymbolFinder.FindImplementationsAsync(typeSymbol, Context.Solution, transitive, cancellationToken: cancellationToken))
                 : await SymbolFinder.FindDerivedClassesAsync(
-                    typeSymbol, Context.Solution, cancellationToken: cancellationToken);
+                    typeSymbol, Context.Solution, transitive, cancellationToken: cancellationToken);
 
+            var maxResults = @params.MaxResults ?? int.MaxValue;
             foreach (var d in derived)
             {
-                derivedTypes.Add(CreateEntry(d));
+                derivedTotalCount++;
+                if (derivedTypes.Count < maxResults)
+                    derivedTypes.Add(CreateEntry(d));
             }
         }
 
@@ -118,6 +127,8 @@ public sealed class GetTypeHierarchyOperation : QueryOperationBase<GetTypeHierar
             Kind = typeSymbol.TypeKind.ToString(),
             BaseTypes = baseTypes,
             DerivedTypes = derivedTypes,
+            DerivedTypesTotalCount = derivedTotalCount,
+            DerivedTypesTruncated = derivedTotalCount > derivedTypes.Count,
             Interfaces = interfaces
         };
 

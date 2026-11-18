@@ -63,8 +63,10 @@ public sealed class FindImplementationsOperation : QueryOperationBase<FindImplem
         var maxResults = @params.MaxResults ?? int.MaxValue;
 
         // Find implementations based on symbol kind
-        var implSymbols = await SymbolFinder.FindImplementationsAsync(
-            symbol, Context.Solution, cancellationToken: cancellationToken);
+        var implSymbols = @params.Transitive ?? true
+            ? await SymbolFinder.FindImplementationsAsync(
+                symbol, Context.Solution, cancellationToken: cancellationToken)
+            : await FindDirectImplementationsAsync(symbol, cancellationToken);
 
         var totalCount = 0;
 
@@ -98,5 +100,73 @@ public sealed class FindImplementationsOperation : QueryOperationBase<FindImplem
         };
 
         return QueryResult<FindImplementationsResult>.Succeeded(operationId, result);
+    }
+
+    /// <summary>
+    /// The implementations of <paramref name="symbol"/> by types that list its interface
+    /// themselves, leaving out those through a base class or a derived interface. For a type
+    /// that is SymbolFinder's non-transitive search; for an interface member, each such
+    /// type's implementation of it (which may be inherited from its base class). Other
+    /// symbols have no direct/indirect distinction and get the regular search.
+    /// </summary>
+    private async Task<IEnumerable<ISymbol>> FindDirectImplementationsAsync(ISymbol symbol, CancellationToken cancellationToken)
+    {
+        if (symbol is INamedTypeSymbol type)
+        {
+            return await SymbolFinder.FindImplementationsAsync(
+                type, Context.Solution, transitive: false, cancellationToken: cancellationToken);
+        }
+
+        if (symbol.ContainingType is not { TypeKind: TypeKind.Interface } containingInterface)
+        {
+            return await SymbolFinder.FindImplementationsAsync(
+                symbol, Context.Solution, cancellationToken: cancellationToken);
+        }
+
+        var implementingTypes = await SymbolFinder.FindImplementationsAsync(
+            containingInterface, Context.Solution, transitive: false, cancellationToken: cancellationToken);
+
+        // Several types can share one implementation, e.g. inherited from a common base class.
+        var implementations = new List<ISymbol>();
+        var seen = new HashSet<ISymbol>(SymbolEqualityComparer.Default);
+        foreach (var implementingType in implementingTypes)
+        {
+            if (FindImplementationOf(implementingType, symbol) is { } implementation && seen.Add(implementation.OriginalDefinition))
+                implementations.Add(implementation);
+        }
+
+        return implementations;
+    }
+
+    /// <summary>
+    /// <paramref name="type"/>'s implementation of interface member <paramref name="member"/>.
+    /// The type can come from another project's compilation, so the interface is matched by
+    /// its documentation ID and assembly rather than by symbol identity, and a generic
+    /// interface by the construction the type implements.
+    /// </summary>
+    private static ISymbol? FindImplementationOf(INamedTypeSymbol type, ISymbol member)
+    {
+        var interfaceId = member.ContainingType.OriginalDefinition.GetDocumentationCommentId();
+        var memberId = member.OriginalDefinition.GetDocumentationCommentId();
+        var assemblyName = member.ContainingAssembly?.Name;
+
+        foreach (var implemented in type.AllInterfaces)
+        {
+            if (implemented.OriginalDefinition.GetDocumentationCommentId() != interfaceId ||
+                implemented.ContainingAssembly?.Name != assemblyName)
+            {
+                continue;
+            }
+
+            var constructedMember = implemented.GetMembers(member.Name)
+                .FirstOrDefault(m => m.OriginalDefinition.GetDocumentationCommentId() == memberId);
+            if (constructedMember is not null &&
+                type.FindImplementationForInterfaceMember(constructedMember) is { } implementation)
+            {
+                return implementation;
+            }
+        }
+
+        return null;
     }
 }

@@ -29,4 +29,16 @@ public sealed class GetTypeHierarchyParams
     /// Direction: Ancestors, Descendants, or Both. Default: Both.
     /// </summary>
     public string? Direction { get; init; }
+
+    /// <summary>
+    /// Whether derived types include indirect ones. Default: true; false returns only the
+    /// types deriving directly from the type (for an interface: the interfaces and types
+    /// that list it themselves).
+    /// </summary>
+    public bool? Transitive { get; init; }
+
+    /// <summary>
+    /// Maximum number of derived types to return.
+    /// </summary>
+    public int? MaxResults { get; init; }
 }

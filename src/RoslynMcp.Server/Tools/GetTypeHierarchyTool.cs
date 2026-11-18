@@ -68,6 +68,18 @@ public sealed class GetTypeHierarchyTool : IToolHandler
             {
                 type = "string",
                 description = "Hierarchy direction: Ancestors, Descendants, or Both (default: Both)"
+            },
+            transitive = new
+            {
+                type = "boolean",
+                description = "Include indirect derived types (default: true). false returns only types deriving directly; for an interface, those listing it themselves.",
+                @default = true
+            },
+            maxResults = new
+            {
+                type = "integer",
+                description = "Maximum number of derived types to return; derivedTypesTotalCount and derivedTypesTruncated report the rest",
+                minimum = 1
             }
         },
         additionalProperties = false
@@ -94,7 +106,9 @@ public sealed class GetTypeHierarchyTool : IToolHandler
                 SymbolName = args.SymbolName,
                 Line = args.Line,
                 Column = args.Column,
-                Direction = args.Direction
+                Direction = args.Direction,
+                Transitive = args.Transitive,
+                MaxResults = args.MaxResults
             };
 
             var result = await operation.ExecuteAsync(@params, cancellationToken);
@@ -126,5 +140,7 @@ public sealed class GetTypeHierarchyTool : IToolHandler
         public int? Line { get; init; }
         public int? Column { get; init; }
         public string? Direction { get; init; }
+        public bool? Transitive { get; init; }
+        public int? MaxResults { get; init; }
     }
 }

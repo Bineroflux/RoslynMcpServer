@@ -31,6 +31,16 @@ public sealed class GetTypeHierarchyResult
     public required IReadOnlyList<TypeHierarchyEntry> DerivedTypes { get; init; }
 
     /// <summary>
+    /// Total number of derived types found (may exceed DerivedTypes.Count if truncated).
+    /// </summary>
+    public int DerivedTypesTotalCount { get; init; }
+
+    /// <summary>
+    /// Whether DerivedTypes was truncated due to maxResults.
+    /// </summary>
+    public bool DerivedTypesTruncated { get; init; }
+
+    /// <summary>
     /// Implemented interfaces.
     /// </summary>
     public required IReadOnlyList<TypeHierarchyEntry> Interfaces { get; init; }

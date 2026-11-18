@@ -28,6 +28,9 @@ public class QueryFilterOptionsTests
     [InlineData("find-references", "--project-path")]
     [InlineData("find-callers", "--caller-file")]
     [InlineData("find-callers", "--project-path")]
+    [InlineData("find-implementations", "--transitive")]
+    [InlineData("get-type-hierarchy", "--transitive")]
+    [InlineData("get-type-hierarchy", "--max-results")]
     public void ToolHelp_ListsTheOption(string toolName, string option)
     {
         var tool = ToolRegistry.BuildDefault().GetTool(toolName)!;

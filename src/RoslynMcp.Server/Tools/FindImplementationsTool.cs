@@ -69,6 +69,12 @@ public sealed class FindImplementationsTool : IToolHandler
                 type = "integer",
                 description = "Maximum number of implementations to return",
                 minimum = 1
+            },
+            transitive = new
+            {
+                type = "boolean",
+                description = "Include implementations through a base class or derived interface (default: true). false returns only types that list the interface themselves.",
+                @default = true
             }
         },
         additionalProperties = false
@@ -95,7 +101,8 @@ public sealed class FindImplementationsTool : IToolHandler
                 SymbolName = args.SymbolName,
                 Line = args.Line,
                 Column = args.Column,
-                MaxResults = args.MaxResults
+                MaxResults = args.MaxResults,
+                Transitive = args.Transitive
             };
 
             var result = await operation.ExecuteAsync(@params, cancellationToken);
@@ -127,5 +134,6 @@ public sealed class FindImplementationsTool : IToolHandler
         public int? Line { get; init; }
         public int? Column { get; init; }
         public int? MaxResults { get; init; }
+        public bool? Transitive { get; init; }
     }
 }

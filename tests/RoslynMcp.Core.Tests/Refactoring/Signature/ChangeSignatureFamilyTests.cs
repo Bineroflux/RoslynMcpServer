@@ -76,9 +76,9 @@ public sealed class ChangeSignatureFamilyTests
         Assert.Contains("public override double Area(double factor, int rounding = 0) =>", lib);
         // An explicit implementation gets no default value (CS1066).
         Assert.Contains("double IShape.Area(double scale, int rounding) => scale;", lib);
-        Assert.Contains("Area(scale: scale, 0) * 2", lib);
-        Assert.Contains("public override double Area(double factor, int rounding = 0) => base.Area(factor, 0) + base.Area(factor: 1, 0);", app);
-        Assert.Contains("shape.Area(2, 0) + square.Area(factor: 3, 0) + circle.Area(4, 0)", app);
+        Assert.Contains("Area(scale: scale, rounding: 0) * 2", lib);
+        Assert.Contains("public override double Area(double factor, int rounding = 0) => base.Area(factor, 0) + base.Area(factor: 1, rounding: 0);", app);
+        Assert.Contains("shape.Area(2, 0) + square.Area(factor: 3, rounding: 0) + circle.Area(4, 0)", app);
         Assert.Equal(6, result.ReferencesUpdated);
         Assert.Empty(ws.GetDiskCompilationErrors());
     }
@@ -95,7 +95,7 @@ public sealed class ChangeSignatureFamilyTests
         var lib = File.ReadAllText(ws.PathOf("Lib", "Shapes.cs"));
         Assert.Contains("    double Area(double scale, string unit = \"m\");", lib);
         Assert.Contains("double IShape.Area(double scale, string unit) => scale;", lib);
-        Assert.Contains("Area(scale: scale, \"m\") * 2", lib);
+        Assert.Contains("Area(scale: scale, unit: \"m\") * 2", lib);
         Assert.Empty(ws.GetDiskCompilationErrors());
     }
 
@@ -131,7 +131,7 @@ public sealed class ChangeSignatureFamilyTests
         var lib = File.ReadAllText(ws.PathOf("Lib", "Shapes.cs"));
         var app = File.ReadAllText(ws.PathOf("App", "Circle.cs"));
         Assert.Contains("public override double Area(double factor, string? label = null) => Side * Side * factor;", lib);
-        Assert.Contains("square.Area(factor: 3, null)", app);
+        Assert.Contains("square.Area(factor: 3, label: null)", app);
         Assert.Empty(ws.GetDiskCompilationErrors());
     }
 

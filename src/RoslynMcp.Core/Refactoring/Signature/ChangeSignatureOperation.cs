@@ -418,10 +418,16 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
     }
 
     /// <summary>
-    /// The new arguments of one call, in the new parameter order. Arguments are matched to
-    /// parameters by name or position (extra ones to a <c>params</c> parameter); a parameter the
-    /// call does not pass gets the request's default value, or a <c>TODO</c> placeholder.
-    /// Null when an argument names no parameter.
+    /// The new arguments of one call. The call keeps its own argument order, so its arguments
+    /// are evaluated as before: an argument of a removed parameter is dropped in place, a named
+    /// argument is renamed in place, and only positional arguments move, to the new positions
+    /// of their parameters. A parameter the call does not pass and has to (a new one, or one
+    /// that lost its default value) gets the request's default value or a <c>TODO</c>
+    /// placeholder: positional where every argument before it is positional and in position,
+    /// otherwise named at the end. From the first argument out of position on, every argument
+    /// is named (CS8323). Null when the call cannot be rewritten (an argument names no
+    /// parameter, the receiver of an extension-form call moves, or an expanded <c>params</c>
+    /// argument would need a name).
     /// </summary>
     private static ArgumentListSyntax? BuildArgumentList(
         ArgumentListSyntax original,
@@ -430,7 +436,18 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
         IReadOnlyList<NewParameter> newParameters,
         IReadOnlyList<string?> renames)
     {
-        var passed = new Dictionary<int, List<ArgumentSyntax>>();
+        // A call in extension form passes the `this` parameter as the receiver, which has to stay first.
+        if (offset > 0 && newParameters.FirstOrDefault()?.OriginalIndex != 0)
+            return null;
+
+        var callParameters = newParameters.Skip(offset).ToList();
+        string NameAt(int position) => callParameters[position].OriginalIndex is { } index
+            ? renames[index] ?? parameters[index - offset].Name
+            : callParameters[position].Name;
+
+        // The call's arguments in its own order, each with the new position of its parameter.
+        var entries = new List<CallArgument>();
+        var passed = new HashSet<int>();
         for (var i = 0; i < original.Arguments.Count; i++)
         {
             var argument = original.Arguments[i];
@@ -440,36 +457,63 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
             if (index < 0)
                 return null;
 
-            if (!passed.TryGetValue(index + offset, out var list))
-                passed[index + offset] = list = [];
-            list.Add(argument);
+            index += offset;
+            passed.Add(index);
+            var position = callParameters.FindIndex(p => p.OriginalIndex == index);
+            if (position < 0)
+                continue; // the parameter is removed
+
+            if (argument.NameColon is { } named && renames[index] is { } newName)
+                argument = argument.WithNameColon(named.WithName(IdentifierName(newName).WithTriviaFrom(named.Name)));
+
+            entries.Add(new CallArgument(argument, position, IsNew: false));
+        }
+
+        // Positional arguments move to their parameters' new positions, within the places
+        // positional arguments take in the call.
+        var slots = Enumerable.Range(0, entries.Count).Where(i => entries[i].Argument.NameColon == null).ToList();
+        var moved = slots.Select(i => entries[i]).OrderBy(e => e.Position).ToList();
+        for (var i = 0; i < slots.Count; i++)
+            entries[slots[i]] = moved[i];
+
+        // Arguments the call has to pass now.
+        for (var position = 0; position < callParameters.Count; position++)
+        {
+            var parameter = callParameters[position];
+            if (parameter.OriginalIndex is { } index &&
+                (passed.Contains(index) || !string.IsNullOrEmpty(parameter.DefaultValue) || parameters[index - offset].IsParams))
+            {
+                continue; // passed, or still optional
+            }
+
+            var argument = string.IsNullOrEmpty(parameter.DefaultValue)
+                ? SyntaxFactory.Argument(SyntaxFactory.ParseExpression($"default /* TODO: {NameAt(position)} */"))
+                    .WithAdditionalAnnotations(new SyntaxAnnotation(PlaceholderAnnotationKind, NameAt(position)))
+                : SyntaxFactory.Argument(SyntaxFactory.ParseExpression(parameter.DefaultValue));
+            var inPositionPrefix = entries.TakeWhile((e, i) => e.Argument.NameColon == null && e.Position == i).Count();
+            entries.Insert(position <= inPositionPrefix ? position : entries.Count, new CallArgument(argument, position, IsNew: true));
         }
 
         var arguments = new List<ArgumentSyntax>();
-        foreach (var newParameter in newParameters)
+        var nameTheRest = false;
+        var seenNamed = false;
+        for (var i = 0; i < entries.Count; i++)
         {
-            if (newParameter.OriginalIndex is { } index)
+            var (argument, position, isNew) = entries[i];
+            var expandedParams = (i > 0 && entries[i - 1].Position == position) ||
+                (i + 1 < entries.Count && entries[i + 1].Position == position);
+            var inPosition = position == i || (i > 0 && entries[i - 1].Position == position);
+
+            if (argument.NameColon == null && (nameTheRest || !inPosition || (isNew && seenNamed)))
             {
-                if (index < offset)
-                    continue; // the receiver
-
-                if (passed.TryGetValue(index, out var list))
-                {
-                    arguments.AddRange(list.Select(a => a.NameColon != null && renames[index] is { } name
-                        ? a.WithNameColon(a.NameColon.WithName(SyntaxFactory.IdentifierName(name).WithTriviaFrom(a.NameColon.Name)))
-                        : a));
-                    continue;
-                }
-
-                // An omitted params array stays omitted while it is still last.
-                if (parameters[index - offset].IsParams && newParameter == newParameters[^1])
-                    continue;
+                if (expandedParams)
+                    return null;
+                argument = WithName(argument, NameAt(position));
             }
 
-            arguments.Add(string.IsNullOrEmpty(newParameter.DefaultValue)
-                ? SyntaxFactory.Argument(SyntaxFactory.ParseExpression($"default /* TODO: {newParameter.Name} */"))
-                    .WithAdditionalAnnotations(new SyntaxAnnotation(PlaceholderAnnotationKind, newParameter.Name))
-                : SyntaxFactory.Argument(SyntaxFactory.ParseExpression(newParameter.DefaultValue)));
+            nameTheRest |= !inPosition;
+            seenNamed |= argument.NameColon != null;
+            arguments.Add(argument);
         }
 
         return original.WithArguments(SyntaxFactory.SeparatedList(arguments, Separators(original.Arguments, arguments.Count)));
@@ -504,6 +548,21 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
             .Select(p => p.Text)
             .ToList();
     }
+
+    private static ArgumentSyntax WithName(ArgumentSyntax argument, string name) =>
+        argument.WithoutLeadingTrivia()
+            .WithNameColon(SyntaxFactory.NameColon(
+                IdentifierName(name),
+                SyntaxFactory.Token(SyntaxKind.ColonToken).WithTrailingTrivia(SyntaxFactory.Space)))
+            .WithLeadingTrivia(argument.GetLeadingTrivia());
+
+    /// <summary>An identifier, with <c>@</c> when the name is a keyword.</summary>
+    private static IdentifierNameSyntax IdentifierName(string name) =>
+        SyntaxFactory.IdentifierName(SyntaxFacts.GetKeywordKind(name) != SyntaxKind.None
+            ? SyntaxFactory.VerbatimIdentifier(default, "@" + name, name, default)
+            : SyntaxFactory.Identifier(name));
+
+    private sealed record CallArgument(ArgumentSyntax Argument, int Position, bool IsNew);
 
     /// <summary>
     /// One pending change per changed declaration (its parameter list before and after) and

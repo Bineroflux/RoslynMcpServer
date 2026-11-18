@@ -31,7 +31,7 @@ public sealed class ChangeSignatureTool : IToolHandler
     public string Description =>
         "Add, remove, rename or reorder method parameters and update all call sites. The change also applies to the " +
         "members the method overrides or implements and to its overrides and implementations, matching parameters by " +
-        "position. Compiler errors left behind (e.g. a method group converted to a " +
+        "position. Calls keep their argument order. Compiler errors left behind (e.g. a method group converted to a " +
         "delegate, a removed parameter the body still uses) and the TODO placeholders passed for parameters without a " +
         "default are listed in 'warnings'. Refused when a member of that family is declared in metadata (e.g. an " +
         "override of object.ToString).";

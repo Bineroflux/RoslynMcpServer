@@ -222,7 +222,7 @@ All tools accept a `solutionPath` parameter (absolute path to a `.sln`, `.slnx`,
 
 | Tool | Description | Key Parameters |
 |------|-------------|----------------|
-| `change_signature` | Add, remove, rename or reorder method parameters and update all call sites. Applies to the whole override / implementation family (base and interface members, overrides, implementations), matching parameters by position. Compiler errors left behind (a method group converted to a delegate, a removed parameter the body still uses) and the TODO placeholders passed for parameters without a default are returned as `warnings`. | `sourceFile`, `methodName`, `parameters` (array of changes), `line` |
+| `change_signature` | Add, remove, rename or reorder method parameters and update all call sites, keeping each call's argument order. Applies to the whole override / implementation family (base and interface members, overrides, implementations), matching parameters by position. Compiler errors left behind (a method group converted to a delegate, a removed parameter the body still uses) and the TODO placeholders passed for parameters without a default are returned as `warnings`. | `sourceFile`, `methodName`, `parameters` (array of changes), `line` |
 | `change_return_type` | Change the return type of a method, or the type of a property or indexer (`memberName` `this`), on the whole override / implementation family. Only declarations change; the compiler errors this causes (return statements, callers) are returned as `warnings`. | `sourceFile`, `memberName`, `newType`, `line` |
 | `encapsulate_field` | Convert a field to a property with backing field. | `sourceFile`, `fieldName`, `propertyName`, `readOnly` |
 

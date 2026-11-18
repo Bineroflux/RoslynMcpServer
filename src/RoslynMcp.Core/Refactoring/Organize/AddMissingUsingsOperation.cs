@@ -210,6 +210,7 @@ public sealed class AddMissingUsingsOperation : RefactoringOperationBase<AddMiss
         CancellationToken cancellationToken)
     {
         var solution = Context.Solution;
+        var newSolution = solution;
         var allDocuments = solution.Projects
             .SelectMany(p => p.Documents)
             .Where(d => d.FilePath != null && d.FilePath.EndsWith(".cs", StringComparison.OrdinalIgnoreCase))
@@ -294,11 +295,11 @@ public sealed class AddMissingUsingsOperation : RefactoringOperationBase<AddMiss
             var allUsingsForFile = root.Usings.AddRange(newUsingDirectives);
             var sortedUsings = UsingDirectiveSorter.Sort(allUsingsForFile);
 
+            // Accumulate locally and commit once at the end: pushing each edit into the
+            // context here would make the final commit diff the solution against itself
+            // and write nothing.
             var newRoot = root.WithUsings(SyntaxFactory.List(sortedUsings));
-            var newDocument = document.WithSyntaxRoot(newRoot);
-
-            // Update the solution incrementally so subsequent documents see prior changes
-            Context.UpdateSolution(newDocument.Project.Solution);
+            newSolution = newSolution.WithDocumentSyntaxRoot(document.Id, newRoot);
 
             totalUsingsAdded += newUsings.Count;
             allFilesModified.Add(document.FilePath!);
@@ -320,7 +321,7 @@ public sealed class AddMissingUsingsOperation : RefactoringOperationBase<AddMiss
         // Commit all accumulated changes at once
         if (allFilesModified.Count > 0)
         {
-            var commitResult = await CommitChangesAsync(Context.Solution, cancellationToken);
+            var commitResult = await CommitChangesAsync(newSolution, cancellationToken);
             return new RefactoringResult
             {
                 Success = true,

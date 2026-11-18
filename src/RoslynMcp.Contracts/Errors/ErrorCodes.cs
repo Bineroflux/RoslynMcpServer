@@ -321,6 +321,29 @@ public static class ErrorCodes
     /// </summary>
     public const string TypeNotExpressible = "3111";
 
+    // --------------------------------------------
+    // Delete Errors (3120-3129)
+    // --------------------------------------------
+
+    /// <summary>
+    /// The symbol to delete is referenced outside its own declaration; the error's details list
+    /// the references.
+    /// </summary>
+    public const string SymbolStillReferenced = "3120";
+
+    /// <summary>
+    /// The member to delete overrides or implements another member, or is overridden or
+    /// implemented; deleting one member of the family breaks the others.
+    /// </summary>
+    public const string MemberInFamily = "3121";
+
+    /// <summary>
+    /// The symbol cannot be deleted safely for another reason: its uses are implicit (an entry
+    /// point, a static constructor, a finalizer, an implicit conversion), or deleting it changes
+    /// other declarations (an enum member whose successors would be renumbered).
+    /// </summary>
+    public const string CannotDelete = "3122";
+
     // ============================================
     // System Errors (4xxx)
     // ============================================

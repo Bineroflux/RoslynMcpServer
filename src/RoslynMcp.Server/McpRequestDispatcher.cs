@@ -54,6 +54,7 @@ public sealed class McpRequestDispatcher
         _toolRegistry.Register(new EncapsulateFieldTool(workspaceProvider));
         _toolRegistry.Register(new ConvertToAsyncTool(workspaceProvider));
         _toolRegistry.Register(new ExtractBaseClassTool(workspaceProvider));
+        _toolRegistry.Register(new SafeDeleteTool(workspaceProvider));
 
         // Code Navigation / Query Tools
         _toolRegistry.Register(new FindReferencesTool(workspaceProvider));

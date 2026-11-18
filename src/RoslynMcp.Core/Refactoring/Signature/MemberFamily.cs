@@ -6,7 +6,7 @@ using RoslynMcp.Contracts.Errors;
 namespace RoslynMcp.Core.Refactoring.Signature;
 
 /// <summary>
-/// The override / implementation family of a method or property: the members that must keep
+/// The override / implementation family of a method, property or event: the members that must keep
 /// one signature, because changing one of them alone leaves the others no longer overriding
 /// or implementing it. Starting from a member, the family takes in what it overrides (up to
 /// the base-most definition), its overrides (transitively, in every project), the interface
@@ -84,6 +84,52 @@ internal sealed class MemberFamily
         CancellationToken cancellationToken)
     {
         target = Normalize(target);
+        var (maps, unchangeable) = await CollectAsync(target, compilation, solution, cancellationToken);
+
+        if (unchangeable.Count > 0)
+        {
+            throw new RefactoringException(
+                ErrorCodes.FamilyMemberNotInSource,
+                $"'{target.ToDisplayString()}' must keep the signature of {string.Join(", ", unchangeable)}, " +
+                "which cannot be changed.");
+        }
+
+        var members = maps
+            .Select(entry => new FamilyMember(entry.Key, Declarations(entry.Key), entry.Value, compilation))
+            .OrderBy(member => member.Declarations[0].SyntaxTree.FilePath, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(member => member.Declarations[0].Span.Start)
+            .ToList();
+
+        return new MemberFamily(members);
+    }
+
+    /// <summary>
+    /// The other members of <paramref name="target"/>'s family (a method, property or event),
+    /// those declared in metadata or generated code included, without expanding past them.
+    /// Empty when the member neither overrides nor implements anything and has no overrides or
+    /// implementations.
+    /// </summary>
+    public static async Task<IReadOnlyList<ISymbol>> FindRelatedAsync(
+        ISymbol target,
+        Compilation compilation,
+        Solution solution,
+        CancellationToken cancellationToken)
+    {
+        target = Normalize(target);
+        var (maps, _) = await CollectAsync(target, compilation, solution, cancellationToken);
+        return maps.Keys.Where(member => !Same(member, target)).ToList();
+    }
+
+    /// <summary>
+    /// Walks the family from <paramref name="target"/>: every member found, with its type map,
+    /// and the members that cannot be changed (not expanded further).
+    /// </summary>
+    private static async Task<(Dictionary<ISymbol, Dictionary<ITypeParameterSymbol, ITypeSymbol>> Maps, SortedSet<string> Unchangeable)> CollectAsync(
+        ISymbol target,
+        Compilation compilation,
+        Solution solution,
+        CancellationToken cancellationToken)
+    {
         var maps = new Dictionary<ISymbol, Dictionary<ITypeParameterSymbol, ITypeSymbol>>(MemberIdentity.Instance)
         {
             [target] = VisibleTypeParameters(target).ToDictionary(t => t, t => (ITypeSymbol)t, TypeParameterComparer)
@@ -117,21 +163,7 @@ internal sealed class MemberFamily
             }
         }
 
-        if (unchangeable.Count > 0)
-        {
-            throw new RefactoringException(
-                ErrorCodes.FamilyMemberNotInSource,
-                $"'{target.ToDisplayString()}' must keep the signature of {string.Join(", ", unchangeable)}, " +
-                "which cannot be changed.");
-        }
-
-        var members = maps
-            .Select(entry => new FamilyMember(entry.Key, Declarations(entry.Key), entry.Value, compilation))
-            .OrderBy(member => member.Declarations[0].SyntaxTree.FilePath, StringComparer.OrdinalIgnoreCase)
-            .ThenBy(member => member.Declarations[0].Span.Start)
-            .ToList();
-
-        return new MemberFamily(members);
+        return (maps, unchangeable);
     }
 
     /// <summary>
@@ -473,6 +505,7 @@ internal sealed class MemberFamily
     {
         IMethodSymbol method => method.OverriddenMethod,
         IPropertySymbol property => property.OverriddenProperty,
+        IEventSymbol @event => @event.OverriddenEvent,
         _ => null
     };
 
@@ -480,6 +513,7 @@ internal sealed class MemberFamily
     {
         IMethodSymbol method => method.ExplicitInterfaceImplementations.CastArray<ISymbol>(),
         IPropertySymbol property => property.ExplicitInterfaceImplementations.CastArray<ISymbol>(),
+        IEventSymbol @event => @event.ExplicitInterfaceImplementations.CastArray<ISymbol>(),
         _ => []
     };
 

@@ -6,6 +6,7 @@ using RoslynMcp.Core.Query.Base;
 using RoslynMcp.Core.Refactoring;
 using RoslynMcp.Core.Refactoring.Base;
 using RoslynMcp.Core.Refactoring.Convert;
+using RoslynMcp.Core.Refactoring.Delete;
 using RoslynMcp.Core.Refactoring.Encapsulate;
 using RoslynMcp.Core.Refactoring.Extract;
 using RoslynMcp.Core.Refactoring.Format;
@@ -46,7 +47,7 @@ public sealed class ToolEntry
 }
 
 /// <summary>
-/// Maps tool names to execution delegates for all 43 Roslyn tools.
+/// Maps tool names to execution delegates for all 44 Roslyn tools.
 /// </summary>
 public sealed class ToolRegistry
 {
@@ -138,7 +139,7 @@ public sealed class ToolRegistry
         _tools.Values.OrderBy(t => t.Category).ThenBy(t => t.Name).ToList();
 
     /// <summary>
-    /// Build the default registry with all 43 tools registered.
+    /// Build the default registry with all 44 tools registered.
     /// </summary>
     public static ToolRegistry BuildDefault()
     {
@@ -165,6 +166,10 @@ public sealed class ToolRegistry
         // ── Refactoring: Inline (1) ───────────────────────────────────
         r.RegisterRefactoring<InlineVariableOperation, InlineVariableParams>(
             "inline-variable", "Inline a variable, replacing all references with its value");
+
+        // ── Refactoring: Delete (1) ───────────────────────────────────
+        r.RegisterRefactoring<SafeDeleteOperation, SafeDeleteParams>(
+            "safe-delete", "Delete a type or member that nothing references (lists the references otherwise)");
 
         // ── Refactoring: Signature (2) ────────────────────────────────
         r.RegisterRefactoring<ChangeSignatureOperation, ChangeSignatureParams>(

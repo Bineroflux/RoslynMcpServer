@@ -28,7 +28,7 @@ public sealed class FindImplementationsTool : IToolHandler
     public string Name => "find_implementations";
 
     /// <inheritdoc />
-    public string Description => "Find all implementations of a C# interface, abstract class, or virtual/abstract member across the solution, sorted by file and line.";
+    public string Description => "Find implementations across the solution: types implementing an interface, classes derived from a class, implementations of an interface member, or overrides of a virtual/abstract member. Sorted by file and line.";
 
     /// <inheritdoc />
     public object InputSchema => new
@@ -50,7 +50,7 @@ public sealed class FindImplementationsTool : IToolHandler
             symbolName = new
             {
                 type = "string",
-                description = "Name of the interface, abstract class, or virtual member"
+                description = "Name of the interface, class, interface member, or virtual/abstract/override member"
             },
             line = new
             {
@@ -73,7 +73,7 @@ public sealed class FindImplementationsTool : IToolHandler
             transitive = new
             {
                 type = "boolean",
-                description = "Include implementations through a base class or derived interface (default: true). false returns only types that list the interface themselves.",
+                description = "Include indirect results (default: true): implementations through a base class or derived interface, subclasses of subclasses, overrides of overrides. false returns only direct ones.",
                 @default = true
             }
         },

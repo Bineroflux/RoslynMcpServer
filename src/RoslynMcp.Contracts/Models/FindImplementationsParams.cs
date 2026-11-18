@@ -11,7 +11,7 @@ public sealed class FindImplementationsParams
     public required string SourceFile { get; init; }
 
     /// <summary>
-    /// Name of the interface, abstract class, or virtual member.
+    /// Name of the interface, class, interface member, or virtual/abstract/override member.
     /// </summary>
     public string? SymbolName { get; init; }
 
@@ -31,9 +31,9 @@ public sealed class FindImplementationsParams
     public int? MaxResults { get; init; }
 
     /// <summary>
-    /// Whether implementations through a base class or a derived interface are included.
-    /// Default: true; false returns only types that list the interface themselves (and, for
-    /// an interface member, their implementations of it).
+    /// Whether indirect results are included: implementations through a base class or a
+    /// derived interface, classes deriving through another class, overrides of overrides.
+    /// Default: true; false returns only the direct ones.
     /// </summary>
     public bool? Transitive { get; init; }
 }

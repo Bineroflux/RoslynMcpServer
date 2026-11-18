@@ -12,8 +12,9 @@ using RoslynMcp.Core.Workspace;
 namespace RoslynMcp.Core.Query;
 
 /// <summary>
-/// Finds all implementations of an interface, abstract class, or virtual/abstract member.
-/// Delegates to Roslyn's SymbolFinder.FindImplementationsAsync.
+/// Finds the implementations of a symbol: the types implementing an interface, the classes
+/// derived from a class, the implementations of an interface member, or the overrides of a
+/// virtual, abstract or override member.
 /// </summary>
 public sealed class FindImplementationsOperation : QueryOperationBase<FindImplementationsParams, FindImplementationsResult>
 {
@@ -64,10 +65,7 @@ public sealed class FindImplementationsOperation : QueryOperationBase<FindImplem
         var maxResults = @params.MaxResults ?? int.MaxValue;
 
         // Find implementations based on symbol kind
-        var implSymbols = @params.Transitive ?? true
-            ? await SymbolFinder.FindImplementationsAsync(
-                symbol, Context.Solution, cancellationToken: cancellationToken)
-            : await FindDirectImplementationsAsync(symbol, cancellationToken);
+        var implSymbols = await FindImplementationsAsync(symbol, @params.Transitive ?? true, cancellationToken);
 
         // SymbolFinder's order varies between calls; sort by location so maxResults keeps
         // the same first N every time. Implementations without a source location (from
@@ -107,11 +105,61 @@ public sealed class FindImplementationsOperation : QueryOperationBase<FindImplem
     }
 
     /// <summary>
-    /// The implementations of <paramref name="symbol"/> by types that list its interface
-    /// themselves, leaving out those through a base class or a derived interface. For a type
-    /// that is SymbolFinder's non-transitive search; for an interface member, each such
-    /// type's implementation of it (which may be inherited from its base class). Other
-    /// symbols have no direct/indirect distinction and get the regular search.
+    /// The implementations of <paramref name="symbol"/>. SymbolFinder.FindImplementationsAsync
+    /// only knows interfaces and their members, and finds nothing for a class or a virtual or
+    /// abstract member; those get their derived classes and overrides instead.
+    /// </summary>
+    private async Task<IEnumerable<ISymbol>> FindImplementationsAsync(
+        ISymbol symbol, bool transitive, CancellationToken cancellationToken)
+    {
+        if (symbol is INamedTypeSymbol { TypeKind: TypeKind.Class } type)
+        {
+            return await SymbolFinder.FindDerivedClassesAsync(
+                type, Context.Solution, transitive, cancellationToken: cancellationToken);
+        }
+
+        if (symbol is not INamedTypeSymbol &&
+            symbol.ContainingType is { TypeKind: TypeKind.Class } &&
+            (symbol.IsVirtual || symbol.IsAbstract || symbol.IsOverride))
+        {
+            // FindOverridesAsync also finds overrides of overrides. Non-transitive keeps
+            // those that override the member itself.
+            var overrides = await SymbolFinder.FindOverridesAsync(
+                symbol, Context.Solution, cancellationToken: cancellationToken);
+            return transitive ? overrides : overrides.Where(o => IsSameMember(OverriddenMember(o), symbol));
+        }
+
+        return transitive
+            ? await SymbolFinder.FindImplementationsAsync(symbol, Context.Solution, cancellationToken: cancellationToken)
+            : await FindDirectImplementationsAsync(symbol, cancellationToken);
+    }
+
+    private static ISymbol? OverriddenMember(ISymbol member) => member switch
+    {
+        IMethodSymbol method => method.OverriddenMethod,
+        IPropertySymbol property => property.OverriddenProperty,
+        IEventSymbol @event => @event.OverriddenEvent,
+        _ => null
+    };
+
+    /// <summary>
+    /// Whether two symbols are the same member. One may come from another project's
+    /// compilation, so the documentation ID and assembly also decide, and a generic type's
+    /// member counts as its definition.
+    /// </summary>
+    private static bool IsSameMember(ISymbol? candidate, ISymbol member) =>
+        candidate is not null &&
+        (SymbolEqualityComparer.Default.Equals(candidate.OriginalDefinition, member.OriginalDefinition) ||
+         (candidate.OriginalDefinition.GetDocumentationCommentId() == member.OriginalDefinition.GetDocumentationCommentId() &&
+          candidate.ContainingAssembly?.Name == member.ContainingAssembly?.Name));
+
+    /// <summary>
+    /// The implementations of interface or interface member <paramref name="symbol"/> by types
+    /// that list the interface themselves, leaving out those through a base class or a derived
+    /// interface. For an interface that is SymbolFinder's non-transitive search; for an
+    /// interface member, each such type's implementation of it (which may be inherited from
+    /// its base class). Other symbols have no direct/indirect distinction and get the regular
+    /// search.
     /// </summary>
     private async Task<IEnumerable<ISymbol>> FindDirectImplementationsAsync(ISymbol symbol, CancellationToken cancellationToken)
     {

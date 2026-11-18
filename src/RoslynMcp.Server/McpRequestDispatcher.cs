@@ -36,6 +36,7 @@ public sealed class McpRequestDispatcher
 
         // Phase 1 - Tier 1 Operations
         _toolRegistry.Register(new RenameSymbolTool(workspaceProvider));
+        _toolRegistry.Register(new RenameNamespaceTool(workspaceProvider));
         _toolRegistry.Register(new ExtractMethodTool(workspaceProvider));
         _toolRegistry.Register(new AddMissingUsingsTool(workspaceProvider));
         _toolRegistry.Register(new RemoveUnusedUsingsTool(workspaceProvider));

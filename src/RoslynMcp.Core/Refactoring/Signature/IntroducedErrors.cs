@@ -1,5 +1,7 @@
 using System.Globalization;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 
 namespace RoslynMcp.Core.Refactoring.Signature;
 
@@ -38,6 +40,26 @@ internal static class IntroducedErrors
         return added.Count == 0 ? null : added;
     }
 
+    /// <summary>
+    /// The semantic model whose diagnostics are <paramref name="document"/>'s errors. A compilation
+    /// binds the global usings of all its files once, and reports their errors only to the semantic
+    /// model that triggered that binding: once another file has been bound, an unresolvable
+    /// <c>global using</c> (e.g. in the SDK's <c>GlobalUsings.g.cs</c> after a namespace rename)
+    /// reports nothing. A file declaring global usings is therefore checked on a fresh copy of
+    /// the compilation.
+    /// </summary>
+    private static async Task<SemanticModel?> GetSemanticModelAsync(Document document, CancellationToken cancellationToken)
+    {
+        if (await document.GetSyntaxRootAsync(cancellationToken) is CompilationUnitSyntax root &&
+            root.Usings.Any(u => u.GlobalKeyword.IsKind(SyntaxKind.GlobalKeyword)) &&
+            await document.Project.GetCompilationAsync(cancellationToken) is { } compilation)
+        {
+            return compilation.Clone().GetSemanticModel(root.SyntaxTree);
+        }
+
+        return await document.GetSemanticModelAsync(cancellationToken);
+    }
+
     private static async Task<List<(string Key, string Text)>> GetErrorsAsync(
         Solution solution,
         IEnumerable<DocumentId> documents,
@@ -47,7 +69,7 @@ internal static class IntroducedErrors
         foreach (var id in documents)
         {
             if (solution.GetDocument(id) is not { } document ||
-                await document.GetSemanticModelAsync(cancellationToken) is not { } model)
+                await GetSemanticModelAsync(document, cancellationToken) is not { } model)
             {
                 continue;
             }

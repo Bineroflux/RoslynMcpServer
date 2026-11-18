@@ -4,12 +4,13 @@ using System.Xml.Linq;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using RoslynMcp.Core.FileSystem;
+using RoslynMcp.Core.Workspace;
 
 namespace RoslynMcp.Core.Refactoring.Utilities;
 
 /// <summary>
-/// Where <c>move_type_to_namespace</c> with <c>updateFileLocation</c> moves a file, or why
-/// it leaves the file where it is.
+/// Where <c>move_type_to_namespace</c> with <c>updateFileLocation</c> or <c>rename_namespace</c>
+/// with <c>updateFolders</c> moves a file, or why it leaves the file where it is.
 /// </summary>
 /// <param name="TargetPath">New path, or null when the file stays.</param>
 /// <param name="Folders">Project-relative folders of <paramref name="TargetPath"/>.</param>
@@ -31,13 +32,35 @@ internal sealed record NamespaceFolderMove(string? TargetPath, IReadOnlyList<str
     /// <c>Update</c> metadata, a <c>Remove</c> of the new folder), a file that holds nothing
     /// but the moved type, and a free target path. It cannot see other imports (shared props,
     /// NuGet build props), so after the move MSBuild itself has the last word (see
-    /// <c>MoveTypeToNamespaceOperation.MoveFileAsync</c>).
+    /// <see cref="MoveAsync"/>).
     /// </remarks>
     public static NamespaceFolderMove Plan(
         Document document,
         SyntaxNode typeDeclaration,
         string targetNamespace,
-        Solution solution)
+        Solution solution) =>
+        Plan(
+            document,
+            targetNamespace,
+            solution,
+            () => DeclaresOnly(typeDeclaration) ? null : $"'{Path.GetFileName(document.FilePath)}' declares more than the moved type",
+            claimedTargets: null);
+
+    /// <summary>
+    /// Plans moving <paramref name="document"/> into the folder that matches
+    /// <paramref name="targetNamespace"/>, like the overload for one type does.
+    /// </summary>
+    /// <param name="document">The document to move.</param>
+    /// <param name="targetNamespace">The namespace whose folder it moves to.</param>
+    /// <param name="solution">The solution the document belongs to.</param>
+    /// <param name="whyContentStays">Why the file's content keeps it in place, or null.</param>
+    /// <param name="claimedTargets">Target paths other planned moves take; they count as taken.</param>
+    public static NamespaceFolderMove Plan(
+        Document document,
+        string targetNamespace,
+        Solution solution,
+        Func<string?> whyContentStays,
+        IReadOnlySet<string>? claimedTargets)
     {
         var sourcePath = document.FilePath;
         var project = document.Project;
@@ -72,8 +95,8 @@ internal sealed record NamespaceFolderMove(string? TargetPath, IReadOnlyList<str
         if (PathResolver.PathsEqual(targetPath, sourcePath))
             return InPlace;
 
-        if (!DeclaresOnly(typeDeclaration))
-            return Skip($"'{Path.GetFileName(sourcePath)}' declares more than the moved type");
+        if (whyContentStays() is { } contentReason)
+            return Skip(contentReason);
 
         if (folders.Length > 0 && (folders[0].Equals("bin", StringComparison.OrdinalIgnoreCase) || folders[0].Equals("obj", StringComparison.OrdinalIgnoreCase)))
             return Skip($"the SDK does not compile files under '{folders[0]}'");
@@ -82,7 +105,7 @@ internal sealed record NamespaceFolderMove(string? TargetPath, IReadOnlyList<str
         if (projectFileReason != null)
             return Skip(projectFileReason);
 
-        if (File.Exists(targetPath) || Directory.Exists(targetPath) ||
+        if (File.Exists(targetPath) || Directory.Exists(targetPath) || claimedTargets?.Contains(targetPath) == true ||
             solution.Projects.SelectMany(p => p.Documents).Any(d => PathResolver.PathsEqual(d.FilePath, targetPath)))
         {
             return Skip($"'{targetPath}' already exists");
@@ -92,6 +115,142 @@ internal sealed record NamespaceFolderMove(string? TargetPath, IReadOnlyList<str
     }
 
     private static NamespaceFolderMove Skip(string reason) => new(null, [], reason);
+
+    /// <summary>
+    /// Moves the (already committed) files of <paramref name="moves"/> to their targets and
+    /// repoints the cached solution, then lets MSBuild confirm, once per project, that it
+    /// compiles each file at its new path. The project files <see cref="Plan(Document, string, Solution, Func{string?}, IReadOnlySet{string}?)"/>
+    /// checks cannot see everything (an imported props file may remove the target folder), so a
+    /// move MSBuild does not confirm in every target framework is undone: file, created folders
+    /// and cached document.
+    /// </summary>
+    /// <returns>Per move, in order: where the file is now if it moved, and the problem to report, if any.</returns>
+    public static async Task<IReadOnlyList<MoveOutcome>> MoveAsync(
+        WorkspaceContext context,
+        IReadOnlyList<PlannedMove> moves,
+        CancellationToken cancellationToken)
+    {
+        var outcomes = new MoveOutcome[moves.Count];
+        var createdDirectories = new List<string>[moves.Count];
+        var moved = new List<int>();
+        var unmoved = context.Solution;
+        var solution = unmoved;
+
+        for (var i = 0; i < moves.Count; i++)
+        {
+            var (_, sourcePath, move) = moves[i];
+            var targetPath = move.TargetPath!;
+            createdDirectories[i] = [];
+            for (var dir = Path.GetDirectoryName(targetPath); dir != null && !Directory.Exists(dir); dir = Path.GetDirectoryName(dir))
+                createdDirectories[i].Add(dir);
+
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
+                File.Move(sourcePath, targetPath);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                DeleteEmptyDirectories(createdDirectories[i]);
+                outcomes[i] = new MoveOutcome(sourcePath, null, NotMoved($"moving it to '{targetPath}' failed: {ex.Message}"));
+                continue;
+            }
+
+            // Repoint the cached document, so the solution matches disk without waiting for the
+            // file watcher (which then finds the document already in place). A multi-targeted
+            // project holds the file once per target framework.
+            foreach (var documentId in solution.GetDocumentIdsWithFilePath(sourcePath))
+                solution = solution.WithDocumentFilePath(documentId, targetPath).WithDocumentFolders(documentId, move.Folders);
+            moved.Add(i);
+        }
+
+        context.UpdateSolution(solution);
+
+        foreach (var project in moved.GroupBy(i => moves[i].ProjectFile, PathResolver.PathComparer))
+        {
+            IReadOnlySet<string>? compiled;
+            string? cause = null;
+            try
+            {
+                // Null: a workspace that is not MSBuild-loaded cannot be re-evaluated, so the
+                // project-file checks are all there is.
+                compiled = await context.GetFilesCompiledByProjectAsync(project.Key, cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                foreach (var i in project)
+                    Undo(i, "the operation was cancelled");
+                throw;
+            }
+            catch (Exception ex)
+            {
+                compiled = new HashSet<string>();
+                cause = $"MSBuild could not re-evaluate '{Path.GetFileName(project.Key)}' to confirm that it compiles the moved file ({ex.Message})";
+            }
+
+            foreach (var i in project)
+            {
+                var targetPath = moves[i].Move.TargetPath!;
+                outcomes[i] = compiled == null || compiled.Contains(PathResolver.NormalizePath(targetPath))
+                    ? new MoveOutcome(moves[i].SourcePath, targetPath, null)
+                    : Undo(i, cause ?? $"MSBuild does not compile '{targetPath}' (the project's items exclude it)");
+            }
+        }
+
+        return outcomes;
+
+        MoveOutcome Undo(int i, string cause)
+        {
+            var (_, sourcePath, move) = moves[i];
+            var targetPath = move.TargetPath!;
+            try
+            {
+                File.Move(targetPath, sourcePath);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // The file stays at the target, where the cached solution already has it.
+                return new MoveOutcome(sourcePath, targetPath,
+                    $"The namespace was changed and the file moved to '{targetPath}', but {cause}, " +
+                    $"and moving it back failed: {ex.Message}. Move it back to '{sourcePath}'.");
+            }
+
+            DeleteEmptyDirectories(createdDirectories[i]);
+            var current = context.Solution;
+            foreach (var documentId in current.GetDocumentIdsWithFilePath(targetPath))
+            {
+                var original = unmoved.GetDocument(documentId);
+                current = current.WithDocumentFilePath(documentId, sourcePath)
+                    .WithDocumentFolders(documentId, original?.Folders ?? []);
+            }
+
+            context.UpdateSolution(current);
+            return new MoveOutcome(sourcePath, null, NotMoved($"{cause}, so the move was undone"));
+        }
+    }
+
+    /// <summary>
+    /// Deletes the directories a move created (deepest first), as long as they are empty.
+    /// </summary>
+    internal static void DeleteEmptyDirectories(IEnumerable<string> directories)
+    {
+        foreach (var dir in directories)
+        {
+            try
+            {
+                if (Directory.Exists(dir) && !Directory.EnumerateFileSystemEntries(dir).Any())
+                    Directory.Delete(dir);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // Best effort: an empty folder left behind is harmless.
+            }
+        }
+    }
+
+    /// <summary>The warning for a file whose namespace changed but which stays where it is.</summary>
+    internal static string NotMoved(string reason) =>
+        $"The namespace was changed, but the file was not moved: {reason}.";
 
     /// <summary>
     /// Whether the moved type is the only thing its file declares (namespaces aside): no
@@ -189,3 +348,12 @@ internal sealed record NamespaceFolderMove(string? TargetPath, IReadOnlyList<str
         return Regex.IsMatch(path, "^" + pattern + "$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
     }
 }
+
+/// <summary>A planned move of a file of <paramref name="ProjectFile"/>.</summary>
+internal sealed record PlannedMove(string ProjectFile, string SourcePath, NamespaceFolderMove Move);
+
+/// <summary>What became of a <see cref="PlannedMove"/>.</summary>
+/// <param name="SourcePath">The file's path before the move.</param>
+/// <param name="MovedTo">Where the file is now, when it moved.</param>
+/// <param name="Problem">Why it did not move (or did not move back), when something went wrong.</param>
+internal sealed record MoveOutcome(string SourcePath, string? MovedTo, string? Problem);

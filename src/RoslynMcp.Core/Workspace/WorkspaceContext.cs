@@ -345,14 +345,14 @@ public sealed class WorkspaceContext : IDisposable
     }
 
     /// <summary>
-    /// Whether MSBuild compiles <paramref name="filePath"/> in every target framework of
-    /// <paramref name="projectFilePath"/>, judged by re-evaluating the project as it is on disk
-    /// now; null when this workspace cannot be re-evaluated (see <see cref="EvaluateProjectAsync"/>).
-    /// Takes no lock, so an operation can call it while it holds its lease.
+    /// The files MSBuild compiles in every target framework of <paramref name="projectFilePath"/>
+    /// (normalized, compared with <c>PathResolver.PathComparer</c>), judged by
+    /// re-evaluating the project as it is on disk now; null when this workspace cannot be
+    /// re-evaluated (see <see cref="EvaluateProjectAsync"/>). Takes no lock, so an operation can
+    /// call it while it holds its lease.
     /// </summary>
-    internal async Task<bool?> IsCompiledByProjectAsync(
+    internal async Task<IReadOnlySet<string>?> GetFilesCompiledByProjectAsync(
         string projectFilePath,
-        string filePath,
         CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
@@ -361,8 +361,21 @@ public sealed class WorkspaceContext : IDisposable
         if (infos == null)
             return null;
 
-        return infos.Count > 0 && infos.All(info => info.Documents.Any(
-            d => d.FilePath != null && PathResolver.PathsEqual(d.FilePath, filePath)));
+        HashSet<string>? compiled = null;
+        foreach (var info in infos)
+        {
+            var files = info.Documents
+                .Select(d => d.FilePath)
+                .OfType<string>()
+                .Select(PathResolver.NormalizePath)
+                .ToHashSet(PathResolver.PathComparer);
+            if (compiled == null)
+                compiled = files;
+            else
+                compiled.IntersectWith(files);
+        }
+
+        return compiled ?? new HashSet<string>(PathResolver.PathComparer);
     }
 
     /// <summary>

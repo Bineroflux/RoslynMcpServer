@@ -17,7 +17,7 @@ namespace RoslynMcp.Core.Refactoring;
 /// <summary>
 /// Changes the namespace of a type, updating all references across the solution, and with
 /// <c>updateFileLocation</c> moves its file into the matching folder when that is safe
-/// (see <see cref="NamespaceFolderMove.Plan"/>).
+/// (see <see cref="NamespaceFolderMove.Plan(Document, SyntaxNode, string, Solution)"/>).
 /// </summary>
 public sealed class MoveTypeToNamespaceOperation
 {
@@ -109,8 +109,9 @@ public sealed class MoveTypeToNamespaceOperation
             string? movedTo = null;
             if (move?.TargetPath != null)
             {
-                (movedTo, var problem) = await MoveFileAsync(
-                    resolution.Document.Project.FilePath!, sourcePath, move, cancellationToken);
+                var outcome = (await NamespaceFolderMove.MoveAsync(
+                    _context, [new PlannedMove(resolution.Document.Project.FilePath!, sourcePath, move)], cancellationToken))[0];
+                (movedTo, var problem) = (outcome.MovedTo, outcome.Problem);
                 warning = problem == null ? null : RefactoringError.Create("PARTIAL_SUCCESS", problem);
             }
 
@@ -356,119 +357,10 @@ public sealed class MoveTypeToNamespaceOperation
         return (newDoc, added, removed);
     }
 
-    /// <summary>
-    /// Moves the (already committed) file to <paramref name="move"/>'s target and repoints the
-    /// cached solution, then lets MSBuild confirm that it compiles the file at its new path.
-    /// The project files checked up front cannot see everything (an imported props file may
-    /// remove the target folder), so if MSBuild does not compile it there in every target
-    /// framework, the move is undone: file, created folders and cached solution.
-    /// </summary>
-    /// <returns>Where the file is now if it moved, and the warning to report, if any.</returns>
-    private async Task<(string? MovedTo, string? Problem)> MoveFileAsync(
-        string projectFile,
-        string sourcePath,
-        NamespaceFolderMove move,
-        CancellationToken cancellationToken)
-    {
-        var targetPath = move.TargetPath!;
-        var createdDirectories = new List<string>();
-        for (var dir = Path.GetDirectoryName(targetPath); dir != null && !Directory.Exists(dir); dir = Path.GetDirectoryName(dir))
-            createdDirectories.Add(dir);
-
-        try
-        {
-            Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
-            File.Move(sourcePath, targetPath);
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            DeleteEmptyDirectories(createdDirectories);
-            return (null, NotMoved($"moving it to '{targetPath}' failed: {ex.Message}"));
-        }
-
-        // Repoint the cached document, so the solution matches disk without waiting for the
-        // file watcher (which then finds the document already in place). A multi-targeted
-        // project holds the file once per target framework.
-        var unmoved = _context.Solution;
-        var solution = unmoved;
-        foreach (var documentId in solution.GetDocumentIdsWithFilePath(sourcePath))
-        {
-            solution = solution
-                .WithDocumentFilePath(documentId, targetPath)
-                .WithDocumentFolders(documentId, move.Folders);
-        }
-
-        _context.UpdateSolution(solution);
-
-        string? cause = null;
-        bool? compiled;
-        try
-        {
-            // Null: a workspace that is not MSBuild-loaded cannot be re-evaluated, so the
-            // project-file checks are all there is.
-            compiled = await _context.IsCompiledByProjectAsync(projectFile, targetPath, cancellationToken);
-        }
-        catch (OperationCanceledException)
-        {
-            Undo();
-            throw;
-        }
-        catch (Exception ex)
-        {
-            compiled = false;
-            cause = $"MSBuild could not re-evaluate '{Path.GetFileName(projectFile)}' to confirm that it compiles '{targetPath}' ({ex.Message})";
-        }
-
-        if (compiled != false)
-            return (targetPath, null);
-
-        cause ??= $"MSBuild does not compile '{targetPath}' (the project's items exclude it)";
-        return Undo() ?? (null, NotMoved($"{cause}, so the move was undone"));
-
-        (string?, string?)? Undo()
-        {
-            try
-            {
-                File.Move(targetPath, sourcePath);
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-            {
-                // The file stays at the target, where the cached solution already has it.
-                return (targetPath,
-                    $"The namespace was changed and the file moved to '{targetPath}', but {cause ?? "the operation was cancelled"}, " +
-                    $"and moving it back failed: {ex.Message}. Move it back to '{sourcePath}'.");
-            }
-
-            DeleteEmptyDirectories(createdDirectories);
-            _context.UpdateSolution(unmoved);
-            return null;
-        }
-    }
-
-    /// <summary>
-    /// Deletes the directories the move created (deepest first), as long as they are empty.
-    /// </summary>
-    private static void DeleteEmptyDirectories(IEnumerable<string> directories)
-    {
-        foreach (var dir in directories)
-        {
-            try
-            {
-                if (Directory.Exists(dir) && !Directory.EnumerateFileSystemEntries(dir).Any())
-                    Directory.Delete(dir);
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-            {
-                // Best effort: an empty folder left behind is harmless.
-            }
-        }
-    }
-
     private static RefactoringError? FileNotMovedWarning(string? skipReason) =>
         skipReason == null ? null : RefactoringError.Create("PARTIAL_SUCCESS", NotMoved(skipReason));
 
-    private static string NotMoved(string reason) =>
-        $"The namespace was changed, but the file was not moved: {reason}.";
+    private static string NotMoved(string reason) => NamespaceFolderMove.NotMoved(reason);
 
     private Contracts.Models.SymbolInfo CreateSymbolInfo(SymbolResolutionResult resolution, string newNamespace, string? movedTo = null)
     {

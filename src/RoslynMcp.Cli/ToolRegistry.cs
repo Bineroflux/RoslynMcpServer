@@ -47,7 +47,7 @@ public sealed class ToolEntry
 }
 
 /// <summary>
-/// Maps tool names to execution delegates for all 44 Roslyn tools.
+/// Maps tool names to execution delegates for all 45 Roslyn tools.
 /// </summary>
 public sealed class ToolRegistry
 {
@@ -139,7 +139,7 @@ public sealed class ToolRegistry
         _tools.Values.OrderBy(t => t.Category).ThenBy(t => t.Name).ToList();
 
     /// <summary>
-    /// Build the default registry with all 44 tools registered.
+    /// Build the default registry with all 45 tools registered.
     /// </summary>
     public static ToolRegistry BuildDefault()
     {
@@ -159,9 +159,11 @@ public sealed class ToolRegistry
         r.RegisterRefactoring<IntroduceParameterOperation, IntroduceParameterParams>(
             "introduce-parameter", "Introduce a method parameter from an expression");
 
-        // ── Refactoring: Rename (1) ───────────────────────────────────
+        // ── Refactoring: Rename (2) ───────────────────────────────────
         r.RegisterRefactoring<RenameSymbolOperation, RenameSymbolParams>(
             "rename-symbol", "Rename any C# symbol with automatic reference updates");
+        r.RegisterRefactoring<RenameNamespaceOperation, RenameNamespaceParams>(
+            "rename-namespace", "Rename a namespace and its sub-namespaces solution-wide (optionally moving files to matching folders)");
 
         // ── Refactoring: Inline (1) ───────────────────────────────────
         r.RegisterRefactoring<InlineVariableOperation, InlineVariableParams>(

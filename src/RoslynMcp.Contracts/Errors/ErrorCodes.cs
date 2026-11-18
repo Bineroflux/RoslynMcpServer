@@ -344,6 +344,21 @@ public static class ErrorCodes
     /// </summary>
     public const string CannotDelete = "3122";
 
+    // --------------------------------------------
+    // Namespace Errors (3130-3139)
+    // --------------------------------------------
+
+    /// <summary>
+    /// A namespace declaration whose enclosing block would have to change also declares other
+    /// members, so the rename cannot be written without splitting the block.
+    /// </summary>
+    public const string NamespaceBlockShared = "3130";
+
+    /// <summary>
+    /// The namespace also contains types from referenced assemblies, which cannot be renamed.
+    /// </summary>
+    public const string NamespaceInMetadata = "3131";
+
     // ============================================
     // System Errors (4xxx)
     // ============================================

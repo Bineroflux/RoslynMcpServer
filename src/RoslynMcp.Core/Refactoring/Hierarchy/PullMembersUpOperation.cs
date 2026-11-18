@@ -192,7 +192,7 @@ public sealed class PullMembersUpOperation : RefactoringOperationBase<PullMember
                 : newRoot);
         var annotated = newSolution;
         var removals = await RemoveMarkedAsync(newSolution, edits.Documents, cancellationToken);
-        newSolution = removals.Solution;
+        newSolution = await LinkedDocuments.SyncAsync(solution, removals.Solution, edits.Documents, cancellationToken);
 
         var (siblingNotes, related) = await RelatedTypesAsync(type, target, moved, makeAbstract, solution, cancellationToken);
         notes.AddRange(siblingNotes);

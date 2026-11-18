@@ -268,6 +268,25 @@ public sealed class InlineMethodRulesTests
     }
 
     [Fact]
+    public async Task MultiTargetedProject_EditsTheFileOnce_AndKeepsItsDocumentsInStep()
+    {
+        using var ws = TestWorkspace.CreateSolution(new TestWorkspace.ProjectSpec(
+            "Lib",
+            [("C.cs", "internal static class C\n{\n    private static int Inc(int x) => x + 1;\n\n    public static int Run(int a) => Inc(a);\n}\n")],
+            TargetFrameworks: ["net8", "net9"]));
+
+        var result = await Inline(ws.Context, ws.PathOf("Lib", "C.cs"), "Inc");
+
+        Assert.True(result.Success, result.Error?.Message);
+        Assert.Equal([ws.PathOf("Lib", "C.cs")], result.Changes!.FilesModified);
+        Assert.Equal("internal static class C\n{\n    public static int Run(int a) => a + 1;\n}\n", File.ReadAllText(ws.PathOf("Lib", "C.cs")));
+        var texts = ws.Context.Solution.GetDocumentIdsWithFilePath(ws.PathOf("Lib", "C.cs"))
+            .Select(id => ws.Context.Solution.GetDocument(id)!.GetTextAsync(TestContext.Current.CancellationToken).Result.ToString())
+            .Distinct();
+        Assert.Single(texts);
+    }
+
+    [Fact]
     public async Task ImplicitInterfaceImplementation_IsInlinedButKept()
     {
         using var ws = TestWorkspace.Create(("C.cs", Lf("""

@@ -119,7 +119,7 @@ public sealed class InlineMethodOperation : RefactoringOperationBase<InlineMetho
         var body = InlinedBody.Analyze(method, declaration, model, cancellationToken);
         var solution = Context.Solution;
 
-        var (calls, others) = await FindReferencesAsync(method, declaration, solution, cancellationToken);
+        var (calls, others) = await FindReferencesAsync(method, document, declaration, solution, cancellationToken);
         (Document Document, InvocationExpressionSyntax Invocation)? singleCall = @params.CallLine is { } callLine
             ? SelectCall(calls, others, @params.CallFile ?? @params.SourceFile, callLine, @params.CallColumn, method)
             : null;
@@ -175,7 +175,7 @@ public sealed class InlineMethodOperation : RefactoringOperationBase<InlineMetho
             newSolution = deletion.Value.Solution;
 
         var edited = plans.Select(p => p.Document.Id).Append(document.Id).Distinct().ToList();
-        newSolution = await CopyToLinkedDocumentsAsync(newSolution, edited, cancellationToken);
+        newSolution = await LinkedDocuments.SyncAsync(solution, newSolution, edited, cancellationToken);
 
         var warnings = new List<string>();
         warnings.AddRange(refused
@@ -247,11 +247,14 @@ public sealed class InlineMethodOperation : RefactoringOperationBase<InlineMetho
     }
 
     /// <summary>
-    /// The calls of the method (one document per file) and the other references that remain:
-    /// method groups, <c>nameof</c>, crefs, and calls in generated code. Fails for a recursive method.
+    /// The calls of the method and the other references that remain: method groups, <c>nameof</c>,
+    /// crefs, and calls in generated code. Fails for a recursive method. A file compiled by several
+    /// projects is read through one document only (the declaring one for the method's file), so all
+    /// edits of a file go to the same document.
     /// </summary>
     private static async Task<(List<(Document Document, InvocationExpressionSyntax Invocation)> Calls, List<Location> Others)> FindReferencesAsync(
         IMethodSymbol method,
+        Document declaringDocument,
         MethodDeclarationSyntax declaration,
         Solution solution,
         CancellationToken cancellationToken)
@@ -277,7 +280,12 @@ public sealed class InlineMethodOperation : RefactoringOperationBase<InlineMetho
                 continue;
             }
 
-            var root = await location.Document.GetSyntaxRootAsync(cancellationToken);
+            var canonical = location.Document.FilePath == null
+                ? solution.GetDocument(location.Document.Id)
+                : PathResolver.PathsEqual(path, declaringDocument.FilePath)
+                    ? declaringDocument
+                    : solution.GetDocumentIdsWithFilePath(location.Document.FilePath).Select(solution.GetDocument).OfType<Document>().FirstOrDefault();
+            var root = canonical == null ? null : await canonical.GetSyntaxRootAsync(cancellationToken);
             var node = root?.FindNode(location.Location.SourceSpan, findInsideTrivia: true, getInnermostNodeForTie: true);
             if (PathResolver.PathsEqual(path, declaration.SyntaxTree.FilePath) && declaration.FullSpan.Contains(location.Location.SourceSpan))
             {
@@ -300,10 +308,10 @@ public sealed class InlineMethodOperation : RefactoringOperationBase<InlineMetho
                     : node;
 
             if (callee?.Parent is InvocationExpressionSyntax invocation && invocation.Expression == callee &&
-                solution.GetDocument(location.Document.Id) is { } document &&
+                canonical != null &&
                 !GeneratedCode.IsGenerated(invocation.SyntaxTree, cancellationToken))
             {
-                calls.Add((document, invocation));
+                calls.Add((canonical, invocation));
             }
             else
             {
@@ -545,23 +553,6 @@ public sealed class InlineMethodOperation : RefactoringOperationBase<InlineMetho
         };
 
         return (solution.WithDocumentText(documentId, DeclarationRemoval.Remove(text, [span])), change);
-    }
-
-    /// <summary>Gives the other documents of a file compiled by several projects the same text.</summary>
-    private static async Task<Solution> CopyToLinkedDocumentsAsync(Solution solution, IEnumerable<DocumentId> edited, CancellationToken cancellationToken)
-    {
-        foreach (var id in edited)
-        {
-            var document = solution.GetDocument(id);
-            if (document?.FilePath == null)
-                continue;
-
-            var text = await document.GetTextAsync(cancellationToken);
-            foreach (var linked in solution.GetDocumentIdsWithFilePath(document.FilePath).Where(l => l != id))
-                solution = solution.WithDocumentText(linked, text);
-        }
-
-        return solution;
     }
 
     private static async Task<List<PendingChange>> CreatePendingChangesAsync(

@@ -225,6 +225,36 @@ public sealed class InlineMethodPositionTests
         Assert.Empty(ws.GetDiskCompilationErrors());
     }
 
+    [Fact]
+    public async Task VoidExpressionBodyInALambda_ReplacesTheCall_ABlockBodyIsRefusedThere()
+    {
+        using var ws = TestWorkspace.Create(("C.cs", Lf("""
+            using System;
+
+            internal static class C
+            {
+                private static void Say(string text) => Console.WriteLine(text);
+
+                private static void SayTwice(string text)
+                {
+                    Console.WriteLine(text);
+                    Console.WriteLine(text);
+                }
+
+                public static Action One() => () => Say("one");
+                public static Action Two() => () => SayTwice("two");
+            }
+            """)));
+
+        var say = await InlineAsync(ws, "C.cs", "Say");
+        var twice = await Assert.ThrowsAsync<RefactoringException>(() => InlineAsync(ws, "C.cs", "SayTwice"));
+
+        Assert.True(say.Success, say.Error?.Message);
+        Assert.Contains("public static Action One() => () => Console.WriteLine(\"one\");", ws.ReadFile("C.cs"));
+        Assert.Equal(ErrorCodes.CallNotInlinable, twice.ErrorCode);
+        Assert.Contains("statement of its own", twice.Message);
+    }
+
     private static string Run(TestWorkspace ws)
     {
         var context = new AssemblyLoadContext(nameof(InlineMethodPositionTests), isCollectible: true);

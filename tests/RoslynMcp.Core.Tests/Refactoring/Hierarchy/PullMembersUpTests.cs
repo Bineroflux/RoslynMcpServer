@@ -473,6 +473,35 @@ public sealed class PullMembersUpTests
     }
 
     [Fact]
+    public async Task MakeAbstract_OfAnOverrideOfAFartherMember_DeclaresItAbstractOverride()
+    {
+        using var ws = TestWorkspace.Create(("C.cs", Lf("""
+            public abstract class Base { }
+
+            public class Derived : Base
+            {
+                public override string ToString() => "derived";
+            }
+            """)));
+
+        var result = await PullAsync(ws, "C.cs", "Derived", ["ToString"], makeAbstract: true);
+
+        Assert.True(result.Success, result.Error?.Message);
+        Assert.Equal(Lf("""
+            public abstract class Base
+            {
+                public abstract override string ToString();
+            }
+
+            public class Derived : Base
+            {
+                public override string ToString() => "derived";
+            }
+            """), ws.ReadFile("C.cs"));
+        Assert.Null(result.Warnings);
+    }
+
+    [Fact]
     public async Task Preview_DescribesTheChanges_AndWritesNothing()
     {
         var source = Lf("""
@@ -511,6 +540,25 @@ public sealed class PullMembersUpTests
         var derivedBytes = File.ReadAllBytes(ws.PathOf("Derived.cs"));
         Assert.False(derivedBytes.AsSpan().StartsWith(Encoding.UTF8.Preamble));
         Assert.Equal("public class Derived : Base\n{\n    public int Two() => 2;\n}\n", Encoding.UTF8.GetString(derivedBytes));
+    }
+
+    [Fact]
+    public async Task MultiTargetedProject_EditsTheFileOnce_AndKeepsItsDocumentsInStep()
+    {
+        using var ws = TestWorkspace.CreateSolution(new TestWorkspace.ProjectSpec(
+            "Lib",
+            [("C.cs", "public class Base\n{\n}\n\npublic class Derived : Base\n{\n    public int One() => 1;\n}\n")],
+            TargetFrameworks: ["net8", "net9"]));
+
+        var result = await Pull(ws.Context, ws.PathOf("Lib", "C.cs"), "Derived", ["One"]);
+
+        Assert.True(result.Success, result.Error?.Message);
+        Assert.Equal([ws.PathOf("Lib", "C.cs")], result.Changes!.FilesModified);
+        Assert.Equal("public class Base\n{\n    public int One() => 1;\n}\n\npublic class Derived : Base\n{\n}\n", File.ReadAllText(ws.PathOf("Lib", "C.cs")));
+        var texts = ws.Context.Solution.GetDocumentIdsWithFilePath(ws.PathOf("Lib", "C.cs"))
+            .Select(id => ws.Context.Solution.GetDocument(id)!.GetTextAsync(TestContext.Current.CancellationToken).Result.ToString())
+            .Distinct();
+        Assert.Single(texts);
     }
 
     [Fact]

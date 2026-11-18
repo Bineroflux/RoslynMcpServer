@@ -46,6 +46,47 @@ public class AtomicFileWriterTests : IDisposable
     }
 
     [Fact]
+    public async Task WriteAsync_ExistingFileWithoutBom_StaysWithoutBom()
+    {
+        // Overwriting used to always write Encoding.UTF8, adding EF BB BF to every file
+        // a refactoring touched.
+        var filePath = Path.Combine(_tempDir, "nobom.cs");
+        await File.WriteAllBytesAsync(filePath, "class A { }\n"u8.ToArray(), TestContext.Current.CancellationToken);
+
+        await _writer.WriteAsync(filePath, "class B { } // ü\n", TestContext.Current.CancellationToken);
+
+        var bytes = await File.ReadAllBytesAsync(filePath, TestContext.Current.CancellationToken);
+        Assert.Equal("class B { } // ü\n"u8.ToArray(), bytes);
+    }
+
+    [Theory]
+    [InlineData("utf-8")]
+    [InlineData("utf-16")]
+    [InlineData("utf-16BE")]
+    public async Task WriteAsync_ExistingFileWithBom_KeepsItsEncoding(string encodingName)
+    {
+        var encoding = System.Text.Encoding.GetEncoding(encodingName);
+        var filePath = Path.Combine(_tempDir, "bom.cs");
+        await File.WriteAllTextAsync(filePath, "class A { }", encoding, TestContext.Current.CancellationToken);
+
+        await _writer.WriteAsync(filePath, "class B { }", TestContext.Current.CancellationToken);
+
+        var bytes = await File.ReadAllBytesAsync(filePath, TestContext.Current.CancellationToken);
+        Assert.Equal([.. encoding.GetPreamble(), .. encoding.GetBytes("class B { }")], bytes);
+    }
+
+    [Fact]
+    public async Task WriteAsync_NewFile_WritesUtf8WithBom()
+    {
+        var filePath = Path.Combine(_tempDir, "new.cs");
+
+        await _writer.WriteAsync(filePath, "class A { }", TestContext.Current.CancellationToken);
+
+        var bytes = await File.ReadAllBytesAsync(filePath, TestContext.Current.CancellationToken);
+        Assert.Equal([0xEF, 0xBB, 0xBF, .. "class A { }"u8.ToArray()], bytes);
+    }
+
+    [Fact]
     public async Task WriteAsync_CreatesDirectoryIfNotExists()
     {
         // Arrange

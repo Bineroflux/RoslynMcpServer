@@ -141,8 +141,8 @@ internal sealed class CallPlan
 
     /// <summary>
     /// The replacement of <paramref name="original"/> by <paramref name="statements"/>: a block
-    /// marked for splicing into the enclosing list, the statement itself in an embedded position,
-    /// or a real block there.
+    /// marked for splicing into the enclosing statement list (a block, a switch section, or the
+    /// top-level statements), the statement itself in an embedded position, or a real block there.
     /// </summary>
     public static StatementSyntax Replace(StatementSyntax original, IReadOnlyList<StatementSyntax> statements)
     {
@@ -157,7 +157,7 @@ internal sealed class CallPlan
                 list[^1] = list[^1].WithTrailingTrivia(original.GetTrailingTrivia());
         }
 
-        if (original.Parent is BlockSyntax or SwitchSectionSyntax)
+        if (original.Parent is BlockSyntax or SwitchSectionSyntax or GlobalStatementSyntax)
             return SyntaxFactory.Block(list).WithAdditionalAnnotations(new SyntaxAnnotation(SpliceAnnotationKind));
 
         if (list is [var single] && single is not LocalDeclarationStatementSyntax)
@@ -167,7 +167,11 @@ internal sealed class CallPlan
             .WithTriviaFrom(original);
     }
 
-    /// <summary>Moves the statements of blocks marked for splicing into their enclosing statement lists.</summary>
+    /// <summary>
+    /// Moves the statements of blocks marked for splicing into their enclosing statement lists (a
+    /// top-level statement becomes several). A block written on one line that gains statements is
+    /// laid out anew, with its braces on lines of their own.
+    /// </summary>
     public static SyntaxNode Splice(SyntaxNode root) => new Splicer().Visit(root);
 
     private ExpressionSyntax Source(CallInput input, InvocationExpressionSyntax invocation)
@@ -227,10 +231,12 @@ internal sealed class CallPlan
     private TStatement Mark<TStatement>(TStatement statement)
         where TStatement : StatementSyntax
     {
+        // A generated statement ends its line with a plain line break: an elastic one lets the
+        // formatter separate top-level statements by a blank line, like members.
         var marked = statement.WithAdditionalAnnotations(SiteAnnotation, Formatter.Annotation);
         return marked.GetTrailingTrivia().Any(t => t.IsKind(SyntaxKind.EndOfLineTrivia))
             ? marked
-            : marked.WithTrailingTrivia(marked.GetTrailingTrivia().Add(SyntaxFactory.ElasticCarriageReturnLineFeed));
+            : marked.WithTrailingTrivia(SyntaxFactory.CarriageReturnLineFeed);
     }
 
     private static bool IsStatementExpression(ExpressionSyntax expression) =>
@@ -252,8 +258,43 @@ internal sealed class CallPlan
         public override SyntaxNode? VisitBlock(BlockSyntax node)
         {
             var visited = (BlockSyntax)base.VisitBlock(node)!;
-            return visited.WithStatements(Flatten(visited.Statements));
+            if (!visited.Statements.Any(IsSplice))
+                return visited;
+
+            var block = visited.WithStatements(Flatten(visited.Statements));
+            if (block.Statements.Count == 0 || (EndsLine(block.OpenBraceToken) && EndsLine(block.CloseBraceToken.GetPreviousToken())))
+                return block;
+
+            var statements = block.Statements;
+            var first = statements[0].WithLeadingTrivia(statements[0].GetLeadingTrivia().SkipWhile(t => t.IsKind(SyntaxKind.WhitespaceTrivia)));
+            statements = statements.Replace(statements[0], first);
+            var last = statements[^1];
+            if (!EndsLine(last.GetLastToken()))
+            {
+                statements = statements.Replace(last, last.WithTrailingTrivia(
+                    last.GetTrailingTrivia().Where(t => !t.IsKind(SyntaxKind.WhitespaceTrivia)).Append(SyntaxFactory.ElasticCarriageReturnLineFeed)));
+            }
+
+            return GeneratedCodeFormatter.Mark(block
+                .WithOpenBraceToken(block.OpenBraceToken.WithTrailingTrivia(SyntaxFactory.ElasticCarriageReturnLineFeed))
+                .WithStatements(statements)
+                .WithCloseBraceToken(block.CloseBraceToken.WithLeadingTrivia(SyntaxFactory.ElasticMarker)));
         }
+
+        public override SyntaxNode? VisitCompilationUnit(CompilationUnitSyntax node)
+        {
+            var visited = (CompilationUnitSyntax)base.VisitCompilationUnit(node)!;
+            return visited.Members.Any(m => m is GlobalStatementSyntax { Statement: var statement } && IsSplice(statement))
+                ? visited.WithMembers(SyntaxFactory.List(visited.Members.SelectMany(member =>
+                    member is GlobalStatementSyntax { Statement: BlockSyntax block } && IsSplice(block)
+                        ? block.Statements.Select(s => (MemberDeclarationSyntax)SyntaxFactory.GlobalStatement(s))
+                        : [member])))
+                : visited;
+        }
+
+        private static bool IsSplice(StatementSyntax statement) => statement.HasAnnotations(SpliceAnnotationKind);
+
+        private static bool EndsLine(SyntaxToken token) => token.TrailingTrivia.Any(t => t.IsKind(SyntaxKind.EndOfLineTrivia));
 
         public override SyntaxNode? VisitSwitchSection(SwitchSectionSyntax node)
         {

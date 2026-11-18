@@ -80,6 +80,104 @@ public sealed class InlineMethodPositionTests
     }
 
     [Fact]
+    public async Task TopLevelStatements_TakeTheLocalsAndStatementsAsStatementsOfTheirOwn()
+    {
+        using var ws = TestWorkspace.Create(
+            ("Util.cs", Lf("""
+                using System;
+
+                public static class Util
+                {
+                    public static int Sq(int x) => x * x;
+
+                    public static void Report(string label, int value)
+                    {
+                        var line = label + "=" + value;
+                        Console.WriteLine(line);
+                    }
+                }
+                """)),
+            ("Program.cs", Lf("""
+                using System;
+
+                var counter = 0;
+                int Next() { counter++; return counter; }
+
+                var y = Util.Sq(Next());
+                if (Util.Sq(Next()) > 0)
+                    Console.WriteLine("pos");
+                int Compute() { return Util.Sq(Next()); }
+                var line = "keep";
+                Util.Report("a", Next());
+                Util.Report(line, y + Compute());
+                """)));
+
+        var sq = await InlineAsync(ws, "Util.cs", "Sq");
+        var report = await InlineAsync(ws, "Util.cs", "Report");
+
+        Assert.True(sq.Success, sq.Error?.Message);
+        Assert.Null(sq.Warnings);
+        Assert.True(report.Success, report.Error?.Message);
+        Assert.Null(report.Warnings);
+        Assert.Equal(Lf("""
+            using System;
+
+            var counter = 0;
+            int Next() { counter++; return counter; }
+
+            int x = Next();
+            var y = x * x;
+            int x1 = Next();
+            if (x1 * x1 > 0)
+                Console.WriteLine("pos");
+            int Compute()
+            {
+                int x2 = Next();
+                return x2 * x2;
+            }
+            var line = "keep";
+            var line1 = "a" + "=" + Next();
+            Console.WriteLine(line1);
+            var line2 = line + "=" + (y + Compute());
+            Console.WriteLine(line2);
+            """), ws.ReadFile("Program.cs"));
+        // A test project is a library, where top-level statements are an error (CS8805) of their own.
+        Assert.DoesNotContain(ws.GetDiskCompilationErrors(), e => !e.Contains("CS8805", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task ABlockOnOneLine_IsLaidOutWhenItGainsStatements()
+    {
+        using var ws = TestWorkspace.Create(("C.cs", Lf("""
+            internal class C
+            {
+                private int _n;
+                private int Next() => ++_n;
+                private static int Sq(int x) => x * x;
+
+                public int OneLiner() { return Sq(Next()); }
+            }
+            """)));
+
+        var result = await InlineAsync(ws, "C.cs", "Sq");
+
+        Assert.True(result.Success, result.Error?.Message);
+        Assert.Equal(Lf("""
+            internal class C
+            {
+                private int _n;
+                private int Next() => ++_n;
+
+                public int OneLiner()
+                {
+                    int x = Next();
+                    return x * x;
+                }
+            }
+            """), ws.ReadFile("C.cs"));
+    }
+
+    [Fact]
     public async Task VoidCallInAnEmbeddedStatement_BecomesItsSingleStatementOrABlock()
     {
         const string source = """

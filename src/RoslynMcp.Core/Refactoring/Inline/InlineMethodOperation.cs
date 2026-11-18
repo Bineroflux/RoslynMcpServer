@@ -431,7 +431,8 @@ public sealed class InlineMethodOperation : RefactoringOperationBase<InlineMetho
                 else
                 {
                     // The statement keeps its indentation after the locals, which take its leading comments.
-                    var indentation = statement.GetLeadingTrivia().LastOrDefault(t => t.IsKind(SyntaxKind.WhitespaceTrivia));
+                    var leading = statement.GetLeadingTrivia();
+                    var indentation = leading.Count > 0 && leading[^1].IsKind(SyntaxKind.WhitespaceTrivia) ? [leading[^1]] : SyntaxTriviaList.Empty;
                     replacement.Add(((StatementSyntax)rewritten).WithLeadingTrivia(indentation));
                 }
 

@@ -445,11 +445,8 @@ internal sealed class InlineCallPlanner
             return "its statement (a loop condition or another construct) would evaluate the locals only once";
         }
 
-        if (statement.Parent is LabeledStatementSyntax ||
-            (statement.Parent is GlobalStatementSyntax && statement is LocalDeclarationStatementSyntax))
-        {
-            return "its statement can't be preceded by others";
-        }
+        if (statement.Parent is LabeledStatementSyntax)
+            return "its statement has a label, which the locals can't precede";
 
         var (conditional, repeated) = EvaluationOrder.Context(invocation, statement);
         if (conditional || repeated)

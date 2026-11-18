@@ -3,7 +3,7 @@
 #
 # The base version lives in src/Directory.Build.props (<VersionPrefix>). This script
 # appends a '-local' suffix so locally-installed dev builds are clearly distinguishable
-# from released packages — e.g. base 0.5.0 -> installed 0.5.0-local. A normal
+# from released packages — e.g. base 0.6.0 -> installed 0.6.0-local. A normal
 # `dotnet pack` (no suffix) still produces the clean release version.
 
 $ErrorActionPreference = 'Stop'

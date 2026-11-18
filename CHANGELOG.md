@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased (0.5.0)]
+## [Unreleased (0.6.0)]
 
 ### Added
 - **Standalone `.cs` file support** — any tool's `solutionPath` now also accepts a single `.cs` file (a .NET 10 "file-based program" you'd launch with `dotnet run file.cs`), with or without `#:` directives (`#:package`, `#:project`, `#:sdk`, `#:property`). The SDK itself turns the file into a project: the server calls `dotnet run-api` (the same mechanism Roslyn's own language server uses) to get the exact virtual project, then loads it through the normal MSBuildWorkspace pipeline. A standalone file therefore behaves like a real project — it gets the SDK's **default analyzers and source generators** (so `[GeneratedRegex]` and friends work even with no directives), `#:package` references resolve, `#:project` references load as **source** projects (go-to-definition / find-references cross into them), and diagnostics match `dotnet build`/`dotnet run`. Editing a file's `#:` directives rebuilds the project; editing only its code updates incrementally. The project is materialized in place — at `<entry>.cs.csproj` in the entry file's directory, exactly where the SDK/LSP put it — so the entire repo MSBuild context (`Directory.Build.props`/`.targets`, `global.json`, `NuGet.config`, `Directory.Packages.props`) is honored by construction, not approximated. That wrapper is git-ignored (best-effort, via the repo's local `.git/info/exclude`, so no tracked `.gitignore` is touched), is deleted immediately once loaded, and is the only thing written into your tree — build output goes to the SDK's own artifacts location, same as `dotnet run`. If the SDK can't produce a project (e.g. `dotnet run-api` unavailable) the server falls back to a framework-only in-memory workspace so the file still loads.
@@ -25,7 +25,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - Workspace load now tolerates per-project failures the way the VS IDE does — NuGet restore problems (e.g. NU1903/NU1904 advisories escalated to errors) no longer abort the whole load; it fails only when no project loads at all.
 - External file changes detected by the watcher now wait for any in-flight tool call to finish before updating the solution, so a background edit can't change the code mid-operation.
 - Default idle cache TTL raised from 5 to 20 minutes to cover typical "step away" gaps without a cold reload.
-- The package version is centralized in `src/Directory.Build.props` (now `0.5.0`); `install-local.ps1` reads that prefix and appends a `-local` suffix, so dev builds (`0.5.0-local`) stay distinguishable from released packages.
+- The package version is centralized in `src/Directory.Build.props` (now `0.6.0`); `install-local.ps1` reads that prefix and appends a `-local` suffix, so dev builds (`0.6.0-local`) stay distinguishable from released packages.
 - A project is now fully compiled at load time so the reported `workspaceLoadMs` reflects the real cold-load cost rather than deferring it to the first query.
 
 ### Fixed

@@ -78,6 +78,10 @@ public sealed class RenameSymbolOperation : RefactoringOperationBase<RenameSymbo
         // Find the symbol
         var (symbol, document) = await FindSymbolAsync(@params, cancellationToken);
 
+        // renameFile is about the file that declares the type, which is not the file the
+        // symbol was found in when the caller pointed at a usage elsewhere.
+        document = GetFileNamedAfterType(symbol) ?? document;
+
         // Validate rename is allowed
         ValidateRename(symbol, @params);
 
@@ -228,6 +232,18 @@ public sealed class RenameSymbolOperation : RefactoringOperationBase<RenameSymbo
 
         return result;
     }
+
+    /// <summary>
+    /// For a type, the document among its declarations whose file is named after it (the
+    /// one <c>renameFile</c> renames); otherwise null.
+    /// </summary>
+    private Document? GetFileNamedAfterType(ISymbol symbol) =>
+        symbol is INamedTypeSymbol
+            ? symbol.Locations
+                .Where(location => location.IsInSource)
+                .Select(location => Context.Solution.GetDocument(location.SourceTree))
+                .FirstOrDefault(d => d?.FilePath != null && Path.GetFileNameWithoutExtension(d.FilePath) == symbol.Name)
+            : null;
 
     /// <summary>
     /// Merges the commit's file lists with the outcome of the file rename. The commit

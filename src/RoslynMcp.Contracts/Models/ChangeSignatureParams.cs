@@ -56,7 +56,7 @@ public sealed class ParameterChange
 
     /// <summary>
     /// The default value as a C# expression. For an existing parameter: null keeps its default,
-    /// an empty string removes it. A new parameter with a default value is left out of the
+    /// an empty string removes it (calls that left the argument out then pass the old default). A new parameter with a default value is left out of the
     /// existing calls; one without gets a <c>default /* TODO */</c> placeholder in them.
     /// </summary>
     public string? DefaultValue { get; init; }

@@ -91,7 +91,7 @@ public sealed class ChangeSignatureTool : IToolHandler
                         defaultValue = new
                         {
                             type = "string",
-                            description = "Default value as a C# expression. For an existing parameter, leave out to keep its default and give \"\" to remove it. A new parameter with a default is left out of existing calls; one without gets a 'default /* TODO */' placeholder in them (listed in warnings)."
+                            description = "Default value as a C# expression. For an existing parameter, leave out to keep its default and give \"\" to remove it (calls that left the argument out then pass the old default). A new parameter with a default is left out of existing calls; one without gets a 'default /* TODO */' placeholder in them (listed in warnings)."
                         },
                         newPosition = new
                         {

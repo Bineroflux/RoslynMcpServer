@@ -1,7 +1,9 @@
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using Microsoft.CodeAnalysis.Editing;
 using Microsoft.CodeAnalysis.FindSymbols;
+using Microsoft.CodeAnalysis.Simplification;
 using RoslynMcp.Contracts.Enums;
 using RoslynMcp.Contracts.Errors;
 using RoslynMcp.Contracts.Models;
@@ -716,15 +718,137 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
         var parameters = invoked.Parameters;
         var original = invocation.ArgumentList;
 
+        // A parameter whose default value the request removes keeps meaning what it meant in a
+        // call that left it out: the call passes the default of the member it binds to.
+        var oldDefaults = new Dictionary<int, ExpressionSyntax>();
+        foreach (var parameter in newParameters)
+        {
+            if (parameter is { OriginalIndex: { } index, KeepsDefault: false, NewDefault: null, Type: null } &&
+                index - offset >= 0 &&
+                await OldDefaultAsync(parameters[index - offset], model, original.SpanStart, location.Document, cancellationToken) is { } value)
+            {
+                oldDefaults[index] = value;
+            }
+        }
+
         // A new parameter with a default value is left out, unless an argument after it cannot
         // be passed by name then (an expanded params argument): such a call passes the default.
-        var passNewOptional = BuildArgumentList(original, parameters, offset, newParameters, renames, passNewOptional: false) == null;
-        var rewrittenHere = BuildArgumentList(original, parameters, offset, newParameters, renames, passNewOptional);
+        var passNewOptional = BuildArgumentList(original, parameters, offset, newParameters, renames, oldDefaults, passNewOptional: false) == null;
+        var rewrittenHere = BuildArgumentList(original, parameters, offset, newParameters, renames, oldDefaults, passNewOptional);
         if (rewrittenHere == null || rewrittenHere.IsEquivalentTo(original))
             return false; // nothing to change, or a call it cannot rewrite
 
         return edits.Add(location.Document.Id, original, rewritten =>
-            BuildArgumentList((ArgumentListSyntax)rewritten, parameters, offset, newParameters, renames, passNewOptional) ?? rewritten);
+            BuildArgumentList((ArgumentListSyntax)rewritten, parameters, offset, newParameters, renames, oldDefaults, passNewOptional) ?? rewritten);
+    }
+
+    /// <summary>
+    /// The default value <paramref name="parameter"/> has, written for a call at
+    /// <paramref name="position"/>: its expression as the declaration writes it, with the types
+    /// and members it names qualified for the simplifier so they mean the same at the call; or,
+    /// when it names something the call cannot access (a private constant), its value as a
+    /// literal. Null when the parameter has no default value.
+    /// </summary>
+    private static async Task<ExpressionSyntax?> OldDefaultAsync(
+        IParameterSymbol parameter,
+        SemanticModel callModel,
+        int position,
+        Document callDocument,
+        CancellationToken cancellationToken)
+    {
+        if (!parameter.HasExplicitDefaultValue)
+            return null;
+
+        var solution = callDocument.Project.Solution;
+        foreach (var reference in parameter.OriginalDefinition.DeclaringSyntaxReferences)
+        {
+            if (await reference.GetSyntaxAsync(cancellationToken) is ParameterSyntax { Default.Value: { } written } &&
+                solution.GetDocument(reference.SyntaxTree) is { } declaringDocument &&
+                await declaringDocument.GetSemanticModelAsync(cancellationToken) is { } declaringModel)
+            {
+                return QualifiedForCall(written, declaringModel, callModel, position, cancellationToken)
+                    ?? ConstantArgument(parameter, callModel, position, callDocument);
+            }
+        }
+
+        return ConstantArgument(parameter, callModel, position, callDocument);
+    }
+
+    /// <summary>
+    /// <paramref name="written"/> with each type and member it names written fully qualified
+    /// and marked for the simplifier, or null when it names something that cannot be written
+    /// at <paramref name="position"/> (not accessible there, a type parameter of the member, or
+    /// not a type, namespace or static member, such as <c>nameof</c>).
+    /// </summary>
+    private static ExpressionSyntax? QualifiedForCall(
+        ExpressionSyntax written,
+        SemanticModel declaringModel,
+        SemanticModel callModel,
+        int position,
+        CancellationToken cancellationToken)
+    {
+        var replacements = new Dictionary<SyntaxNode, SyntaxNode>();
+        foreach (var name in written.DescendantNodesAndSelf().OfType<SimpleNameSyntax>())
+        {
+            var symbol = declaringModel.GetSymbolInfo(name, cancellationToken).Symbol;
+            if (symbol is ITypeParameterSymbol or not (INamespaceOrTypeSymbol or { IsStatic: true }) ||
+                (symbol is not INamespaceSymbol && !callModel.IsAccessible(position, symbol)))
+            {
+                return null;
+            }
+
+            // The right side of a dot is reached through its left side.
+            if (name.Parent is MemberAccessExpressionSyntax access && access.Name == name ||
+                name.Parent is QualifiedNameSyntax qualified && qualified.Right == name ||
+                name.Parent is AliasQualifiedNameSyntax alias && alias.Name == name)
+            {
+                continue;
+            }
+
+            var text = symbol is INamespaceOrTypeSymbol namespaceOrType
+                ? namespaceOrType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)
+                : $"{symbol.ContainingType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)}.{IdentifierNames.Token(symbol.Name).Text}";
+            // A name in a type (default(T), a cast's type) has to stay a name there.
+            ExpressionSyntax qualifiedName = SyntaxFacts.IsInNamespaceOrTypeContext(name)
+                ? SyntaxFactory.ParseName(text)
+                : SyntaxFactory.ParseExpression(text);
+            replacements[name] = qualifiedName.WithTriviaFrom(name).WithAdditionalAnnotations(Simplifier.Annotation);
+        }
+
+        return written.ReplaceNodes(replacements.Keys, (original, _) => replacements[original]).WithoutTrivia();
+    }
+
+    /// <summary>
+    /// The constant default value of <paramref name="parameter"/> as a literal: an enum value
+    /// by its member's name where there is one, <c>null</c> or <c>default</c> for a null value.
+    /// </summary>
+    private static ExpressionSyntax ConstantArgument(IParameterSymbol parameter, SemanticModel callModel, int position, Document callDocument)
+    {
+        var value = parameter.ExplicitDefaultValue;
+        var type = parameter.Type;
+        if (value == null)
+        {
+            return type.IsReferenceType || type.OriginalDefinition.SpecialType == SpecialType.System_Nullable_T
+                ? SyntaxFactory.LiteralExpression(SyntaxKind.NullLiteralExpression)
+                : SyntaxFactory.LiteralExpression(SyntaxKind.DefaultLiteralExpression, SyntaxFactory.Token(SyntaxKind.DefaultKeyword));
+        }
+
+        var enumType = type.OriginalDefinition.SpecialType == SpecialType.System_Nullable_T
+            ? ((INamedTypeSymbol)type).TypeArguments[0]
+            : type;
+        var generator = SyntaxGenerator.GetGenerator(callDocument);
+        if (enumType.TypeKind == TypeKind.Enum)
+        {
+            var typeName = enumType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+            var member = enumType.GetMembers().OfType<IFieldSymbol>().FirstOrDefault(f =>
+                f.HasConstantValue && Equals(f.ConstantValue, value) && callModel.IsAccessible(position, f));
+            var expression = member != null
+                ? SyntaxFactory.ParseExpression($"{typeName}.{IdentifierNames.Token(member.Name).Text}")
+                : SyntaxFactory.ParseExpression($"({typeName})({((ExpressionSyntax)generator.LiteralExpression(value)).ToFullString()})");
+            return expression.WithAdditionalAnnotations(Simplifier.Annotation);
+        }
+
+        return (ExpressionSyntax)generator.LiteralExpression(value);
     }
 
     /// <summary>
@@ -733,9 +857,10 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
     /// argument is renamed in place, and only positional arguments move, to the new positions
     /// of their parameters. A new parameter with a default value is left out (unless
     /// <paramref name="passNewOptional"/>), so the arguments after it are named. A parameter the
-    /// call does not pass and has to (a new one without a default value, or one that lost its
-    /// default value) gets a <c>TODO</c> placeholder: positional where every argument before it
-    /// is positional and in position, otherwise named at the end. From the first argument out of
+    /// call does not pass and has to gets an argument: one that lost its default value gets that
+    /// value (from <paramref name="oldDefaults"/>), a new one without a default value a
+    /// <c>TODO</c> placeholder; positional where every argument before it is positional and in
+    /// position, otherwise named at the end. From the first argument out of
     /// position on, every argument is named (CS8323). Null when the call cannot be rewritten (an
     /// argument names no parameter, the receiver of an extension-form call moves, or an expanded
     /// <c>params</c> argument would need a name).
@@ -746,6 +871,7 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
         int offset,
         IReadOnlyList<NewParameter> newParameters,
         IReadOnlyList<string?> renames,
+        IReadOnlyDictionary<int, ExpressionSyntax> oldDefaults,
         bool passNewOptional)
     {
         // A call in extension form passes the `this` parameter as the receiver, which has to stay first.
@@ -804,10 +930,12 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
                 continue; // a new optional parameter
             }
 
-            var argument = parameter.NewDefault == null
-                ? SyntaxFactory.Argument(SyntaxFactory.ParseExpression($"default /* TODO: {NameAt(position)} */"))
-                    .WithAdditionalAnnotations(new SyntaxAnnotation(PlaceholderAnnotationKind, NameAt(position)))
-                : SyntaxFactory.Argument(SyntaxFactory.ParseExpression(parameter.NewDefault));
+            var argument = parameter.NewDefault != null
+                ? SyntaxFactory.Argument(SyntaxFactory.ParseExpression(parameter.NewDefault))
+                : parameter.OriginalIndex is { } kept && oldDefaults.TryGetValue(kept, out var oldDefault)
+                    ? SyntaxFactory.Argument(oldDefault)
+                    : SyntaxFactory.Argument(SyntaxFactory.ParseExpression($"default /* TODO: {NameAt(position)} */"))
+                        .WithAdditionalAnnotations(new SyntaxAnnotation(PlaceholderAnnotationKind, NameAt(position)));
             var inPositionPrefix = entries.TakeWhile((e, i) => e.Argument.NameColon == null && e.Position == i).Count();
             entries.Insert(position <= inPositionPrefix ? position : entries.Count, new CallArgument(argument, position, IsNew: true));
         }

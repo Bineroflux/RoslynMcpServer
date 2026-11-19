@@ -205,7 +205,7 @@ public sealed class ChangeSignatureChangeListTests
     }
 
     [Fact]
-    public async Task EmptyDefaultValue_RemovesTheDefault_AndCallsThatLeftItOutGetAPlaceholder()
+    public async Task EmptyDefaultValue_RemovesTheDefault_AndCallsThatLeftItOutPassIt()
     {
         using var ws = TestWorkspace.Create(("Calc.cs", Source));
 
@@ -216,11 +216,31 @@ public sealed class ChangeSignatureChangeListTests
         Assert.True(result.Success, result.Error?.Message);
         var text = ws.ReadFile("Calc.cs");
         Assert.Contains("public int Mix(int a, int b, int c) =>", text);
-        Assert.Contains("new Calc().Mix(1, default /* TODO: b */, default /* TODO: c */);", text);
-        Assert.Contains("new Calc().Mix(1, 5, default /* TODO: c */);", text);
-        Assert.Contains("new Calc().Mix(1, default /* TODO: b */, c: 7);", text);
-        Assert.Equal(4, result.Warnings!.Count);
-        Assert.Empty(ws.GetDiskCompilationErrors());
+        Assert.Contains("new Calc().Mix(1, 2, 3);", text);
+        Assert.Contains("new Calc().Mix(1, 5, 3);", text);
+        Assert.Contains("new Calc().Mix(1, 2, c: 7);", text);
+        Assert.Null(result.Warnings);
+        Assert.Equal(123, Run(ws, "CallMixDefault"));
+        Assert.Equal(153, Run(ws, "CallMixB"));
+        Assert.Equal(127, Run(ws, "CallMixNamed"));
+    }
+
+    [Fact]
+    public async Task EmptyDefaultValue_WithANewType_LeavesAPlaceholder()
+    {
+        // The old default need not fit the new type.
+        using var ws = TestWorkspace.Create(("Calc.cs", Source));
+
+        var result = await ChangeAsync(ws, "Mix",
+            new ParameterChange { OriginalName = "b", DefaultValue = "" },
+            new ParameterChange { OriginalName = "c", Type = "long", DefaultValue = "" });
+
+        Assert.True(result.Success, result.Error?.Message);
+        var text = ws.ReadFile("Calc.cs");
+        Assert.Contains("public int Mix(int a, int b, long c) =>", text);
+        Assert.Contains("new Calc().Mix(1, 2, default /* TODO: c */);", text);
+        Assert.Contains("new Calc().Mix(1, 2, c: 7);", text);
+        Assert.Equal(2, result.Warnings!.Count(w => w.Contains("TODO: replace the placeholder", StringComparison.Ordinal)));
     }
 
     [Fact]

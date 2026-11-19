@@ -212,6 +212,60 @@ public sealed class InlineMethodTests
     }
 
     [Fact]
+    public async Task GenericLocalFunctionsOfTheBody_AreCopied_TheirNamesAndTypeParametersRenamedOnAClash()
+    {
+        const string source = """
+            using System.Collections.Generic;
+
+            public static class Program
+            {
+                private static readonly List<string> Log = new();
+
+                private static void Record(int value)
+                {
+                    Log.Add(Describe(value) + Describe("x"));
+                    string Describe<T>(T item) => typeof(T).Name + ":" + item + value;
+                }
+
+                private static void Twice<T>(T item)
+                {
+                    Record(1);
+                    Log.Add(Describe(item));
+                    static string Describe(T item) => "outer " + item;
+                }
+
+                public static string Run()
+                {
+                    Log.Clear();
+                    Record(2);
+                    Twice("y");
+                    return string.Join(",", Log);
+                }
+            }
+            """;
+        using var ws = TestWorkspace.Create(("Program.cs", Lf(source)));
+        var before = Run(ws, "Program", "Run");
+
+        var result = await InlineAsync(ws, "Program.cs", "Record");
+
+        Assert.True(result.Success, result.Error?.Message);
+        Assert.Equal(2, result.ReferencesUpdated);
+        Assert.Null(result.Warnings);
+        Assert.Equal(before, Run(ws, "Program", "Run"));
+        var text = ws.ReadFile("Program.cs");
+        Assert.Contains("""
+                    Log.Add(Describe(2) + Describe("x"));
+                    string Describe<T>(T item) => typeof(T).Name + ":" + item + 2;
+            """.ReplaceLineEndings("\n"), text);
+        Assert.Contains("""
+                    Log.Add(Describe1(1) + Describe1("x"));
+                    string Describe1<T1>(T1 item1) => typeof(T1).Name + ":" + item1 + 1;
+                    Log.Add(Describe(item));
+            """.ReplaceLineEndings("\n"), text);
+        Assert.DoesNotContain("Record", text);
+    }
+
+    [Fact]
     public async Task NamedArgumentsDefaultsParamsAndCasts_AreSubstituted()
     {
         const string source = """

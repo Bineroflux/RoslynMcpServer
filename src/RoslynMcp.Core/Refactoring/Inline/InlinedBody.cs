@@ -165,6 +165,7 @@ internal sealed class InlinedBody
                 ForEachStatementSyntax f => (Model.GetDeclaredSymbol(f, cancellationToken), f.Identifier),
                 CatchDeclarationSyntax c when !c.Identifier.IsKind(SyntaxKind.None) => (Model.GetDeclaredSymbol(c, cancellationToken), c.Identifier),
                 LocalFunctionStatementSyntax l => (Model.GetDeclaredSymbol(l, cancellationToken), l.Identifier),
+                TypeParameterSyntax t => (Model.GetDeclaredSymbol(t, cancellationToken), t.Identifier),
                 ParameterSyntax p => (Model.GetDeclaredSymbol(p, cancellationToken), p.Identifier),
                 QueryClauseSyntax or QueryContinuationSyntax => (Model.GetDeclaredSymbol(node, cancellationToken), QueryIdentifier(node)),
                 _ => (null, default)
@@ -304,6 +305,14 @@ internal sealed class InlinedBody
         if (symbol == null)
             return null;
 
+        // What the body declares itself (a generic local function is used constructed).
+        if (declared.Contains(symbol.OriginalDefinition))
+        {
+            if (node is SimpleNameSyntax own)
+                _declaredTokens[own.Identifier] = symbol.OriginalDefinition;
+            return null;
+        }
+
         if (symbol is ITypeSymbol type)
         {
             if (type is ITypeParameterSymbol typeParameter)
@@ -331,12 +340,6 @@ internal sealed class InlinedBody
 
         if (symbol is IParameterSymbol parameter && SymbolEqualityComparer.Default.Equals(parameter.ContainingSymbol, Method))
             return (NameKind.Parameter, parameter);
-
-        if (declared.Contains(symbol))
-        {
-            _declaredTokens[name.Identifier] = symbol;
-            return null;
-        }
 
         if (symbol is not (IFieldSymbol or IPropertySymbol or IMethodSymbol or IEventSymbol) || !IsMemberAccessByName(name))
             return null;

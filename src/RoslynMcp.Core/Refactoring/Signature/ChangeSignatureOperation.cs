@@ -27,7 +27,8 @@ namespace RoslynMcp.Core.Refactoring.Signature;
 /// renames the parameter at that position in every member (and its uses in the body and named
 /// arguments at the calls); otherwise each member keeps its own name. A kept parameter keeps its
 /// own type, default value, modifiers and attributes unless the request changes them. The
-/// compiler errors the change leaves in the affected documents are reported as warnings.
+/// compiler errors the change leaves, in any project that compiles or depends on what changed,
+/// are reported as warnings.
 /// </remarks>
 public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSignatureParams>
 {
@@ -193,7 +194,7 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
 
         // What only a person can fix: method groups converted to delegates, a removed parameter
         // the body still uses, the TODO placeholders passed for parameters without a default value.
-        var errors = await IntroducedErrors.FindAsync(
+        var errors = await IntroducedErrors.FindInProjectsAsync(
             solution, newSolution, family.AffectedDocuments(solution, references), cancellationToken);
         var placeholders = await FindPlaceholdersAsync(newSolution, callSites.Keys, cancellationToken);
         var warnings = errors == null && placeholders.Count == 0 ? null : (errors ?? []).Concat(placeholders).ToList();

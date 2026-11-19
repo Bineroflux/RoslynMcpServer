@@ -153,7 +153,7 @@ public sealed class IntroduceParameterOperation : RefactoringOperationBase<Intro
         var newSolution = await edits.ApplyAsync(solution, cancellationToken, warnings: warnings);
         var affected = edits.Documents.Concat(references.Select(r => r.Document.Id)).Distinct().ToList();
         warnings.AddRange(await FindPlaceholdersAsync(newSolution, callSites.Keys, cancellationToken));
-        warnings.AddRange(await IntroducedErrors.FindAsync(solution, newSolution, affected, cancellationToken, matchLines: false) ?? []);
+        warnings.AddRange(await IntroducedErrors.FindInProjectsAsync(solution, newSolution, affected, cancellationToken, matchLines: false) ?? []);
 
         var newSignature = containingMethod.Identifier.Text +
             (await newSolution.GetDocument(document.Id)!.GetSyntaxRootAsync(cancellationToken))!

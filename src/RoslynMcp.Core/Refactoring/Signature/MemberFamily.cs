@@ -49,9 +49,10 @@ internal sealed class MemberFamily
     }
 
     /// <summary>
-    /// The documents a change of the family's signature can break: where the members are
-    /// declared, where their types are declared (an implementing or derived type), and where
-    /// they are referenced.
+    /// The documents a change of the family's signature edits or that refer to the family:
+    /// where the members are declared, where their types are declared (an implementing or
+    /// derived type), and where they are referenced. Their projects, and those depending on
+    /// them, are where the change can break code (see <see cref="IntroducedErrors.FindInProjectsAsync"/>).
     /// </summary>
     public IReadOnlyCollection<DocumentId> AffectedDocuments(Solution solution, IEnumerable<ReferenceLocation> references)
     {

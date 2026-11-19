@@ -13,7 +13,7 @@ namespace RoslynMcp.Core.Refactoring.Signature;
 /// Changes the return type of a method, or the type of a property or indexer, on the whole
 /// override / implementation family (see <see cref="MemberFamily"/>). Only the declarations
 /// change: return statements, bodies and callers are left alone, and the compiler errors that
-/// this causes in the affected documents are reported as warnings.
+/// this causes, in any project that compiles or depends on what changed, are reported as warnings.
 /// </summary>
 /// <remarks>
 /// <c>void</c> is allowed in both directions for methods (a method that now returns a value
@@ -151,7 +151,7 @@ public sealed class ChangeReturnTypeOperation : RefactoringOperationBase<ChangeR
 
         var affected = family.AffectedDocuments(solution, await family.FindReferencesAsync(solution, cancellationToken));
         var newSolution = await edits.ApplyAsync(solution, cancellationToken);
-        var warnings = await IntroducedErrors.FindAsync(solution, newSolution, affected, cancellationToken);
+        var warnings = await IntroducedErrors.FindInProjectsAsync(solution, newSolution, affected, cancellationToken);
 
         if (@params.Preview)
         {

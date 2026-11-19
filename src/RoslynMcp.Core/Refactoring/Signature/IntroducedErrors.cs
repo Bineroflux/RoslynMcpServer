@@ -51,6 +51,115 @@ internal static class IntroducedErrors
     }
 
     /// <summary>
+    /// The errors <paramref name="after"/> has and <paramref name="before"/> had not in every
+    /// document of the projects that compile one of <paramref name="affected"/> and of the
+    /// projects that depend on them, written and compared as <see cref="FindAsync"/> does. A
+    /// signature change can break code that never names the changed member: a <c>var</c> that
+    /// carries its new type on, an overload that now wins or is ambiguous, a type that
+    /// implements an interface through an inherited member.
+    /// </summary>
+    /// <remarks>
+    /// Each project's new compilation is checked once as a whole (which binds its files in
+    /// parallel); only the documents with errors in it are then compared with how they were
+    /// before, since an error elsewhere cannot be a new one. Errors in generated code are
+    /// located like <see cref="FindInGeneratedAsync"/> does; errors without a location (no
+    /// entry point left) are written <c>project: error id: message</c>.
+    /// </remarks>
+    /// <param name="before">The solution before the change.</param>
+    /// <param name="after">The solution after the change.</param>
+    /// <param name="affected">The documents the change edits or that refer to what it changes.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <param name="matchLines">As for <see cref="FindAsync"/>.</param>
+    public static async Task<IReadOnlyList<string>?> FindInProjectsAsync(
+        Solution before,
+        Solution after,
+        IEnumerable<DocumentId> affected,
+        CancellationToken cancellationToken,
+        bool matchLines = true)
+    {
+        var withErrors = new HashSet<DocumentId>();
+        var withGeneratedErrors = new HashSet<ProjectId>();
+        var unlocated = new List<string>();
+        foreach (var project in ProjectsToCheck(after, affected))
+        {
+            if (await project.GetCompilationAsync(cancellationToken) is not { } compilation)
+                continue;
+
+            var errors = compilation.GetDiagnostics(cancellationToken).Where(d => d.Severity == DiagnosticSeverity.Error).ToList();
+            foreach (var tree in errors.Select(e => e.Location.SourceTree).OfType<SyntaxTree>().Distinct())
+            {
+                if (after.GetDocumentId(tree) is { } id && after.GetDocument(id) != null)
+                    withErrors.Add(id);
+                else
+                    withGeneratedErrors.Add(project.Id);
+            }
+
+            if (errors.Any(e => e.Location.SourceTree == null))
+                unlocated.AddRange(await UnlocatedErrorsAsync(before.GetProject(project.Id), project, errors, cancellationToken));
+        }
+
+        var added = new List<string>();
+        if (withErrors.Count > 0)
+            added.AddRange(await FindAsync(before, after, withErrors, cancellationToken, matchLines) ?? []);
+        if (withGeneratedErrors.Count > 0)
+            added.AddRange(await FindInGeneratedAsync(before, after, withGeneratedErrors, _ => true, cancellationToken) ?? []);
+        added.AddRange(unlocated);
+
+        return added.Count == 0 ? null : added;
+    }
+
+    /// <summary>
+    /// The errors without a location among <paramref name="errors"/> (those of
+    /// <paramref name="project"/>'s new compilation) that <paramref name="previous"/> had not.
+    /// </summary>
+    private static async Task<IEnumerable<string>> UnlocatedErrorsAsync(
+        Project? previous,
+        Project project,
+        IReadOnlyList<Diagnostic> errors,
+        CancellationToken cancellationToken)
+    {
+        static string Text(Project project, Diagnostic diagnostic) =>
+            $"{project.FilePath ?? project.Name}: error {diagnostic.Id}: {diagnostic.GetMessage(CultureInfo.InvariantCulture)}";
+
+        var remaining = previous != null && await previous.GetCompilationAsync(cancellationToken) is { } compilation
+            ? compilation.GetDiagnostics(cancellationToken)
+                .Where(d => d.Severity == DiagnosticSeverity.Error && d.Location.SourceTree == null)
+                .Select(d => Text(project, d))
+                .ToList()
+            : [];
+
+        var added = new List<string>();
+        foreach (var text in errors.Where(e => e.Location.SourceTree == null).Select(e => Text(project, e)))
+        {
+            if (!remaining.Remove(text))
+                added.Add(text);
+        }
+
+        return added;
+    }
+
+    /// <summary>
+    /// The projects compiling one of <paramref name="documents"/> (or another document of its
+    /// file, one per target framework) and those that depend on them.
+    /// </summary>
+    private static IEnumerable<Project> ProjectsToCheck(Solution solution, IEnumerable<DocumentId> documents)
+    {
+        var projects = new HashSet<ProjectId>();
+        foreach (var id in documents)
+        {
+            projects.Add(id.ProjectId);
+            if (solution.GetDocument(id)?.FilePath is { } path)
+                projects.UnionWith(solution.GetDocumentIdsWithFilePath(path).Select(linked => linked.ProjectId));
+        }
+
+        var graph = solution.GetProjectDependencyGraph();
+        foreach (var project in projects.ToList())
+            projects.UnionWith(graph.GetProjectsThatTransitivelyDependOnThisProject(project));
+
+        return projects.Select(solution.GetProject).OfType<Project>();
+    }
+
+    /// <summary>
     /// The errors in the source-generated documents of <paramref name="projects"/> that
     /// <paramref name="after"/> has and <paramref name="before"/> had not, located where the
     /// generated code's <c>#line</c> directives map them (a Razor component's errors in its

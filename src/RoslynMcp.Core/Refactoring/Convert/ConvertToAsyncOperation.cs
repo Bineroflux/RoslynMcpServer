@@ -181,7 +181,7 @@ public sealed class ConvertToAsyncOperation : RefactoringOperationBase<ConvertTo
             affected.UnionWith(solution.GetDocumentIdsWithFilePath(document.FilePath));
 
         warnings.AddRange(await NotAwaitedWarningsAsync(renamed, newSolution, edits.Documents, references.Hidden, returns, cancellationToken));
-        warnings.AddRange(await IntroducedErrors.FindAsync(solution, newSolution, affected, cancellationToken) ?? []);
+        warnings.AddRange(await IntroducedErrors.FindInProjectsAsync(solution, newSolution, affected, cancellationToken) ?? []);
 
         var toCommit = await WithTextChangesOnlyAsync(solution, newSolution, cancellationToken);
         if (@params.Preview)

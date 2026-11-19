@@ -289,6 +289,12 @@ public sealed class ConvertPropertyOperation : RefactoringOperationBase<ConvertP
             if (reference.Document.Id == document.Id && property.Span.Contains(name.Span))
                 continue;
 
+            if (GeneratedReferences.IsGenerated(reference, cancellationToken))
+            {
+                warnings.Add(GeneratedReferences.Warning(reference.Location, $"the use of '{field.Name}'", $"changed to '{propertySymbol.Name}'"));
+                continue;
+            }
+
             var where = Where(reference);
             if (!name.IsPartOfStructuredTrivia() && !IsInNameOf(name))
             {

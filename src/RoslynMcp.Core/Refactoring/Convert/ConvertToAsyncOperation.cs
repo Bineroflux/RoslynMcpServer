@@ -99,6 +99,7 @@ public sealed class ConvertToAsyncOperation : RefactoringOperationBase<ConvertTo
 
         var warnings = new List<string>();
         var newName = method.Name;
+        var generatedReferences = (await SymbolFinder.FindReferencesAsync(method, solution, cancellationToken)).SelectMany(r => r.Locations);
         if (@params.RenameToAsync && !method.Name.EndsWith("Async", StringComparison.Ordinal))
         {
             if (SymbolEqualityComparer.Default.Equals(model.Compilation.GetEntryPoint(cancellationToken), method))
@@ -180,6 +181,11 @@ public sealed class ConvertToAsyncOperation : RefactoringOperationBase<ConvertTo
         if (document.FilePath != null)
             affected.UnionWith(solution.GetDocumentIdsWithFilePath(document.FilePath));
 
+        warnings.AddRange(GeneratedReferences.Warnings(
+            generatedReferences,
+            $"the reference to '{method.ToDisplayString()}'",
+            newName == method.Name ? "awaited" : $"renamed to '{newName}' or awaited",
+            cancellationToken));
         warnings.AddRange(await NotAwaitedWarningsAsync(renamed, newSolution, edits.Documents, references.Hidden, returns, cancellationToken));
         warnings.AddRange(await IntroducedErrors.FindInProjectsAsync(solution, newSolution, affected, cancellationToken) ?? []);
 
@@ -621,7 +627,7 @@ public sealed class ConvertToAsyncOperation : RefactoringOperationBase<ConvertTo
     /// through one document only (the declaring one for the method's own file), so all edits of a
     /// file go to the same document; a call that document does not compile (another target
     /// framework's <c>#if</c> branch) is not edited but listed in <see cref="References.Hidden"/>.
-    /// Calls in generated code are not edited.
+    /// Calls in generated code are not edited (see <see cref="GeneratedReferences"/>).
     /// </summary>
     private static async Task<References> FindReferencesAsync(
         IMethodSymbol method,
@@ -643,12 +649,8 @@ public sealed class ConvertToAsyncOperation : RefactoringOperationBase<ConvertTo
         {
             var path = location.Document.FilePath ?? location.Document.Name;
             var span = location.Location.SourceSpan;
-            if (!seen.Add((path, span)) ||
-                location.Location.SourceTree is not { } tree ||
-                GeneratedCode.IsGenerated(tree, cancellationToken))
-            {
-                continue;
-            }
+            if (!seen.Add((path, span)) || GeneratedReferences.IsGenerated(location, cancellationToken))
+                continue; // a call in generated code is reported on its own
 
             var canonical = location.Document.FilePath == null
                 ? solution.GetDocument(location.Document.Id)

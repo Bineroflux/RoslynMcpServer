@@ -80,6 +80,13 @@ public sealed class RenameSymbolOperation : RefactoringOperationBase<RenameSymbo
         // Find all references before rename
         var references = await ReferenceTracker.FindAllReferencesAsync(symbol, cancellationToken);
 
+        // The renamer does not rename references in generated code (a Razor component's C#).
+        AddWarnings(GeneratedReferences.Warnings(
+            references.ReferencesByDocument.Values.SelectMany(r => r),
+            $"the reference to '{symbol.ToDisplayString()}'",
+            $"renamed to '{@params.NewName}'",
+            cancellationToken));
+
         // Compute rename options
         var options = new SymbolRenameOptions(
             RenameOverloads: @params.RenameOverloads,

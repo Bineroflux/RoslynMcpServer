@@ -187,9 +187,10 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
         // counted once, for the file's first document.
         var references = await family.FindReferencesAsync(solution, cancellationToken);
         var callSites = new Dictionary<DocumentId, int>();
+        var inGeneratedCode = new List<string>();
         foreach (var location in references.Where(l => !l.IsImplicit))
         {
-            if (await TryAddCallSiteAsync(edits, location, family, newParameters, renames, cancellationToken) &&
+            if (await TryAddCallSiteAsync(edits, location, family, newParameters, renames, inGeneratedCode, cancellationToken) &&
                 places.Add(location.Document, location.Location.SourceSpan))
             {
                 var file = places.FirstDocument(location.Document);
@@ -208,7 +209,7 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
         var errors = await IntroducedErrors.FindInProjectsAsync(
             solution, newSolution, family.AffectedDocuments(solution, references), cancellationToken);
         var placeholders = await FindPlaceholdersAsync(solution, newSolution, callSites.Keys, cancellationToken);
-        var warnings = conflicts.Concat(errors ?? []).Concat(placeholders).ToList();
+        var warnings = conflicts.Concat(inGeneratedCode.Distinct()).Concat(errors ?? []).Concat(placeholders).ToList();
         if (methodSymbol.IsExtensionMethod && newParameters.FirstOrDefault()?.OriginalIndex != 0)
         {
             warnings.Insert(0,
@@ -719,7 +720,8 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
 
     /// <summary>
     /// Rewrites the arguments of a call to a family member found at <paramref name="location"/>.
-    /// Other references (method groups, <c>nameof</c>, crefs) are left alone.
+    /// Other references (method groups, <c>nameof</c>, crefs) are left alone, and so is a call in
+    /// generated code that would change, which <paramref name="inGeneratedCode"/> gets instead.
     /// </summary>
     private static async Task<bool> TryAddCallSiteAsync(
         SyntaxEdits edits,
@@ -727,6 +729,7 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
         MemberFamily family,
         IReadOnlyList<NewParameter> newParameters,
         IReadOnlyList<string?> renames,
+        ICollection<string> inGeneratedCode,
         CancellationToken cancellationToken)
     {
         var root = await location.Document.GetSyntaxRootAsync(cancellationToken);
@@ -792,13 +795,17 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
         if (chosen is not { } way)
             return false; // a call it cannot rewrite
 
-        if (unreduced == null)
-        {
-            if (Build(original, way)!.IsEquivalentTo(original))
-                return false; // nothing to change
+        if (unreduced == null && Build(original, way)!.IsEquivalentTo(original))
+            return false; // nothing to change
 
-            return edits.Add(location.Document.Id, original, rewritten => Build((ArgumentListSyntax)rewritten, way) ?? rewritten);
+        if (GeneratedReferences.IsGenerated(location, cancellationToken))
+        {
+            inGeneratedCode.Add(GeneratedReferences.Warning(location.Location, $"the call to '{invoked.ToDisplayString()}'", "rewritten"));
+            return false;
         }
+
+        if (unreduced == null)
+            return edits.Add(location.Document.Id, original, rewritten => Build((ArgumentListSyntax)rewritten, way) ?? rewritten);
 
         return edits.Add(location.Document.Id, invocation, rewritten =>
         {

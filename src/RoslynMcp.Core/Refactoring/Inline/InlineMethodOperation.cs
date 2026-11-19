@@ -123,7 +123,8 @@ public sealed class InlineMethodOperation : RefactoringOperationBase<InlineMetho
         var body = InlinedBody.Analyze(method, declaration, model, cancellationToken);
         var solution = Context.Solution;
 
-        var (calls, others) = await FindReferencesAsync(method, document, declaration, solution, cancellationToken);
+        var (calls, others, generated) = await FindReferencesAsync(method, document, declaration, solution, cancellationToken);
+        var inGeneratedCode = GeneratedReferences.Warnings(generated, $"the reference to '{method.ToDisplayString()}'", "inlined", cancellationToken);
         (Document Document, InvocationExpressionSyntax Invocation)? singleCall = @params.CallLine is { } callLine
             ? SelectCall(calls, others, @params.CallFile ?? @params.SourceFile, callLine, @params.CallColumn, method)
             : null;
@@ -183,7 +184,7 @@ public sealed class InlineMethodOperation : RefactoringOperationBase<InlineMetho
         var edited = plans.Select(p => p.Document.Id).Append(document.Id).Distinct().ToList();
         newSolution = await LinkedDocuments.SyncAsync(solution, newSolution, edited, cancellationToken);
 
-        var warnings = new List<string>();
+        var warnings = new List<string>(inGeneratedCode);
         warnings.AddRange(refused
             .Select(r => (r.Location, Text: $"not inlined: {r.Reason}"))
             .Concat(plans.SelectMany(p => p.Notes.Select(note => (Location: CallPlan.NameToken(p.Invocation).GetLocation(), Text: note))))
@@ -262,7 +263,7 @@ public sealed class InlineMethodOperation : RefactoringOperationBase<InlineMetho
     /// projects is read through one document only (the declaring one for the method's file), so all
     /// edits of a file go to the same document.
     /// </summary>
-    private static async Task<(List<(Document Document, InvocationExpressionSyntax Invocation)> Calls, List<Location> Others)> FindReferencesAsync(
+    private static async Task<(List<(Document Document, InvocationExpressionSyntax Invocation)> Calls, List<Location> Others, List<ReferenceLocation> Generated)> FindReferencesAsync(
         IMethodSymbol method,
         Document declaringDocument,
         MethodDeclarationSyntax declaration,
@@ -271,6 +272,7 @@ public sealed class InlineMethodOperation : RefactoringOperationBase<InlineMetho
     {
         var calls = new List<(Document, InvocationExpressionSyntax)>();
         var others = new List<Location>();
+        var generated = new List<ReferenceLocation>();
         var seen = new HashSet<(string, TextSpan)>();
         var locations = (await SymbolFinder.FindReferencesAsync(method, solution, cancellationToken))
             .SelectMany(r => r.Locations)
@@ -286,6 +288,14 @@ public sealed class InlineMethodOperation : RefactoringOperationBase<InlineMetho
             if (location.IsImplicit)
             {
                 // A use the compiler makes (deconstruction, foreach, collection initializer) keeps the method.
+                others.Add(location.Location);
+                continue;
+            }
+
+            if (GeneratedReferences.IsGenerated(location, cancellationToken))
+            {
+                // Generated code is not edited; the reference keeps the method.
+                generated.Add(location);
                 others.Add(location.Location);
                 continue;
             }
@@ -317,9 +327,7 @@ public sealed class InlineMethodOperation : RefactoringOperationBase<InlineMetho
                     ? node.Parent
                     : node;
 
-            if (callee?.Parent is InvocationExpressionSyntax invocation && invocation.Expression == callee &&
-                canonical != null &&
-                !GeneratedCode.IsGenerated(invocation.SyntaxTree, cancellationToken))
+            if (callee?.Parent is InvocationExpressionSyntax invocation && invocation.Expression == callee && canonical != null)
             {
                 calls.Add((canonical, invocation));
             }
@@ -329,7 +337,7 @@ public sealed class InlineMethodOperation : RefactoringOperationBase<InlineMetho
             }
         }
 
-        return (calls, others);
+        return (calls, others, generated);
     }
 
     private static (Document, InvocationExpressionSyntax) SelectCall(

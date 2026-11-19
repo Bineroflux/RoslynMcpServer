@@ -221,6 +221,12 @@ public sealed class EncapsulateFieldOperation : RefactoringOperationBase<Encapsu
             if (IdentifierNames.ValueText(newName) == name.Identifier.ValueText)
                 continue;
 
+            if (GeneratedReferences.IsGenerated(reference, cancellationToken))
+            {
+                warnings.Add(GeneratedReferences.Warning(reference.Location, $"the use of '{fieldName}'", $"changed to '{IdentifierNames.ValueText(newName)}'"));
+                continue;
+            }
+
             edits.Add(reference.Document.Id, name, rewritten =>
                 ((SimpleNameSyntax)rewritten).WithIdentifier(IdentifierNames.Token(newName).WithTriviaFrom(name.Identifier)));
             updated[reference.Document.Id] = updated.GetValueOrDefault(reference.Document.Id) + 1;

@@ -428,7 +428,11 @@ public sealed class SafeDeleteOperation : RefactoringOperationBase<SafeDeletePar
 
                 var path = location.Document.FilePath ?? location.Location.SourceTree?.FilePath ?? "";
                 if (seen.Add((path, location.Location.SourceSpan)))
-                    references.Add(BlockingReference.Create(path, location.Location, Kind(location), cancellationToken));
+                {
+                    references.Add(GeneratedReferences.IsGenerated(location, cancellationToken)
+                        ? BlockingReference.InGeneratedCode(location.Location, cancellationToken)
+                        : BlockingReference.Create(path, location.Location, Kind(location), cancellationToken));
+                }
             }
         }
 
@@ -544,6 +548,7 @@ public sealed class SafeDeleteOperation : RefactoringOperationBase<SafeDeletePar
     private static RefactoringException StillReferenced(ISymbol symbol, List<BlockingReference> references)
     {
         var crefs = references.Count(r => r.Kind == "cref");
+        var generated = references.Count(r => r.Kind == BlockingReference.GeneratedKind);
         var listed = string.Join(", ", references.Take(ReferencesInMessage).Select(r => $"{r.File}({r.Line},{r.Column})"));
         if (references.Count > ReferencesInMessage)
             listed += $" and {references.Count - ReferencesInMessage} more";
@@ -552,6 +557,7 @@ public sealed class SafeDeleteOperation : RefactoringOperationBase<SafeDeletePar
             ErrorCodes.SymbolStillReferenced,
             $"'{symbol.ToDisplayString()}' is still referenced in {references.Count} place{(references.Count == 1 ? "" : "s")}" +
             (crefs > 0 ? $" ({crefs} in documentation-comment crefs)" : "") +
+            (generated > 0 ? $" ({generated} in generated code, listed where it comes from, e.g. a .razor file)" : "") +
             $": {listed}. Remove or change these references first.",
             new Dictionary<string, object>
             {
@@ -691,6 +697,25 @@ public sealed class SafeDeleteOperation : RefactoringOperationBase<SafeDeletePar
 /// <param name="Snippet">The line of the reference, trimmed.</param>
 internal sealed record BlockingReference(string File, int Line, int Column, string Kind, string Snippet)
 {
+    /// <summary>The kind of a reference in generated code.</summary>
+    public const string GeneratedKind = "generated";
+
+    /// <summary>
+    /// A reference in generated code, at the place <c>#line</c> maps it to (the <c>.razor</c>
+    /// file and line) when it does; the snippet is the generated line.
+    /// </summary>
+    public static BlockingReference InGeneratedCode(Location location, CancellationToken cancellationToken)
+    {
+        var place = GeneratedReferences.Place(location);
+        var text = location.SourceTree!.GetText(cancellationToken);
+        return new BlockingReference(
+            place.Path,
+            place.Line,
+            place.Column,
+            GeneratedKind,
+            text.Lines[location.GetLineSpan().StartLinePosition.Line].ToString().Trim());
+    }
+
     public static BlockingReference Create(string file, Location location, string kind, CancellationToken cancellationToken)
     {
         var span = location.GetLineSpan();

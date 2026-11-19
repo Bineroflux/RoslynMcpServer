@@ -389,6 +389,9 @@ public sealed class IntroduceParameterOperation : RefactoringOperationBase<Intro
         if (node.IsPartOfStructuredTrivia() || node.Ancestors().OfType<InvocationExpressionSyntax>().Any(IsNameOf))
             return null; // a cref or nameof names the method without calling it
 
+        if (GeneratedReferences.IsGenerated(reference, cancellationToken))
+            return new ReferenceSite(null, null, GeneratedReferences.Warning(reference.Location, $"the use of '{node}'", "given the new argument"));
+
         SyntaxNode callee = node;
         if (callee.Parent is MemberAccessExpressionSyntax access && access.Name == callee ||
             callee.Parent is MemberBindingExpressionSyntax)

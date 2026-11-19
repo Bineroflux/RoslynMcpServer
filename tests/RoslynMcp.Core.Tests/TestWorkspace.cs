@@ -1,6 +1,7 @@
 using System.Collections.Immutable;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.Diagnostics;
 using Microsoft.CodeAnalysis.Text;
 using RoslynMcp.Core.Workspace;
 
@@ -29,6 +30,8 @@ internal sealed class TestWorkspace : IDisposable
 
     private readonly ImmutableArray<MetadataReference> _references;
     private readonly CSharpCompilationOptions _compilationOptions;
+    private ImmutableArray<ISourceGenerator> _generators = [];
+    private IReadOnlyList<string> _additionalFiles = [];
 
     private TestWorkspace(
         string directory,
@@ -65,6 +68,7 @@ internal sealed class TestWorkspace : IDisposable
     /// </param>
     /// <param name="languageVersion">The project's C# version (default: the latest).</param>
     /// <param name="allowUnsafe">Whether unsafe code is allowed, like a project with <c>AllowUnsafeBlocks</c>.</param>
+    /// <param name="generators">Source generators the project runs, like a project's analyzer references.</param>
     public static TestWorkspace Create(
         IEnumerable<(string Name, string Text)> files,
         IEnumerable<MetadataReference> extraReferences,
@@ -73,7 +77,8 @@ internal sealed class TestWorkspace : IDisposable
         IEnumerable<(string Name, string Text)>? additionalFiles = null,
         bool checkOverflow = false,
         LanguageVersion languageVersion = LanguageVersion.Latest,
-        bool allowUnsafe = false)
+        bool allowUnsafe = false,
+        IEnumerable<ISourceGenerator>? generators = null)
     {
         var compilationOptions = CompilationOptions.WithOverflowChecks(checkOverflow).WithAllowUnsafe(allowUnsafe);
         var directory = Path.Combine(Path.GetTempPath(), $"RoslynMcpServer.TestWorkspace-{Guid.NewGuid():N}");
@@ -92,6 +97,10 @@ internal sealed class TestWorkspace : IDisposable
             compilationOptions: compilationOptions,
             parseOptions: ParseOptions.WithLanguageVersion(languageVersion),
             metadataReferences: references).WithDefaultNamespace(defaultNamespace));
+
+        // The test assembly's [Generator] classes (ViewGenerator), as a project's analyzer reference.
+        if (generators != null)
+            solution = solution.AddAnalyzerReference(projectId, new AnalyzerFileReference(typeof(TestWorkspace).Assembly.Location, new LoadedAssemblyLoader()));
 
         if (editorConfig != null)
         {
@@ -125,7 +134,11 @@ internal sealed class TestWorkspace : IDisposable
                 filePath: path);
         }
 
-        return new TestWorkspace(directory, new WorkspaceContext(workspace, solution, directory), references, compilationOptions);
+        return new TestWorkspace(directory, new WorkspaceContext(workspace, solution, directory), references, compilationOptions)
+        {
+            _generators = generators?.ToImmutableArray() ?? [],
+            _additionalFiles = (additionalFiles ?? []).Select(f => Path.Combine(directory, f.Name)).ToList()
+        };
     }
 
     /// <summary>A project of a <see cref="CreateSolution"/> workspace.</summary>
@@ -304,7 +317,35 @@ internal sealed class TestWorkspace : IDisposable
         var trees = System.IO.Directory.GetFiles(Directory, "*.cs", SearchOption.AllDirectories)
             .Select(path => CSharpSyntaxTree.ParseText(File.ReadAllText(path), ParseOptions, path));
 
-        return CSharpCompilation.Create("DiskCheck", trees, _references, _compilationOptions);
+        var compilation = CSharpCompilation.Create("DiskCheck", trees, _references, _compilationOptions);
+        if (_generators.IsEmpty)
+            return compilation;
+
+        // The generators run on the files on disk, as a build runs them.
+        var additional = _additionalFiles.Select(path => (AdditionalText)new DiskText(path));
+        CSharpGeneratorDriver.Create(_generators, additional, ParseOptions)
+            .RunGeneratorsAndUpdateCompilation(compilation, out var generated, out _);
+        return (CSharpCompilation)generated;
+    }
+
+    private sealed class DiskText(string path) : AdditionalText
+    {
+        public override string Path => path;
+
+        public override SourceText GetText(CancellationToken cancellationToken = default) => SourceText.From(File.ReadAllText(path));
+    }
+
+    /// <summary>
+    /// Loads the generators of an analyzer reference to the test assembly from the test
+    /// assembly already loaded (the workspace accepts only file references).
+    /// </summary>
+    private sealed class LoadedAssemblyLoader : IAnalyzerAssemblyLoader
+    {
+        public void AddDependencyLocation(string fullPath)
+        {
+        }
+
+        public System.Reflection.Assembly LoadFromPath(string fullPath) => typeof(TestWorkspace).Assembly;
     }
 
     public void Dispose()

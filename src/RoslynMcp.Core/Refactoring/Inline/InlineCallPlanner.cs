@@ -557,13 +557,13 @@ internal sealed class InlineCallPlanner
     }
 
     /// <summary>
-    /// The namespaces of the extension methods the body calls in extension form that aren't
-    /// imported at <paramref name="position"/>.
+    /// The namespaces of the extension methods the body calls in extension form or uses
+    /// implicitly that aren't imported at <paramref name="position"/>.
     /// </summary>
     private IReadOnlyList<string> MissingNamespaces(SemanticModel model, int position)
     {
         var missing = new List<string>();
-        foreach (var extension in _body.ReducedExtensions)
+        foreach (var extension in _body.UsedExtensions)
         {
             var type = extension.ContainingType;
             if (type.ContainingNamespace is not { IsGlobalNamespace: false } ns)

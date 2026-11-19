@@ -70,8 +70,11 @@ internal sealed class InlinedBody
     /// </summary>
     public IReadOnlyList<(ISymbol Symbol, bool ThroughThis)> Referenced { get; private set; } = [];
 
-    /// <summary>The extension methods the body calls in extension form, which need their namespace imported.</summary>
-    public IReadOnlyList<IMethodSymbol> ReducedExtensions { get; private set; } = [];
+    /// <summary>
+    /// The extension methods the body calls in extension form or uses implicitly (a query, a
+    /// collection initializer, foreach, deconstruction, await), which need their namespace imported.
+    /// </summary>
+    public IReadOnlyList<IMethodSymbol> UsedExtensions { get; private set; } = [];
 
     /// <summary>
     /// Analyzes <paramref name="declaration"/>'s body. Fails with
@@ -236,13 +239,52 @@ internal sealed class InlinedBody
         This = new InputUses(thisUses, Written: false);
         UsesBase = Root.DescendantNodesAndSelf().OfType<BaseExpressionSyntax>().Any();
         Referenced = referenced;
-        ReducedExtensions = extensions;
+        UsedExtensions = extensions.Concat(ImplicitExtensions(operation)).Distinct<IMethodSymbol>(SymbolEqualityComparer.Default).ToList();
 
         if (!Method.ReturnsVoid && Root is ExpressionSyntax expression)
         {
             var type = Model.GetTypeInfo(expression, cancellationToken).Type;
             NeedsReturnCast = type == null || !SymbolEqualityComparer.Default.Equals(type, Method.ReturnType);
         }
+    }
+
+    /// <summary>
+    /// The extension methods the body uses without naming them: the methods of a LINQ query, a
+    /// collection initializer's <c>Add</c>, a foreach's <c>GetEnumerator</c>, the <c>Deconstruct</c>
+    /// of a deconstruction or positional pattern, and an await's <c>GetAwaiter</c>.
+    /// </summary>
+    private IEnumerable<IMethodSymbol> ImplicitExtensions(IOperation root)
+    {
+        foreach (var operation in root.DescendantsAndSelf())
+        {
+            IEnumerable<IMethodSymbol?> methods = operation switch
+            {
+                IInvocationOperation { IsImplicit: true } invocation => [invocation.TargetMethod],
+                IForEachLoopOperation { Syntax: CommonForEachStatementSyntax forEach } => ForEach(forEach),
+                IDeconstructionAssignmentOperation { Syntax: AssignmentExpressionSyntax assignment } =>
+                    Deconstruct(Model.GetDeconstructionInfo(assignment)),
+                IRecursivePatternOperation pattern => [pattern.DeconstructSymbol as IMethodSymbol],
+                IAwaitOperation { Syntax: AwaitExpressionSyntax await } => [Model.GetAwaitExpressionInfo(await).GetAwaiterMethod],
+                _ => []
+            };
+
+            foreach (var method in methods)
+            {
+                if ((method?.ReducedFrom ?? method) is { IsExtensionMethod: true } extension)
+                    yield return extension;
+            }
+        }
+
+        IEnumerable<IMethodSymbol?> ForEach(CommonForEachStatementSyntax forEach)
+        {
+            IEnumerable<IMethodSymbol?> methods = [Model.GetForEachStatementInfo(forEach).GetEnumeratorMethod];
+            return forEach is ForEachVariableStatementSyntax variables
+                ? methods.Concat(Deconstruct(Model.GetDeconstructionInfo(variables)))
+                : methods;
+        }
+
+        static IEnumerable<IMethodSymbol?> Deconstruct(DeconstructionInfo info) =>
+            info.Nested.SelectMany(Deconstruct).Prepend(info.Method);
     }
 
     private Use Use(IOperation operation, bool effectBefore)

@@ -401,7 +401,118 @@ public sealed class InlineMethodRulesTests
     }
 
     [Fact]
+    public async Task ExtensionMethodsTheBodyUsesImplicitly_GetTheirNamespaceImported()
+    {
+        using var ws = TestWorkspace.Create(
+            ("Ext.cs", Lf("""
+                using System.Collections;
+                using System.Collections.Generic;
+
+                namespace Lib.Types
+                {
+                    public sealed class Bag : IEnumerable<int>
+                    {
+                        public readonly List<int> Items = new();
+                        public IEnumerator<int> GetEnumerator() => Items.GetEnumerator();
+                        IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
+                    }
+
+                    public sealed class Span2
+                    {
+                        public int From;
+                        public int To;
+                    }
+                }
+
+                namespace Lib.Adding
+                {
+                    public static class BagExtensions
+                    {
+                        public static void Add(this Lib.Types.Bag bag, int item) => bag.Items.Add(item * 10);
+                    }
+                }
+
+                namespace Lib.Looping
+                {
+                    public static class SpanEnumeration
+                    {
+                        public static IEnumerator<int> GetEnumerator(this Lib.Types.Span2 span)
+                        {
+                            for (var i = span.From; i <= span.To; i++)
+                                yield return i;
+                        }
+                    }
+                }
+
+                namespace Lib.Splitting
+                {
+                    public static class SpanDeconstruction
+                    {
+                        public static void Deconstruct(this Lib.Types.Span2 span, out int from, out int to) => (from, to) = (span.From, span.To);
+                    }
+                }
+                """)),
+            ("Lib.cs", Lf("""
+                using System.Collections.Generic;
+                using System.Linq;
+                using Lib.Adding;
+                using Lib.Looping;
+                using Lib.Splitting;
+                using Lib.Types;
+
+                namespace Lib;
+
+                public static class Numbers
+                {
+                    public static IEnumerable<int> Doubled(int[] values) => from v in values where v > 0 select v * 2;
+
+                    public static Bag Pack(int a, int b) => new Bag { a, b };
+
+                    public static void Walk(Span2 span, List<int> log)
+                    {
+                        foreach (var i in span)
+                            log.Add(i);
+                        var (from, to) = span;
+                        log.Add(from + to);
+                    }
+
+                    public static bool FromZero(Span2 span) => span is (0, _);
+                }
+                """)),
+            ("Query.cs", Client("Query", "System.Collections.Generic.IEnumerable<int> Run(int[] data) => Lib.Numbers.Doubled(data);")),
+            ("Initializer.cs", Client("Initializer", "Lib.Types.Bag Run() => Lib.Numbers.Pack(1, 2);")),
+            ("Loop.cs", Client("Loop", "void Run(Lib.Types.Span2 span, System.Collections.Generic.List<int> log) { Lib.Numbers.Walk(span, log); }")),
+            ("Pattern.cs", Client("Pattern", "bool Run(Lib.Types.Span2 span) => Lib.Numbers.FromZero(span);")));
+
+        foreach (var method in new[] { "Doubled", "Pack", "Walk", "FromZero" })
+        {
+            var result = await InlineAsync(ws, "Lib.cs", method);
+            Assert.True(result.Success, result.Error?.Message);
+            Assert.True(result.Warnings == null, method + ": " + string.Join("\n", result.Warnings ?? []));
+        }
+
+        Assert.StartsWith("using System.Linq;\n\nnamespace App;", ws.ReadFile("Query.cs"));
+        Assert.Contains("=> from v in data where v > 0 select v * 2;", ws.ReadFile("Query.cs"));
+        Assert.StartsWith("using Lib.Adding;\n\nnamespace App;", ws.ReadFile("Initializer.cs"));
+        Assert.Contains("=> new Lib.Types.Bag { 1, 2 };", ws.ReadFile("Initializer.cs"));
+        Assert.StartsWith("using Lib.Looping;\nusing Lib.Splitting;\n\nnamespace App;", ws.ReadFile("Loop.cs"));
+        Assert.StartsWith("using Lib.Splitting;\n\nnamespace App;", ws.ReadFile("Pattern.cs"));
+        Assert.Contains("=> span is (0, _);", ws.ReadFile("Pattern.cs"));
+        Assert.Empty(ws.GetDiskCompilationErrors());
+
+        static string Client(string name, string member) => Lf($$"""
+            namespace App;
+
+            public static class {{name}}
+            {
+                public static {{member}}
+            }
+            """);
+    }
+
+    [Fact]
     public async Task OutVariablesOfAnExpressionBody_AreRenamedPerCall()
+
     {
         using var ws = TestWorkspace.Create(("C.cs", Lf("""
             internal static class C

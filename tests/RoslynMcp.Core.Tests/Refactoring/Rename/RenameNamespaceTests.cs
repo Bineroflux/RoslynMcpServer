@@ -272,6 +272,74 @@ public sealed class RenameNamespaceTests
     }
 
     [Fact]
+    public async Task NamesThatReliedOnTheEnclosingNamespace_AreQualified_WhenTheDeclarationMovesElsewhere()
+    {
+        using var ws = TestWorkspace.Create(
+            ("Company.cs", "namespace Company\n{\n    public class Helper { public static int Count = 1; }\n\n    public class TagAttribute : System.Attribute { }\n}\n\nnamespace Company.Sibling\n{\n    public class Part { }\n}\n"),
+            ("Shadow.cs", "namespace Other\n{\n    public class Helper { }\n}\n"),
+            ("Widget.cs", """
+                namespace Company.Old
+                {
+                    using Sibling;
+
+                    /// <summary>Has a <see cref="Sibling.Part"/> and a <see cref="Helper"/>.</summary>
+                    [Tag]
+                    public class Widget
+                    {
+                        public Sibling.Part? P;
+                        public Part? Q;
+                        public Helper Make() => new Helper();
+                        public int N = Helper.Count;
+                        public System.Collections.Generic.List<Helper> All = new();
+                        public Inner.Gadget? G;
+                    }
+                }
+                """.ReplaceLineEndings("\n") + "\n"),
+            ("Gadget.cs", "namespace Company.Old.Inner;\n\npublic class Gadget { public Sibling.Part? P; public Widget? W; }\n"),
+            ("Nested.cs", "namespace Company\n{\n    namespace Old.Deep\n    {\n        public class Nested { public Sibling.Part? P; public Helper? H; }\n    }\n}\n"));
+
+        var result = await RenameAsync(ws, "Company.Old", "Other.New");
+
+        Assert.True(result.Success, result.Error?.Message);
+        Assert.Equal("""
+            namespace Other.New
+            {
+                using Company.Sibling;
+
+                /// <summary>Has a <see cref="Company.Sibling.Part"/> and a <see cref="Company.Helper"/>.</summary>
+                [Company.Tag]
+                public class Widget
+                {
+                    public Company.Sibling.Part? P;
+                    public Part? Q;
+                    public Company.Helper Make() => new Company.Helper();
+                    public int N = Company.Helper.Count;
+                    public System.Collections.Generic.List<Company.Helper> All = new();
+                    public Inner.Gadget? G;
+                }
+            }
+            """.ReplaceLineEndings("\n") + "\n", ws.ReadFile("Widget.cs"));
+        Assert.Equal("namespace Other.New.Inner;\n\npublic class Gadget { public Company.Sibling.Part? P; public Widget? W; }\n", ws.ReadFile("Gadget.cs"));
+        Assert.Equal("namespace Other\n{\n    namespace New.Deep\n    {\n        public class Nested { public Company.Sibling.Part? P; public Company.Helper? H; }\n    }\n}\n", ws.ReadFile("Nested.cs"));
+        Assert.Null(result.Warnings);
+        Assert.Empty(ws.GetDiskCompilationErrors());
+    }
+
+    [Fact]
+    public async Task NamesThatAnExistingTargetNamespaceWouldShadow_AreQualified()
+    {
+        using var ws = TestWorkspace.Create(
+            ("Company.cs", "namespace Company\n{\n    public class Helper { }\n}\n\nnamespace Company.New\n{\n    public class Helper { }\n}\n"),
+            ("Old.cs", "namespace Company.Old\n{\n    public class Widget { public Helper? H; }\n}\n"));
+
+        var result = await RenameAsync(ws, "Company.Old", "Company.New");
+
+        Assert.True(result.Success, result.Error?.Message);
+        Assert.Equal("namespace Company.New\n{\n    public class Widget { public Company.Helper? H; }\n}\n", ws.ReadFile("Old.cs"));
+        Assert.Empty(ws.GetDiskCompilationErrors());
+    }
+
+    [Fact]
     public async Task AMultiTargetedFile_IsRewrittenInTheIfBranchesOfEveryFramework()
     {
         const string use = """

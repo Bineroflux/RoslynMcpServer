@@ -31,6 +31,10 @@ namespace RoslynMcp.Core.Refactoring.Rename;
 /// using outside the renamed one (<c>B.Foo</c> inside <c>namespace A</c> for <c>A.B</c>) is
 /// written as <c>global::</c> plus the new name and simplified as far as it still binds.
 /// Names relative to a renamed namespace (inside it, or through a using of it) stay as they are.
+/// A name inside a renamed declaration that found a namespace or type through an enclosing
+/// namespace the declaration leaves (<c>Sibling.Part</c> inside <c>namespace Company.Old</c>
+/// for <c>Company.Sibling.Part</c>, renamed to <c>Other.New</c>), or that a type of the new
+/// surroundings would shadow, is qualified as far as needed to bind as before.
 /// </para>
 /// <para>
 /// A declaration whose enclosing declaration stays (<c>namespace A { namespace B }</c> with
@@ -206,6 +210,9 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
             if (await project.GetCompilationAsync(cancellationToken) is not { } compilation)
                 continue;
 
+            if (FindNamespace(compilation.GlobalNamespace, rename.New) != null)
+                rename.NewExists = true;
+
             if (FindNamespace(compilation.GlobalNamespace, rename.Old) is { } oldNamespace)
             {
                 foreach (var ns in Namespaces(oldNamespace))
@@ -310,6 +317,8 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
                 var version = new DocumentRewrite(document, root);
                 CollectDeclarations(rename, file, version, editable: !generated);
                 await CollectReferencesAsync(rename, file, version, cancellationToken);
+                if (rename.ChangesLookup && version.RenamedBlocks.Count > 0)
+                    await CollectEnclosedNamesAsync(rename, version, cancellationToken);
                 file.Versions.Add(version);
             }
 
@@ -431,6 +440,8 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
             remaining = remaining[..^count];
             version.Replacements[chain[i].Name] = SyntaxFactory.ParseName(string.Join('.', segments)).WithTriviaFrom(chain[i].Name);
         }
+
+        version.RenamedBlocks.Add(chain[^1]);
     }
 
     private static string Describe(MemberDeclarationSyntax member) => member switch
@@ -537,6 +548,163 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
         return simplify ? written.WithAdditionalAnnotations(Simplifier.Annotation) : written;
     }
 
+    private const string EnclosedNameKind = "RoslynMcp.RenameNamespace.EnclosedName";
+
+    /// <summary>
+    /// Records the simple names inside the renamed declarations that bind to a namespace or a
+    /// top-level type, with what they bind to. Inside <c>namespace Company.Old</c>,
+    /// <c>Sibling.Part</c> and <c>Helper</c> find <c>Company.Sibling</c> and <c>Company.Helper</c>
+    /// through the enclosing namespace; renamed to <c>Other.New</c>, they would find nothing, or
+    /// an <c>Other.Helper</c>. <see cref="QualifyEnclosedNamesAsync"/> qualifies those that no
+    /// longer bind to the same symbol. Names the rewrite replaces, and the parts of a name right of
+    /// its first, are left out.
+    /// </summary>
+    private static async Task CollectEnclosedNamesAsync(NamespaceRename rename, DocumentRewrite version, CancellationToken cancellationToken)
+    {
+        var model = await version.Document.GetSemanticModelAsync(cancellationToken)
+            ?? throw new RefactoringException(ErrorCodes.RoslynError, "Could not analyze file.");
+
+        foreach (var block in version.RenamedBlocks)
+        {
+            foreach (var name in block.DescendantNodes(descendIntoTrivia: true).OfType<SimpleNameSyntax>())
+            {
+                if (!StartsAName(name) ||
+                    name.Ancestors().OfType<BaseNamespaceDeclarationSyntax>().Any(ns => ns.Name.Span.Contains(name.Span)) ||
+                    name.AncestorsAndSelf().Any(version.Replacements.ContainsKey) ||
+                    BoundNamespaceOrType(model, name, cancellationToken) is not { } symbol)
+                {
+                    continue;
+                }
+
+                var container = symbol.ContainingNamespace is { IsGlobalNamespace: false } ns ? rename.MapAny(ns.ToDisplayString()) : null;
+                version.EnclosedNames[name] = new EnclosedName(
+                    new SyntaxAnnotation(EnclosedNameKind, version.EnclosedNames.Count.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+                    NamespaceOrTypeKey(symbol, rename.MapAny),
+                    container);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Whether <paramref name="name"/> is looked up in the enclosing scopes: it is not the part of
+    /// a qualified name, member access or cref after a dot, nor a name being declared or named.
+    /// </summary>
+    private static bool StartsAName(SimpleNameSyntax name) => name.Parent switch
+    {
+        QualifiedNameSyntax qualified => qualified.Left == name,
+        MemberAccessExpressionSyntax access => access.Expression == name,
+        AliasQualifiedNameSyntax => false,
+        MemberBindingExpressionSyntax or NameEqualsSyntax or NameColonSyntax => false,
+        NameMemberCrefSyntax member => member.Parent is not QualifiedCrefSyntax,
+        _ => true
+    };
+
+    /// <summary>
+    /// The namespace or top-level type <paramref name="name"/> binds to, or null: an alias, a
+    /// nested type (found through its containing type, which the rename does not change), a
+    /// keyword-like name (<c>var</c>, <c>nint</c>) or anything else.
+    /// </summary>
+    private static ISymbol? BoundNamespaceOrType(SemanticModel model, SimpleNameSyntax name, CancellationToken cancellationToken)
+    {
+        if (name.IsVar || model.GetAliasInfo(name, cancellationToken) != null)
+            return null;
+
+        var text = name.Identifier.ValueText;
+        var inAttribute = name.Parent is AttributeSyntax;
+        var symbol = model.GetSymbolInfo(name, cancellationToken).Symbol;
+        if (inAttribute && symbol is IMethodSymbol { MethodKind: MethodKind.Constructor } constructor)
+            symbol = constructor.ContainingType;
+
+        return symbol switch
+        {
+            INamespaceSymbol { IsGlobalNamespace: false } ns when ns.Name == text => ns,
+            INamedTypeSymbol { ContainingType: null, TypeKind: not TypeKind.Error } type
+                when type.Name == text || (inAttribute && type.Name == text + "Attribute") => type.OriginalDefinition,
+            _ => null
+        };
+    }
+
+    /// <summary>
+    /// Identifies a namespace or top-level type across the rename: <paramref name="map"/> gives a
+    /// namespace its name after the rename (the identity for a symbol of the renamed solution).
+    /// </summary>
+    private static string NamespaceOrTypeKey(ISymbol symbol, Func<string, string> map) => symbol switch
+    {
+        INamespaceSymbol ns => map(ns.ToDisplayString()),
+        _ => $"{(symbol.ContainingNamespace is { IsGlobalNamespace: false } ns ? map(ns.ToDisplayString()) : "")}+{symbol.MetadataName}|{symbol.ContainingAssembly?.Name}"
+    };
+
+    /// <summary>
+    /// Qualifies the names <see cref="CollectEnclosedNamesAsync"/> recorded that bind to
+    /// something else (or nothing) in <paramref name="solution"/>, where every file has its new
+    /// names: <c>global::</c> plus the namespace of what they bound to, marked for simplification
+    /// (<c>Sibling.Part</c> becomes <c>Company.Sibling.Part</c>).
+    /// </summary>
+    private static async Task<Solution> QualifyEnclosedNamesAsync(Solution solution, IEnumerable<DocumentRewrite> versions, CancellationToken cancellationToken)
+    {
+        var result = solution;
+        foreach (var version in versions.Where(v => v.EnclosedNames.Count > 0))
+        {
+            var document = result.GetDocument(version.Document.Id)!;
+            if (await document.GetSyntaxRootAsync(cancellationToken) is not { } root ||
+                await document.GetSemanticModelAsync(cancellationToken) is not { } model)
+            {
+                continue;
+            }
+
+            var recorded = version.EnclosedNames.Values.ToDictionary(n => n.Annotation.Data!, StringComparer.Ordinal);
+            var fixes = new Dictionary<SyntaxNode, EnclosedName>();
+            foreach (var node in root.GetAnnotatedNodes(EnclosedNameKind))
+            {
+                var name = recorded[node.GetAnnotations(EnclosedNameKind).First().Data!];
+                if (node is not SimpleNameSyntax simple ||
+                    BoundNamespaceOrType(model, simple, cancellationToken) is not { } now ||
+                    NamespaceOrTypeKey(now, ns => ns) != name.Key)
+                {
+                    fixes[node] = name;
+                }
+            }
+
+            if (fixes.Count == 0)
+                continue;
+
+            root = root.ReplaceNodes(fixes.Keys, (original, rewritten) =>
+                Qualify(fixes[original].Container, (SimpleNameSyntax)original, (SimpleNameSyntax)rewritten));
+            result = result.WithDocumentSyntaxRoot(version.Document.Id, root);
+            version.NeedsSimplification = true;
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// <paramref name="rewritten"/> (<paramref name="original"/> with its own fixes) qualified by
+    /// <c>global::</c> and <paramref name="container"/>, as a name or as a member access,
+    /// whichever <paramref name="original"/>'s place takes.
+    /// </summary>
+    private static ExpressionSyntax Qualify(string? container, SimpleNameSyntax original, SimpleNameSyntax rewritten)
+    {
+        var simple = rewritten.WithoutTrivia();
+        ExpressionSyntax qualified;
+        if (container == null)
+        {
+            qualified = SyntaxFactory.AliasQualifiedName(SyntaxFactory.IdentifierName(SyntaxFactory.Token(SyntaxKind.GlobalKeyword)), simple);
+        }
+        else if (original.Parent is UsingDirectiveSyntax or QualifiedNameSyntax or AttributeSyntax ||
+                 original.Ancestors().Any(a => a is CrefSyntax) ||
+                 SyntaxFacts.IsInNamespaceOrTypeContext(original))
+        {
+            qualified = SyntaxFactory.QualifiedName(SyntaxFactory.ParseName("global::" + container), simple);
+        }
+        else
+        {
+            qualified = SyntaxFactory.MemberAccessExpression(
+                SyntaxKind.SimpleMemberAccessExpression, SyntaxFactory.ParseExpression("global::" + container), simple);
+        }
+
+        return qualified.WithTriviaFrom(original).WithAdditionalAnnotations(Simplifier.Annotation);
+    }
+
     /// <summary>
     /// The one namespace the types of the file end up in, for the folder move, or why the file
     /// has no such namespace.
@@ -570,10 +738,11 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
     }
 
     /// <summary>
-    /// Applies the rewrites of every document, simplifies the names marked for it once every
-    /// file has its new names, and gives the documents compiling one file one text with the
-    /// rewrites of all of them (<see cref="LinkedDocuments.MergeRenamesAsync"/>: each line from
-    /// the document that changed it).
+    /// Applies the rewrites of every document, qualifies the names inside renamed declarations
+    /// that would bind to something else (<see cref="QualifyEnclosedNamesAsync"/>), simplifies
+    /// the names marked for it once every file has its new names, and gives the documents
+    /// compiling one file one text with the rewrites of all of them
+    /// (<see cref="LinkedDocuments.MergeRenamesAsync"/>: each line from the document that changed it).
     /// </summary>
     private static async Task<Solution> ApplyAsync(Solution solution, Scan scan, CancellationToken cancellationToken)
     {
@@ -581,9 +750,16 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
         var versions = scan.Files.SelectMany(f => f.Versions).Where(v => v.Replacements.Count > 0).ToList();
         foreach (var version in versions)
         {
-            var root = version.Root.ReplaceNodes(version.Replacements.Keys, (original, _) => version.Replacements[original]);
+            // The names to check afterwards are marked, to be found in the rewritten tree.
+            var root = version.Root.ReplaceNodes(
+                version.Replacements.Keys.Concat(version.EnclosedNames.Keys),
+                (original, rewritten) => version.Replacements.TryGetValue(original, out var replacement)
+                    ? replacement
+                    : rewritten.WithAdditionalAnnotations(version.EnclosedNames[original].Annotation));
             result = result.WithDocumentSyntaxRoot(version.Document.Id, root);
         }
+
+        result = await QualifyEnclosedNamesAsync(result, versions, cancellationToken);
 
         foreach (var version in versions.Where(v => v.NeedsSimplification))
         {
@@ -821,6 +997,21 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
 
         /// <summary>The new name of a namespace <see cref="Covers"/> accepts.</summary>
         public string Map(string ns) => New + ns[Old.Length..];
+
+        /// <summary>The new name of any namespace: mapped when renamed, else as it is.</summary>
+        public string MapAny(string ns) => Covers(ns) ? Map(ns) : ns;
+
+        /// <summary>Whether the new namespace exists before the rename (the rename merges into it).</summary>
+        public bool NewExists { get; set; }
+
+        /// <summary>
+        /// Whether a simple name inside a renamed declaration may bind to something else afterwards:
+        /// the declarations move under another parent namespace, whose members are found instead of
+        /// the old parent's, or into a namespace that already has members of its own.
+        /// </summary>
+        public bool ChangesLookup => NewExists || Parent(Old) != Parent(New);
+
+        private static string Parent(string ns) => ns.LastIndexOf('.') is var dot and >= 0 ? ns[..dot] : "";
     }
 
     /// <summary>What the scan found to rewrite.</summary>
@@ -878,5 +1069,21 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
         public Dictionary<SyntaxNode, SyntaxNode> Replacements { get; } = [];
 
         public bool NeedsSimplification { get; set; }
+
+        /// <summary>The outermost declaration blocks the rewrite renames.</summary>
+        public List<BaseNamespaceDeclarationSyntax> RenamedBlocks { get; } = [];
+
+        /// <summary>
+        /// The simple names inside <see cref="RenamedBlocks"/> that bind to a namespace or type,
+        /// with what they must bind to after the rename.
+        /// </summary>
+        public Dictionary<SyntaxNode, EnclosedName> EnclosedNames { get; } = [];
     }
+
+    /// <summary>
+    /// A simple name inside a renamed declaration: what it must bind to after the rename
+    /// (<see cref="NamespaceOrTypeKey"/>), and the namespace that qualifies it when it would not
+    /// (null for the global namespace).
+    /// </summary>
+    private sealed record EnclosedName(SyntaxAnnotation Annotation, string Key, string? Container);
 }

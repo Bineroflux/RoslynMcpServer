@@ -101,6 +101,7 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
 
         var originalParams = methodSymbol.Parameters.ToList();
         var newParameters = BuildNewParameterList(originalParams, @params.Parameters);
+        CheckOptionalParametersLast(newParameters, originalParams);
 
         // A rename applies to the parameter at that position in every member of the family.
         var renames = new string?[originalParams.Count];
@@ -266,6 +267,35 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// Refuses a parameter list in which a parameter without a default value follows one with a
+    /// default value (CS1737). Only a <c>params</c> array may follow, as the last parameter. A
+    /// parameter has the default value the request gives it.
+    /// </summary>
+    private static void CheckOptionalParametersLast(IReadOnlyList<NewParameter> parameters, IReadOnlyList<IParameterSymbol> originalParams)
+    {
+        NewParameter? optional = null;
+        for (var i = 0; i < parameters.Count; i++)
+        {
+            var parameter = parameters[i];
+            if (!string.IsNullOrEmpty(parameter.DefaultValue))
+            {
+                optional ??= parameter;
+                continue;
+            }
+
+            var isParamsArray = parameter.OriginalIndex is { } index && originalParams[index].IsParams && i == parameters.Count - 1;
+            if (optional != null && !isParamsArray)
+            {
+                throw new RefactoringException(
+                    ErrorCodes.InvalidParameterPosition,
+                    $"Parameter '{IdentifierNames.ValueText(parameter.Name)}' has no defaultValue but comes after " +
+                    $"'{IdentifierNames.ValueText(optional.Name)}', which has one: a required parameter cannot follow an optional " +
+                    "one (CS1737). Give it a defaultValue or move it before the optional parameters.");
+            }
+        }
     }
 
     /// <summary>

@@ -40,7 +40,7 @@ public static class ErrorCodes
     /// <summary>Parameter type is not valid C# type.</summary>
     public const string InvalidParameterType = "1010";
 
-    /// <summary>Parameter position out of range.</summary>
+    /// <summary>Parameter position out of range, or a required parameter after optional ones.</summary>
     public const string InvalidParameterPosition = "1011";
 
     /// <summary>Member list contains invalid member names.</summary>

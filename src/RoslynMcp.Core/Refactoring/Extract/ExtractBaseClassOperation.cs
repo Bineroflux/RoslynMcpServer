@@ -161,7 +161,8 @@ public sealed class ExtractBaseClassOperation : RefactoringOperationBase<Extract
         var baseClass = GenerateBaseClass(
             @params.BaseClassName,
             membersToExtract,
-            @params.MakeAbstract);
+            @params.MakeAbstract,
+            await LineEndings.GetAsync(document, cancellationToken));
 
         // Get namespace
         var namespaceName = typeSymbol.ContainingNamespace?.ToDisplayString();
@@ -290,7 +291,8 @@ public sealed class ExtractBaseClassOperation : RefactoringOperationBase<Extract
     private static ClassDeclarationSyntax GenerateBaseClass(
         string className,
         List<MemberDeclarationSyntax> members,
-        bool makeAbstract)
+        bool makeAbstract,
+        string lineEnding)
     {
         var modifiers = new List<SyntaxToken> { SyntaxFactory.Token(SyntaxKind.PublicKeyword) };
         if (makeAbstract)
@@ -301,7 +303,7 @@ public sealed class ExtractBaseClassOperation : RefactoringOperationBase<Extract
         return SeparateMembers(SyntaxFactory.ClassDeclaration(IdentifierNames.Token(className))
             .WithModifiers(SyntaxFactory.TokenList(modifiers))
             .WithMembers(SyntaxFactory.List(members))
-            .NormalizeWhitespace(), "\r\n");
+            .NormalizeWhitespace(eol: lineEnding), lineEnding);
     }
 
     /// <summary>

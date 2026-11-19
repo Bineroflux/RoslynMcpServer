@@ -112,8 +112,11 @@ public sealed class ConvertPropertyOperation : RefactoringOperationBase<ConvertP
             return RefactoringResult.PreviewResult(operationId, pendingChanges);
         }
 
+        // The generated property and field are laid out like their surroundings, with the
+        // document's indentation and line ending.
         var newDocument = document.WithSyntaxRoot(newRoot);
-        var commitResult = await CommitChangesAsync(newDocument.Project.Solution, cancellationToken);
+        var newSolution = await GeneratedCodeFormatter.FormatAsync(newDocument.Project.Solution, document, cancellationToken);
+        var commitResult = await CommitChangesAsync(newSolution, cancellationToken);
 
         return RefactoringResult.Succeeded(operationId,
             new FileChanges { FilesModified = commitResult.FilesModified, FilesCreated = commitResult.FilesCreated, FilesDeleted = commitResult.FilesDeleted },
@@ -178,11 +181,10 @@ public sealed class ConvertPropertyOperation : RefactoringOperationBase<ConvertP
             accessors.Add(setter);
         }
 
-        var newProperty = property
+        var newProperty = WithLayoutOf(property, property
             .WithAccessorList(SyntaxFactory.AccessorList(SyntaxFactory.List(accessors)))
             .WithInitializer(null)
-            .WithSemicolonToken(default)
-            .NormalizeWhitespace();
+            .WithSemicolonToken(default));
 
         var before = property.NormalizeWhitespace().ToFullString();
         var after = backingField.NormalizeWhitespace().ToFullString() + "\n" + newProperty.NormalizeWhitespace().ToFullString();
@@ -193,7 +195,7 @@ public sealed class ConvertPropertyOperation : RefactoringOperationBase<ConvertP
         {
             var propertyIndex = typeDecl.Members.IndexOf(property);
             var newMembers = typeDecl.Members
-                .Insert(propertyIndex, backingField.WithLeadingTrivia(SyntaxFactory.CarriageReturnLineFeed));
+                .Insert(propertyIndex, GeneratedCodeFormatter.MarkInserted(backingField));
             var newTypeDecl = typeDecl.WithMembers(newMembers);
 
             // Now replace the original property (which shifted by 1) with the new full property
@@ -231,14 +233,25 @@ public sealed class ConvertPropertyOperation : RefactoringOperationBase<ConvertP
             accessors.Add(autoAccessor);
         }
 
-        var newProperty = property
+        var newProperty = WithLayoutOf(property, property
             .WithAccessorList(SyntaxFactory.AccessorList(SyntaxFactory.List(accessors)))
-            .WithExpressionBody(null)
-            .NormalizeWhitespace();
+            .WithExpressionBody(null));
 
         var before = property.NormalizeWhitespace().ToFullString();
         var after = newProperty.NormalizeWhitespace().ToFullString();
 
         return (root.ReplaceNode(property, newProperty), before, after);
     }
+
+    /// <summary>
+    /// <paramref name="converted"/> laid out from scratch but keeping what surrounds
+    /// <paramref name="original"/> (its documentation comment, attributes' indentation, the
+    /// line break after it), and marked for <see cref="GeneratedCodeFormatter.FormatAsync"/>,
+    /// which indents it and gives its line breaks the document's line ending.
+    /// </summary>
+    private static PropertyDeclarationSyntax WithLayoutOf(PropertyDeclarationSyntax original, PropertyDeclarationSyntax converted) =>
+        GeneratedCodeFormatter.Mark(converted
+            .NormalizeWhitespace()
+            .WithLeadingTrivia(original.GetLeadingTrivia())
+            .WithTrailingTrivia(original.GetTrailingTrivia()));
 }

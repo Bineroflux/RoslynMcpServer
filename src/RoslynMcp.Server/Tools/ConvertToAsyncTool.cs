@@ -28,7 +28,14 @@ public sealed class ConvertToAsyncTool : IToolHandler
     public string Name => "convert_to_async";
 
     /// <inheritdoc />
-    public string Description => "Convert a synchronous method to async/await pattern.";
+    public string Description =>
+        "Convert a synchronous method to async: rename it to <name>Async with every reference (renameToAsync), add 'async' " +
+        "and return Task / Task<T>. In its body, '.Result', '.Wait()' and '.GetAwaiter().GetResult()' on a task become " +
+        "'await', and a call whose task was discarded is awaited; lambdas and local functions are left alone. Callers " +
+        "that are async await the call; the others are left as they are and listed in 'warnings' with the compiler " +
+        "errors this causes. Refused for methods that are async, iterators, abstract, virtual, overrides, interface " +
+        "implementations, partial or extern, have ref/out/in parameters, return by ref or a task already, or have " +
+        "nothing to await.";
 
     /// <inheritdoc />
     public object InputSchema => new
@@ -60,7 +67,7 @@ public sealed class ConvertToAsyncTool : IToolHandler
             renameToAsync = new
             {
                 type = "boolean",
-                description = "Rename method by adding Async suffix",
+                description = "Add the Async suffix to the name, together with every reference (not when the name already ends in Async or the method is the entry point)",
                 @default = true
             },
             preview = new

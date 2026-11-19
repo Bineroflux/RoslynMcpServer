@@ -279,11 +279,27 @@ public static class ErrorCodes
     /// <summary>Method is already async.</summary>
     public const string AlreadyAsync = "3080";
 
-    /// <summary>Method has no awaitable calls to convert.</summary>
+    /// <summary>
+    /// The method has nothing to await: no task is waited for (<c>.Result</c>, <c>.Wait()</c>,
+    /// <c>.GetAwaiter().GetResult()</c>) and no call returning a task is used as a statement.
+    /// </summary>
     public const string NoAsyncCalls = "3081";
 
     /// <summary>Cannot convert iterator method to async.</summary>
     public const string CannotConvertIterator = "3082";
+
+    /// <summary>
+    /// The method cannot become async: it has no body (extern, partial), takes <c>ref</c> /
+    /// <c>out</c> / <c>in</c> parameters, returns by reference, already returns a task, or its
+    /// return type cannot be wrapped in <c>Task&lt;T&gt;</c>; the message says which.
+    /// </summary>
+    public const string NotConvertibleToAsync = "3083";
+
+    /// <summary>
+    /// The method is virtual, abstract, an override or an interface implementation; changing the
+    /// return type of one member of an override / implementation family breaks the others.
+    /// </summary>
+    public const string AsyncMemberInFamily = "3084";
 
     // --------------------------------------------
     // Inline/Variable Errors (3090-3099)

@@ -167,21 +167,26 @@ public static class SyntaxGenerationHelper
     }
 
     /// <summary>
-    /// Converts a return type to its async equivalent.
+    /// The async counterpart of a return type: <c>Task</c> for <c>void</c>, otherwise
+    /// <c>Task&lt;T&gt;</c>, written like <see cref="CreateTypeSyntax"/> (fully qualified and
+    /// marked for the simplifier, <c>?</c> only when <paramref name="nullableAnnotations"/> is set).
     /// </summary>
     /// <param name="returnType">The original return type.</param>
-    /// <returns>The async return type (Task or Task&lt;T&gt;).</returns>
-    public static TypeSyntax ToAsyncReturnType(ITypeSymbol returnType)
-    {
-        if (returnType.SpecialType == SpecialType.System_Void)
-        {
-            return SyntaxFactory.ParseTypeName("Task");
-        }
+    /// <param name="compilation">The compilation whose <c>System.Threading.Tasks.Task</c> types are used.</param>
+    /// <param name="nullableAnnotations">Whether nullable annotations are enabled where the type goes.</param>
+    /// <returns>The async return type.</returns>
+    /// <exception cref="InvalidOperationException">The compilation has no <c>Task</c> types.</exception>
+    public static TypeSyntax ToAsyncReturnType(ITypeSymbol returnType, Compilation compilation, bool nullableAnnotations) =>
+        CreateTypeSyntax(ToAsyncReturnTypeSymbol(returnType, compilation), nullableAnnotations);
 
-        return SyntaxFactory.GenericName("Task")
-            .WithTypeArgumentList(SyntaxFactory.TypeArgumentList(
-                SyntaxFactory.SingletonSeparatedList<TypeSyntax>(
-                    SyntaxFactory.ParseTypeName(returnType.ToDisplayString()))));
+    /// <summary>The type <see cref="ToAsyncReturnType"/> writes.</summary>
+    internal static INamedTypeSymbol ToAsyncReturnTypeSymbol(ITypeSymbol returnType, Compilation compilation)
+    {
+        var task = returnType.SpecialType == SpecialType.System_Void
+            ? compilation.GetTypeByMetadataName("System.Threading.Tasks.Task")
+            : compilation.GetTypeByMetadataName("System.Threading.Tasks.Task`1")?.Construct(returnType);
+
+        return task ?? throw new InvalidOperationException("The compilation does not reference System.Threading.Tasks.Task.");
     }
 
     /// <summary>

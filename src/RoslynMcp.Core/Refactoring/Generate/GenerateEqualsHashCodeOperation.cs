@@ -2,6 +2,7 @@ using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.Simplification;
+using Microsoft.CodeAnalysis.Text;
 using RoslynMcp.Contracts.Errors;
 using RoslynMcp.Contracts.Models;
 using RoslynMcp.Core.FileSystem;
@@ -16,6 +17,8 @@ namespace RoslynMcp.Core.Refactoring.Generate;
 /// </summary>
 public sealed class GenerateEqualsHashCodeOperation : RefactoringOperationBase<GenerateEqualsHashCodeParams>
 {
+    private const string ComparisonAnnotationKind = "RoslynMcp.GenerateEqualsHashCode.Comparison";
+
     /// <inheritdoc />
     public GenerateEqualsHashCodeOperation(WorkspaceContext context) : base(context)
     {
@@ -103,6 +106,7 @@ public sealed class GenerateEqualsHashCodeOperation : RefactoringOperationBase<G
         var newDocument = document.WithSyntaxRoot(newRoot);
         var newSolution = await GeneratedCodeFormatter.FormatAsync(
             newDocument.Project.Solution, document, cancellationToken);
+        newSolution = await WrapComparisonsAsync(newSolution, document, cancellationToken);
         var commitResult = await CommitChangesAsync(newSolution, cancellationToken);
 
         return RefactoringResult.Succeeded(operationId,
@@ -192,8 +196,47 @@ public sealed class GenerateEqualsHashCodeOperation : RefactoringOperationBase<G
                 SyntaxFactory.Token(SyntaxKind.OverrideKeyword)))
             .WithParameterList(SyntaxFactory.ParameterList(SyntaxFactory.SingletonSeparatedList(
                 SyntaxFactory.Parameter(SyntaxFactory.Identifier("obj")).WithType(objectType))))
-            .WithBody(SyntaxFactory.Block(SyntaxFactory.ReturnStatement(returnExpr)))
+            .WithBody(SyntaxFactory.Block(SyntaxFactory.ReturnStatement(returnExpr)
+                .WithAdditionalAnnotations(new SyntaxAnnotation(ComparisonAnnotationKind))))
             .NormalizeWhitespace();
+    }
+
+    /// <summary>
+    /// Puts each operand of the generated <c>&amp;&amp;</c> chain in <c>Equals</c> on a line of
+    /// its own, aligned under the first one like Visual Studio's generator
+    /// (<c>return obj is Pair&lt;T&gt; other &amp;&amp;</c>, then <c>       First == other.First &amp;&amp;</c>
+    /// ...), with the document's line ending. Runs after formatting, which decides where the
+    /// <c>return</c> starts. A chain with one comparison stays on one line.
+    /// </summary>
+    private static async Task<Solution> WrapComparisonsAsync(Solution solution, Document original, CancellationToken cancellationToken)
+    {
+        var document = solution.GetDocument(original.Id);
+        var root = document == null ? null : await document.GetSyntaxRootAsync(cancellationToken);
+        if (root?.GetAnnotatedNodes(ComparisonAnnotationKind).OfType<ReturnStatementSyntax>().FirstOrDefault()
+            is not { Expression: { } chain } statement)
+        {
+            return solution;
+        }
+
+        // `obj is T other && (a == other.a && b == other.b ...)`: every && of the chain.
+        var operators = chain
+            .DescendantNodesAndSelf(node => node.IsKind(SyntaxKind.LogicalAndExpression))
+            .Where(node => node.IsKind(SyntaxKind.LogicalAndExpression))
+            .Select(node => ((BinaryExpressionSyntax)node).OperatorToken)
+            .ToList();
+
+        if (operators.Count < 2)
+            return solution;
+
+        var text = await document!.GetTextAsync(cancellationToken);
+        var line = text.Lines.GetLineFromPosition(statement.SpanStart);
+        var indentation = text.ToString(TextSpan.FromBounds(line.Start, statement.SpanStart)) +
+            new string(' ', statement.ReturnKeyword.Text.Length + 1);
+        var lineEnding = await LineEndings.GetAsync(original, cancellationToken);
+
+        root = root.ReplaceTokens(operators, (token, _) => token.WithTrailingTrivia(
+            SyntaxFactory.EndOfLine(lineEnding), SyntaxFactory.Whitespace(indentation)));
+        return document.WithSyntaxRoot(root).Project.Solution;
     }
 
     /// <summary>

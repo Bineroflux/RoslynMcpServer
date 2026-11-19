@@ -31,7 +31,11 @@ public sealed class GenerateEqualsHashCodeUsingsTests
 
         Assert.True(result.Success, result.Error?.Message);
         var text = ws.ReadFile("Person.cs");
-        Assert.Contains("return obj is Person other && System.Collections.Generic.EqualityComparer<string>.Default.Equals(name, other.name) && age == other.age;", text);
+        Assert.Contains("""
+                    return obj is Person other &&
+                           System.Collections.Generic.EqualityComparer<string>.Default.Equals(name, other.name) &&
+                           age == other.age;
+            """.ReplaceLineEndings(LineEndingOf(text)), text);
         Assert.Contains("return System.HashCode.Combine(name, age);", text);
         Assert.Empty(ws.GetDiskCompilationWarningsAndErrors());
     }
@@ -81,10 +85,74 @@ public sealed class GenerateEqualsHashCodeUsingsTests
         Assert.True(result.Success, result.Error?.Message);
         var text = ws.ReadFile("Box.cs");
         Assert.Contains("public override bool Equals(object obj)", text);
-        Assert.Contains("return obj is Box<T> other && System.Collections.Generic.EqualityComparer<T>.Default.Equals(a, other.a)", text);
+        Assert.Contains("""
+                    return obj is Box<T> other &&
+                           System.Collections.Generic.EqualityComparer<T>.Default.Equals(a, other.a) &&
+            """.ReplaceLineEndings(LineEndingOf(text)), text);
         Assert.Contains("var hash = new System.HashCode();", text);
         Assert.Empty(ws.GetDiskCompilationWarningsAndErrors());
     }
+
+    [Theory]
+    [InlineData("\n")]
+    [InlineData("\r\n")]
+    public async Task Comparisons_OnePerLine_AlignedUnderTheFirstOperand(string lineEnding)
+    {
+        using var ws = TestWorkspace.Create(("Pair.cs", """
+            using System;
+            using System.Collections.Generic;
+
+            namespace App
+            {
+                public class Outer
+                {
+                    public class Pair<T>
+                    {
+                        public T First { get; set; }
+                        public DateTime When { get; set; }
+                        public int? Count { get; set; }
+                    }
+                }
+            }
+            """.ReplaceLineEndings(lineEnding)));
+
+        var result = await GenerateAsync(ws, "Pair.cs", "Pair");
+
+        Assert.True(result.Success, result.Error?.Message);
+        var text = ws.ReadFile("Pair.cs");
+        Assert.Contains(
+            string.Join(lineEnding,
+                "            public override bool Equals(object? obj)",
+                "            {",
+                "                return obj is Pair<T> other &&",
+                "                       EqualityComparer<T>.Default.Equals(First, other.First) &&",
+                "                       EqualityComparer<DateTime>.Default.Equals(When, other.When) &&",
+                "                       Count == other.Count;",
+                "            }"),
+            text);
+        Assert.Equal(lineEnding == "\n" ? 0 : text.Count(c => c == '\n'), text.Count(c => c == '\r'));
+        Assert.Empty(ws.GetDiskCompilationErrors());
+    }
+
+    [Fact]
+    public async Task OneComparison_StaysOnOneLine()
+    {
+        using var ws = TestWorkspace.Create(("Id.cs", """
+            namespace App;
+
+            public class Id
+            {
+                public int Value;
+            }
+            """));
+
+        var result = await GenerateAsync(ws, "Id.cs", "Id");
+
+        Assert.True(result.Success, result.Error?.Message);
+        Assert.Contains("        return obj is Id other && Value == other.Value;", ws.ReadFile("Id.cs"));
+    }
+
+    private static string LineEndingOf(string text) => text.Contains("\r\n", StringComparison.Ordinal) ? "\r\n" : "\n";
 
     private static Task<RefactoringResult> GenerateAsync(TestWorkspace ws, string file, string type) =>
         new GenerateEqualsHashCodeOperation(ws.Context).ExecuteAsync(

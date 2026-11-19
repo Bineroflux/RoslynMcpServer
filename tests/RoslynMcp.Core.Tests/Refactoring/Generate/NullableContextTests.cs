@@ -1,4 +1,5 @@
 using RoslynMcp.Contracts.Models;
+using RoslynMcp.Core.Refactoring.Extract;
 using RoslynMcp.Core.Refactoring.Generate;
 using Xunit;
 
@@ -89,6 +90,60 @@ public sealed class NullableContextTests
         var text = ws.ReadFile("Store.cs");
         Assert.Contains("public string? Find(string? key)", text);
         Assert.Contains("EventHandler<string?>? Changed", text);
+        Assert.Empty(ws.GetDiskCompilationWarningsAndErrors());
+    }
+
+    [Theory]
+    [InlineData("#nullable disable", "string name = store.Find(\"a\");", "System.Collections.Generic.List<string> names = store.All();")]
+    [InlineData("#nullable enable", "string? name = store.Find(\"a\");", "System.Collections.Generic.List<string?> names = store.All();")]
+    public async Task ExtractVariable_WritesAnnotationsOnlyWhereEnabled(string context, string name, string names)
+    {
+        using var ws = TestWorkspace.Create(
+            ("Store.cs", """
+                namespace App;
+
+                public class Store
+                {
+                    public string? Find(string key) => key;
+                    public System.Collections.Generic.List<string?> All() => new();
+                }
+                """),
+            ("Use.cs", $$"""
+                {{context}}
+                namespace App;
+
+                public static class Use
+                {
+                    public static int Run(Store store)
+                    {
+                        return store.Find("a")?.Length ?? store.All().Count;
+                    }
+                }
+                """));
+
+        foreach (var (expression, variable) in new[] { ("store.Find(\"a\")", "name"), ("store.All()", "names") })
+        {
+            var lines = ws.ReadFile("Use.cs").ReplaceLineEndings("\n").Split('\n');
+            var line = Array.FindIndex(lines, l => l.Contains(expression, StringComparison.Ordinal));
+            var column = lines[line].IndexOf(expression, StringComparison.Ordinal) + 1;
+            var result = await new ExtractVariableOperation(ws.Context).ExecuteAsync(
+                new ExtractVariableParams
+                {
+                    SourceFile = ws.PathOf("Use.cs"),
+                    StartLine = line + 1,
+                    StartColumn = column,
+                    EndLine = line + 1,
+                    EndColumn = column + expression.Length,
+                    VariableName = variable,
+                    UseVar = false
+                },
+                TestContext.Current.CancellationToken);
+            Assert.True(result.Success, result.Error?.Message);
+        }
+
+        var text = ws.ReadFile("Use.cs");
+        Assert.Contains(name, text);
+        Assert.Contains(names, text);
         Assert.Empty(ws.GetDiskCompilationWarningsAndErrors());
     }
 

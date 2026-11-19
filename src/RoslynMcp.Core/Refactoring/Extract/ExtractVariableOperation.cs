@@ -1,7 +1,6 @@
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
-using Microsoft.CodeAnalysis.Simplification;
 using Microsoft.CodeAnalysis.Text;
 using RoslynMcp.Contracts.Enums;
 using RoslynMcp.Contracts.Errors;
@@ -136,7 +135,7 @@ public sealed class ExtractVariableOperation : RefactoringOperationBase<ExtractV
             }
         }
 
-        // Determine type syntax
+        // Determine type syntax: `?` only where nullable annotations are enabled (CS8632).
         TypeSyntax typeSyntax;
         if (@params.UseVar || typeInfo.Type.IsAnonymousType)
         {
@@ -144,8 +143,9 @@ public sealed class ExtractVariableOperation : RefactoringOperationBase<ExtractV
         }
         else
         {
-            typeSyntax = SyntaxFactory.ParseTypeName(typeInfo.Type.ToDisplayString())
-                .WithAdditionalAnnotations(Simplifier.Annotation);
+            typeSyntax = SyntaxGenerationHelper.CreateTypeSyntax(
+                typeInfo.Type,
+                semanticModel.GetNullableContext(containingStatement.SpanStart).AnnotationsEnabled());
         }
 
         // Create variable declaration

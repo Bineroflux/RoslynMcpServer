@@ -1,7 +1,6 @@
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
-using Microsoft.CodeAnalysis.Simplification;
 using Microsoft.CodeAnalysis.Text;
 using RoslynMcp.Contracts.Enums;
 using RoslynMcp.Contracts.Errors;
@@ -150,7 +149,9 @@ public sealed class ExtractConstantOperation : RefactoringOperationBase<ExtractC
         var constField = CreateConstantField(
             @params.ConstantName,
             @params.Visibility,
-            typeInfo.Type,
+            SyntaxGenerationHelper.CreateTypeSyntax(
+                typeInfo.Type,
+                semanticModel.GetNullableContext(containingType.OpenBraceToken.Span.End).AnnotationsEnabled()),
             literal);
 
         // If preview mode, return without applying
@@ -257,7 +258,7 @@ public sealed class ExtractConstantOperation : RefactoringOperationBase<ExtractC
     private static FieldDeclarationSyntax CreateConstantField(
         string name,
         string visibility,
-        ITypeSymbol type,
+        TypeSyntax type,
         ExpressionSyntax initializer)
     {
         var modifiers = new List<SyntaxToken>();
@@ -290,10 +291,7 @@ public sealed class ExtractConstantOperation : RefactoringOperationBase<ExtractC
         modifiers.Add(SyntaxFactory.Token(SyntaxKind.ConstKeyword));
 
         return SyntaxFactory.FieldDeclaration(
-            SyntaxFactory.VariableDeclaration(
-                SyntaxFactory.ParseTypeName(type.ToDisplayString())
-                    .WithAdditionalAnnotations(Simplifier.Annotation)
-                    .WithTrailingTrivia(SyntaxFactory.Space))
+            SyntaxFactory.VariableDeclaration(type.WithTrailingTrivia(SyntaxFactory.Space))
                 .WithVariables(SyntaxFactory.SingletonSeparatedList(
                     SyntaxFactory.VariableDeclarator(IdentifierNames.Token(name))
                         .WithInitializer(SyntaxFactory.EqualsValueClause(initializer)))))

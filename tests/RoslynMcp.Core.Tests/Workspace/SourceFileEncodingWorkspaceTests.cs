@@ -1,5 +1,6 @@
 using System.Text;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.MSBuild;
 using Microsoft.CodeAnalysis.Text;
 using RoslynMcp.Contracts.Errors;
 using RoslynMcp.Contracts.Models;
@@ -404,6 +405,46 @@ public sealed class SourceFileEncodingWorkspaceTests
             await File.ReadAllBytesAsync(counter, ct));
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Reevaluation_TellsTheProjectsCodePage_WhateverTheLoadInferred(bool codePage)
+    {
+        // The load infers <CodePage> from the texts and cannot tell it when every file without
+        // byte order mark is invalid UTF-8. A re-evaluation has MSBuild's own answer.
+        if (!ModuleInitializer.MsBuildAvailable)
+        {
+            Assert.Skip($"MSBuild not available: {ModuleInitializer.MsBuildError}");
+        }
+
+        var ct = TestContext.Current.CancellationToken;
+        using var working = RenameTempSolution.Create();
+        var csproj = Path.Combine(working.ProjectDir, "TestProject.csproj");
+        if (codePage)
+        {
+            await File.WriteAllTextAsync(
+                csproj,
+                (await File.ReadAllTextAsync(csproj, ct)).Replace("</Nullable>", "</Nullable>\n    <CodePage>1252</CodePage>", StringComparison.Ordinal),
+                ct);
+        }
+
+        var counter = Path.Combine(working.ProjectDir, "Counter.cs");
+        await File.WriteAllTextAsync(counter, "namespace TestProject;\n\ninternal static class Counter\n{\n}\n", ct);
+
+        // Loaded with the opposite of the truth: no code page known, or windows-1252 where none is declared.
+        using var context = await LoadWithDeclaredEncodingAsync(csproj, codePage ? null : Windows1252, ct);
+        await context.ReconcileProjectDocumentsAsync(csproj, ct);
+
+        // Changed outside, into bytes that are valid UTF-8: C3 A4 is "ä" in UTF-8, "Ã¤" in windows-1252.
+        const string Changed = "namespace TestProject;\n\n// Ã¤\ninternal static class Counter\n{\n}\n";
+        await File.WriteAllBytesAsync(counter, Windows1252.GetBytes(Changed), ct);
+        Assert.Equal(DiskSyncOutcome.Updated, await context.SyncDocumentFromDiskAsync(counter, ct));
+
+        var text = await context.GetDocumentByPath(counter)!.GetTextAsync(ct);
+        Assert.Equal(codePage ? Changed : Changed.Replace("Ã¤", "ä", StringComparison.Ordinal), text.ToString());
+        Assert.Equal(codePage ? 1252 : 65001, text.Encoding!.CodePage);
+    }
+
     [Fact]
     public async Task StandaloneFile_Windows1252_KeepsTheUmlauts()
     {
@@ -439,6 +480,31 @@ public sealed class SourceFileEncodingWorkspaceTests
         await File.WriteAllBytesAsync(path, Windows1252.GetBytes(Legacy), TestContext.Current.CancellationToken);
         Assert.Equal(DiskSyncOutcome.Updated, await ws.Context.SyncDocumentFromDiskAsync(path, TestContext.Current.CancellationToken));
         return ws;
+    }
+
+    /// <summary>
+    /// Loads <paramref name="projectFile"/> through MSBuild, compilation included, into a context
+    /// that takes <paramref name="declared"/> as every project's <c>CodePage</c>, whatever the
+    /// load would infer.
+    /// </summary>
+    private static async Task<WorkspaceContext> LoadWithDeclaredEncodingAsync(
+        string projectFile, Encoding? declared, CancellationToken ct)
+    {
+        var properties = new Dictionary<string, string>
+        {
+            ["CheckForSystemRuntimeDependency"] = "true",
+            ["DesignTimeBuild"] = "true",
+            ["BuildingInsideVisualStudio"] = "true",
+        };
+        var workspace = MSBuildWorkspace.Create(properties);
+        var project = await workspace.OpenProjectAsync(projectFile, cancellationToken: ct);
+        await project.GetCompilationAsync(ct);
+        return new WorkspaceContext(
+            workspace,
+            project.Solution,
+            projectFile,
+            msbuildProperties: properties,
+            declaredEncodings: declared == null ? null : project.Solution.ProjectIds.ToDictionary(id => id, _ => declared));
     }
 
     // Without a code page to go by, a file that is not UTF-8 is read in the system's ANSI code

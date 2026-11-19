@@ -153,9 +153,11 @@ public sealed class WorkspaceContext : IDisposable
         public readonly Microsoft.CodeAnalysis.Workspace Workspace = workspace;
 
         // The encoding each project declares for its files without byte order mark (MSBuild's
-        // CodePage), as captured at load (ProjectFileConventions.InferDeclaredEncodingsAsync);
-        // a project that declares none is missing. Projects don't change within a workspace.
-        public readonly ImmutableDictionary<ProjectId, Encoding> DeclaredEncodings = declaredEncodings;
+        // CodePage); a project that declares none is missing. Inferred at load
+        // (ProjectFileConventions.InferDeclaredEncodingsAsync), and set from MSBuild's own answer
+        // whenever a project is re-evaluated (WithEvaluatedDocumentsAsync). Guarded like
+        // Solution: replaced only under the file-update lease or in this session's writer section.
+        public ImmutableDictionary<ProjectId, Encoding> DeclaredEncodings = declaredEncodings;
         public readonly string LoadedPath = loadedPath;
         public readonly IFileWriter FileWriter = fileWriter;
         public readonly IReadOnlyList<string> GeneratorLoadIssues = generatorLoadIssues;
@@ -457,6 +459,7 @@ public sealed class WorkspaceContext : IDisposable
             sol = await WithDiskTextAsync(sol, tracked, text, bytes, cancellationToken).ConfigureAwait(false);
         }
 
+        var declared = _s.DeclaredEncodings;
         var projectFiles = toEvaluate
             .SelectMany(path => FindProjectFilesForPath(sol, path))
             .Distinct(PathResolver.PathComparer);
@@ -467,7 +470,7 @@ public sealed class WorkspaceContext : IDisposable
                 var evaluated = await EvaluateProjectAsync(projectFile, cancellationToken).ConfigureAwait(false);
                 if (evaluated is { Count: > 0 })
                 {
-                    sol = await WithEvaluatedDocumentsAsync(sol, projectFile, evaluated, cancellationToken)
+                    (sol, declared) = await WithEvaluatedDocumentsAsync(sol, declared, projectFile, evaluated, cancellationToken)
                         .ConfigureAwait(false);
                 }
             }
@@ -483,6 +486,7 @@ public sealed class WorkspaceContext : IDisposable
         }
 
         _s.Solution = sol;
+        _s.DeclaredEncodings = declared;
         _s.WritesSeen = through;
     }
 
@@ -862,7 +866,9 @@ public sealed class WorkspaceContext : IDisposable
         {
             if (_s.Disposed) return false;
             var sol = _s.Solution;
-            var updated = await WithEvaluatedDocumentsAsync(sol, projectFilePath, freshInfos, cancellationToken);
+            var (updated, declared) = await WithEvaluatedDocumentsAsync(
+                sol, _s.DeclaredEncodings, projectFilePath, freshInfos, cancellationToken);
+            _s.DeclaredEncodings = declared;
             if (ReferenceEquals(updated, sol))
                 return false;
 
@@ -880,15 +886,19 @@ public sealed class WorkspaceContext : IDisposable
     /// brought in line with <paramref name="freshInfos"/>, its re-evaluation (one per target
     /// framework): documents the evaluation newly compiles are added, and documents it no longer
     /// compiles are removed once their file is gone from disk. The same instance when nothing
-    /// changes. The caller holds what keeps the other writers out (the file-update lease, or the
-    /// writer section), so the disk checked here is the disk the result is applied to.
+    /// changes. Also <paramref name="declared"/> (<see cref="Session.DeclaredEncodings"/>) with
+    /// the encoding the evaluation hands the project's documents' loaders, MSBuild's own answer
+    /// to what the load could only infer (see <see cref="WithDeclaredEncoding"/>). The caller
+    /// holds what keeps the other writers out (the file-update lease, or the writer section), so
+    /// the disk checked here is the disk the result is applied to, and stores both.
     /// </summary>
     /// <exception cref="InvalidOperationException">
     /// A re-evaluated project does not map to exactly one loaded project (e.g. a target framework
     /// was added or removed); the caller falls back to a full reload.
     /// </exception>
-    private static async Task<Solution> WithEvaluatedDocumentsAsync(
+    private static async Task<(Solution Solution, ImmutableDictionary<ProjectId, Encoding> Declared)> WithEvaluatedDocumentsAsync(
         Solution solution,
+        ImmutableDictionary<ProjectId, Encoding> declared,
         string projectFilePath,
         IReadOnlyList<ProjectInfo> freshInfos,
         CancellationToken cancellationToken)
@@ -913,6 +923,8 @@ public sealed class WorkspaceContext : IDisposable
                 throw new InvalidOperationException(
                     $"Re-evaluated project '{fresh.Name}' did not map to exactly one loaded project.");
             }
+
+            declared = WithDeclaredEncoding(declared, existing.Id, fresh);
 
             var freshDocs = new Dictionary<string, DocumentInfo>(PathResolver.PathComparer);
             foreach (var d in fresh.Documents)
@@ -959,7 +971,26 @@ public sealed class WorkspaceContext : IDisposable
             }
         }
 
-        return sol;
+        return (sol, declared);
+    }
+
+    /// <summary>
+    /// <paramref name="declared"/> with the encoding the re-evaluated project <paramref name="fresh"/>
+    /// declares for project <paramref name="projectId"/>: the <see cref="FileTextLoader.DefaultEncoding"/>
+    /// MSBuild gives its documents' loaders (its <c>CodePage</c>), or none when it gives them none.
+    /// This is authoritative, unlike the inference at load, which cannot tell a code page from
+    /// files that are all invalid UTF-8. Unchanged when the evaluation has no document to tell.
+    /// </summary>
+    private static ImmutableDictionary<ProjectId, Encoding> WithDeclaredEncoding(
+        ImmutableDictionary<ProjectId, Encoding> declared, ProjectId projectId, ProjectInfo fresh)
+    {
+        var loader = fresh.Documents.Select(d => d.TextLoader).OfType<FileTextLoader>().FirstOrDefault();
+        if (loader == null)
+            return declared;
+
+        return loader.DefaultEncoding is { } encoding
+            ? declared.SetItem(projectId, encoding)
+            : declared.Remove(projectId);
     }
 
     /// <summary>

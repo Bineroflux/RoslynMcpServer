@@ -47,15 +47,53 @@ internal static class UsingDirectives
         return newRoot.WithUsings(SyntaxFactory.List(directives));
     }
 
+    /// <summary>
+    /// <paramref name="declaration"/> with a <c>using</c> inside it for each of
+    /// <paramref name="namespaces"/> it does not import yet with a plain using: among its usings in
+    /// alphabetical order, <c>System</c> first, or before its first member, followed by a blank
+    /// line. The new directives are indented like the usings or members next to them, and each
+    /// new line ends in <paramref name="lineEnding"/>.
+    /// </summary>
+    public static BaseNamespaceDeclarationSyntax AddInside(
+        BaseNamespaceDeclarationSyntax declaration, IEnumerable<string> namespaces, string lineEnding)
+    {
+        var existing = declaration.Usings.Where(IsPlain).Select(u => u.Name!.ToString()).ToHashSet(StringComparer.Ordinal);
+        var added = namespaces.Distinct(StringComparer.Ordinal).Where(n => !existing.Contains(n)).Order(Comparer).ToList();
+        if (added.Count == 0)
+            return declaration;
+
+        if (declaration.Usings.Count > 0)
+            return declaration.WithUsings(Insert(declaration.Usings, added, lineEnding, Indentation(declaration.Usings[0].GetLeadingTrivia())));
+
+        if (declaration.Members.FirstOrDefault() is not { } first)
+            return declaration;
+
+        // The blank lines and indentation before the first member go before the new directives;
+        // its comments stay with it, after a blank line.
+        var leading = first.GetLeadingTrivia();
+        var layout = leading.TakeWhile(t => t.IsKind(SyntaxKind.WhitespaceTrivia) || t.IsKind(SyntaxKind.EndOfLineTrivia)).ToList();
+        var indentation = Indentation(SyntaxFactory.TriviaList(layout));
+        var directives = added.Select(n => Directive(n, lineEnding).WithLeadingTrivia(indentation)).ToList();
+        directives[0] = directives[0].WithLeadingTrivia(layout);
+        var moved = first.WithLeadingTrivia(
+            SyntaxFactory.TriviaList(SyntaxFactory.EndOfLine(lineEnding)).AddRange(indentation).AddRange(leading.Skip(layout.Count)));
+        return declaration.ReplaceNode(first, moved).WithUsings(SyntaxFactory.List(directives));
+    }
+
+    /// <summary>The indentation a line's leading trivia ends with.</summary>
+    private static SyntaxTriviaList Indentation(SyntaxTriviaList leading) =>
+        leading.Count > 0 && leading[^1].IsKind(SyntaxKind.WhitespaceTrivia) ? SyntaxFactory.TriviaList(leading[^1]) : default;
+
     private static SyntaxList<UsingDirectiveSyntax> Insert(
         SyntaxList<UsingDirectiveSyntax> usings,
         IReadOnlyList<string> namespaces,
-        string lineEnding)
+        string lineEnding,
+        SyntaxTriviaList indentation = default)
     {
         var result = usings;
         foreach (var name in namespaces)
         {
-            var directive = Directive(name, lineEnding);
+            var directive = Directive(name, lineEnding).WithLeadingTrivia(indentation);
             var index = result.IndexOf(u => IsPlain(u) && Comparer.Compare(name, u.Name!.ToString()) < 0);
             if (index < 0)
             {
@@ -68,7 +106,7 @@ internal static class UsingDirectives
                 // The first directive keeps the file's header comments.
                 var first = result[0];
                 directive = directive.WithLeadingTrivia(first.GetLeadingTrivia());
-                result = result.Replace(first, first.WithLeadingTrivia());
+                result = result.Replace(first, first.WithLeadingTrivia(indentation));
             }
 
             result = result.Insert(index, directive);

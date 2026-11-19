@@ -326,6 +326,59 @@ public sealed class RenameNamespaceTests
     }
 
     [Fact]
+    public async Task ExtensionMethodsFoundThroughAnEnclosingNamespace_GetAUsing_WhereTheFileKeepsItsUsings()
+    {
+        using var ws = TestWorkspace.Create(
+            ("Company.cs", "namespace Company\n{\n    public static class Ext { public static int Twice(this int x) => x * 2; }\n}\n"),
+            ("Widget.cs", "namespace Company.Old\n{\n    public class Widget { public int A => 3.Twice(); public int? B(int? x) => x?.Twice(); }\n}\n"),
+            ("Gadget.cs", "namespace Company.Old.Inner;\n\n/// <summary>A gadget.</summary>\npublic class Gadget { public int A => 2.Twice(); }\n"),
+            ("Mixed.cs", "namespace Company.Old\n{\n    /// <summary>Mixed.</summary>\n    public class Mixed { public int A => 1.Twice(); }\n}\n\nnamespace Elsewhere\n{\n    public class Plain { }\n}\n"),
+            ("Kept.cs", "namespace Company.Old\n{\n    using System;\n\n    public class Kept { public int A => Math.Abs(1).Twice(); }\n}\n"));
+
+        var result = await RenameAsync(ws, "Company.Old", "Other.New");
+
+        Assert.True(result.Success, result.Error?.Message);
+        Assert.Equal("using Company;\n\nnamespace Other.New\n{\n    public class Widget { public int A => 3.Twice(); public int? B(int? x) => x?.Twice(); }\n}\n", ws.ReadFile("Widget.cs"));
+        Assert.Equal("using Company;\n\nnamespace Other.New.Inner;\n\n/// <summary>A gadget.</summary>\npublic class Gadget { public int A => 2.Twice(); }\n", ws.ReadFile("Gadget.cs"));
+        Assert.Equal(
+            "namespace Other.New\n{\n    using Company;\n\n    /// <summary>Mixed.</summary>\n    public class Mixed { public int A => 1.Twice(); }\n}\n\nnamespace Elsewhere\n{\n    public class Plain { }\n}\n",
+            ws.ReadFile("Mixed.cs"));
+        Assert.Equal("namespace Other.New\n{\n    using System;\n    using Company;\n\n    public class Kept { public int A => Math.Abs(1).Twice(); }\n}\n", ws.ReadFile("Kept.cs"));
+        Assert.Equal(4, result.UsingDirectivesAdded);
+        Assert.Null(result.Warnings);
+        Assert.Empty(ws.GetDiskCompilationErrors());
+    }
+
+    [Fact]
+    public async Task AnExtensionMethodTheNewSurroundingsWouldHijack_GetsAUsingInsideTheDeclaration_AndAnAmbiguityIsReported()
+    {
+        using var ws = TestWorkspace.Create(
+            ("Company.cs", "namespace Company\n{\n    public static class Ext { public static int Twice(this int x) => x * 2; }\n}\n"),
+            ("Other.cs", "namespace Other\n{\n    public static class Hijack { public static int Twice(this int x) => x * 3; }\n}\n"),
+            ("Widget.cs", "namespace Company.Old\n{\n    public class Widget { public int A => 3.Twice(); }\n}\n"));
+
+        var result = await RenameAsync(ws, "Company.Old", "Other.New");
+
+        // At the top of the file, Other's method would still be found first.
+        Assert.True(result.Success, result.Error?.Message);
+        Assert.Equal("namespace Other.New\n{\n    using Company;\n\n    public class Widget { public int A => 3.Twice(); }\n}\n", ws.ReadFile("Widget.cs"));
+        Assert.Empty(ws.GetDiskCompilationErrors());
+
+        // In the namespace it is merged into, a method of the same scope makes the call ambiguous: reported.
+        using var merged = TestWorkspace.Create(
+            ("Company.cs", "namespace Company\n{\n    public static class Ext { public static int Twice(this int x) => x * 2; }\n}\n\nnamespace Company.Old\n{\n    public class Widget { public int A => 3.Twice(); }\n}\n"),
+            ("Local.cs", "namespace Other.New\n{\n    public static class Local { public static int Twice(this int x) => x * 4; }\n}\n"));
+
+        var reported = await RenameAsync(merged, "Company.Old", "Other.New");
+
+        Assert.True(reported.Success, reported.Error?.Message);
+        Assert.Contains("namespace Other.New\n{\n    public class Widget { public int A => 3.Twice(); }\n}\n", merged.ReadFile("Company.cs"), StringComparison.Ordinal);
+        Assert.Equal(0, reported.UsingDirectivesAdded);
+        Assert.Contains(reported.Warnings!, w => w.Contains("Company.cs(8): 'Twice' called 'Company.Ext.Twice(int)'", StringComparison.Ordinal) &&
+            w.Contains("now calls 'Other.New.Local.Twice(int)'", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task NamesThatAnEnclosingNamespaceFromAReferenceProvided_AreQualified()
     {
         using var ws = TestWorkspace.Create(

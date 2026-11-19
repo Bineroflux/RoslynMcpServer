@@ -34,7 +34,9 @@ namespace RoslynMcp.Core.Refactoring.Rename;
 /// A name inside a renamed declaration that found a namespace or type through an enclosing
 /// namespace the declaration leaves (<c>Sibling.Part</c> inside <c>namespace Company.Old</c>
 /// for <c>Company.Sibling.Part</c>, renamed to <c>Other.New</c>), or that a type of the new
-/// surroundings would shadow, is qualified as far as needed to bind as before. A using directive
+/// surroundings would shadow, is qualified as far as needed to bind as before; an extension
+/// method call that found its method that way gets a using of the method's namespace (see
+/// <see cref="AddExtensionUsingsAsync"/>). A using directive
 /// the rename makes a duplicate of another in its scope (CS0105) or of a global using (CS8933)
 /// is removed, and so is an import of an enclosing namespace of the old one that the rename
 /// empties; duplicates that were there before stay.
@@ -108,12 +110,14 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
         }
 
         var newSolution = await ApplyAsync(solution, scan, cancellationToken);
+        (newSolution, var usingsAdded, var extensionWarnings) = await AddExtensionUsingsAsync(rename, scan, newSolution, cancellationToken);
         (newSolution, var usingsRemoved, var vanished) = await RemoveRedundantUsingsAsync(rename, solution, newSolution, scan, cancellationToken);
         newSolution = RazorNamespaceDirectives.Apply(newSolution, razor);
 
         var warnings = ProjectFileWarnings(rename, solution, out var projectsWithUsings);
         warnings.AddRange(scan.Generated.Select(path =>
             $"'{path}' is generated and was not changed; it still refers to namespace '{rename.Old}'."));
+        warnings.AddRange(extensionWarnings);
         warnings.AddRange(razor.Mentions.Select(line =>
             $"{line}: still names namespace '{rename.Old}'; in Razor files only @using and @namespace directives are rewritten."));
 
@@ -141,6 +145,7 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
                 Preview = true,
                 PendingChanges = await CreatePendingChangesAsync(rename, scan, razor, solution, newSolution, plans, cancellationToken),
                 ReferencesUpdated = references,
+                UsingDirectivesAdded = usingsAdded,
                 UsingDirectivesRemoved = usingsRemoved,
                 Warnings = warnings.Count == 0 ? null : warnings
             };
@@ -203,6 +208,7 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
                 NewNamespace = rename.New
             },
             ReferencesUpdated = references,
+            UsingDirectivesAdded = usingsAdded,
             UsingDirectivesRemoved = usingsRemoved,
             Error = partial,
             Warnings = warnings.Count == 0 ? null : warnings
@@ -238,7 +244,14 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
             foreach (var enclosing in rename.EnclosingNamespaces)
             {
                 foreach (var member in FindNamespace(compilation.GlobalNamespace, enclosing)?.GetMembers() ?? [])
+                {
                     rename.EnclosingMemberNames.Add(member.Name);
+                    if (member is INamedTypeSymbol { MightContainExtensionMethods: true } type)
+                    {
+                        foreach (var method in type.GetMembers().OfType<IMethodSymbol>().Where(m => m.IsExtensionMethod))
+                            rename.EnclosingExtensionNames.Add(method.Name);
+                    }
+                }
             }
 
             if (FindNamespace(compilation.GlobalNamespace, rename.Old) is { } oldNamespace)
@@ -346,7 +359,7 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
                 CollectDeclarations(rename, file, version, editable: !generated);
                 await CollectReferencesAsync(rename, file, version, cancellationToken);
                 if (rename.ChangesLookup && version.RenamedBlocks.Count > 0)
-                    await CollectEnclosedNamesAsync(rename, version, cancellationToken);
+                    await CollectEnclosedNamesAsync(rename, file, version, cancellationToken);
                 file.Versions.Add(version);
             }
 
@@ -589,13 +602,15 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
     /// rename changes around them (<see cref="NamespaceRename.EnclosingMemberNames"/>), which
     /// spares binding every identifier of the renamed files.
     /// </summary>
-    private static async Task CollectEnclosedNamesAsync(NamespaceRename rename, DocumentRewrite version, CancellationToken cancellationToken)
+    private static async Task CollectEnclosedNamesAsync(NamespaceRename rename, FileRewrite file, DocumentRewrite version, CancellationToken cancellationToken)
     {
         var model = await version.Document.GetSemanticModelAsync(cancellationToken)
             ?? throw new RefactoringException(ErrorCodes.RoslynError, "Could not analyze file.");
 
         foreach (var block in version.RenamedBlocks)
         {
+            CollectExtensionCalls(rename, file, block, model, cancellationToken);
+
             foreach (var name in block.DescendantNodes(descendIntoTrivia: true).OfType<SimpleNameSyntax>())
             {
                 var text = name.Identifier.ValueText;
@@ -631,6 +646,255 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
         NameMemberCrefSyntax member => member.Parent is not QualifiedCrefSyntax,
         _ => true
     };
+
+    /// <summary>
+    /// Records the extension method calls inside <paramref name="block"/> (<c>x.Twice()</c>) that
+    /// may find their method through a namespace that encloses the block before the rename only:
+    /// the method they call, and its namespace, by the line, name and occurrence of the call (a
+    /// file's lines stay where they are until <see cref="AddExtensionUsingsAsync"/> runs).
+    /// </summary>
+    private static void CollectExtensionCalls(
+        NamespaceRename rename,
+        FileRewrite file,
+        BaseNamespaceDeclarationSyntax block,
+        SemanticModel model,
+        CancellationToken cancellationToken)
+    {
+        if (rename.EnclosingExtensionNames.Count == 0)
+            return;
+
+        var text = block.SyntaxTree.GetText(cancellationToken);
+        var seen = new Dictionary<(int, string), int>();
+        foreach (var call in block.DescendantNodes().OfType<InvocationExpressionSyntax>())
+        {
+            if (CalledName(call) is not { } name || !rename.EnclosingExtensionNames.Contains(name.Identifier.ValueText))
+                continue;
+
+            var line = text.Lines.GetLineFromPosition(name.SpanStart).LineNumber;
+            var occurrence = seen.GetValueOrDefault((line, name.Identifier.ValueText));
+            seen[(line, name.Identifier.ValueText)] = occurrence + 1;
+            if (CalledExtension(model, call, cancellationToken) is not { ContainingType.ContainingNamespace: { IsGlobalNamespace: false } ns } method)
+                continue;
+
+            file.ExtensionCalls.TryAdd(
+                (line, name.Identifier.ValueText, occurrence),
+                new ExtensionCall(ExtensionKey(method, rename.MapAny), rename.MapAny(ns.ToDisplayString()), method.ToDisplayString()));
+        }
+    }
+
+    /// <summary>The name a call calls through a member access or <c>?.</c>, if it does.</summary>
+    private static SimpleNameSyntax? CalledName(InvocationExpressionSyntax call) => call.Expression switch
+    {
+        MemberAccessExpressionSyntax access => access.Name,
+        MemberBindingExpressionSyntax binding => binding.Name,
+        _ => null
+    };
+
+    /// <summary>The extension method a call calls as one (<c>x.M()</c>), in its declared form.</summary>
+    private static IMethodSymbol? CalledExtension(SemanticModel model, InvocationExpressionSyntax call, CancellationToken cancellationToken) =>
+        model.GetSymbolInfo(call, cancellationToken).Symbol is IMethodSymbol { MethodKind: MethodKind.ReducedExtension } method
+            ? (method.ReducedFrom ?? method).OriginalDefinition
+            : null;
+
+    /// <summary>Identifies an extension method across the rename, like <see cref="NamespaceOrTypeKey"/>.</summary>
+    private static string ExtensionKey(IMethodSymbol method, Func<string, string> map) =>
+        $"{NamespaceOrTypeKey(method.ContainingType, map)}.{method.MetadataName}({method.Parameters.Length})";
+
+    /// <summary>
+    /// The call recorded at <paramref name="line"/> (its name's line), with
+    /// <paramref name="name"/>, the <paramref name="occurrence"/>-th such call there.
+    /// </summary>
+    private static InvocationExpressionSyntax? FindCall(SyntaxNode root, SourceText text, int line, string name, int occurrence) =>
+        line < 0 || line >= text.Lines.Count
+            ? null
+            : root.DescendantNodes(text.Lines[line].Span)
+                .OfType<InvocationExpressionSyntax>()
+                .Where(c => CalledName(c) is { } called && called.Identifier.ValueText == name &&
+                    text.Lines.GetLineFromPosition(called.SpanStart).LineNumber == line)
+                .Skip(occurrence)
+                .FirstOrDefault();
+
+    /// <summary>
+    /// Adds a using for the namespace of each extension method a call inside a renamed
+    /// declaration found through a namespace the declaration left (<c>3.Twice()</c> inside
+    /// <c>namespace Company.Old</c> for <c>Company.Ext.Twice</c>, renamed to <c>Other.New</c>)
+    /// and no longer finds, or no longer finds first. The using goes where the file keeps its
+    /// usings: inside the renamed declaration when it has usings or shares the file with other
+    /// declarations, else at the top of the file; when that is not enough, inside the
+    /// declaration, where it is searched before the new enclosing namespaces. It stays only
+    /// when every such call then calls its method again in every target framework and the file
+    /// gets no new compiler error (an ambiguity); otherwise the file is left as it is and a call
+    /// that now calls another method is reported (one that calls none is a compiler error).
+    /// </summary>
+    private static async Task<(Solution Solution, int Added, List<string> Warnings)> AddExtensionUsingsAsync(
+        NamespaceRename rename,
+        Scan scan,
+        Solution solution,
+        CancellationToken cancellationToken)
+    {
+        var result = solution;
+        var added = 0;
+        var warnings = new List<string>();
+        foreach (var file in scan.Files.Where(f => f.ExtensionCalls.Count > 0))
+        {
+            var ids = file.Versions.Select(v => v.Document.Id).ToList();
+            var broken = await BrokenCallsAsync(result, ids, file.ExtensionCalls, lines: null, cancellationToken);
+            if (broken.Count == 0)
+                continue;
+
+            var document = result.GetDocument(ids[0])!;
+            var text = await document.GetTextAsync(cancellationToken);
+            var root = (CompilationUnitSyntax)(await document.GetSyntaxRootAsync(cancellationToken))!;
+            var lineEnding = await LineEndings.GetAsync(document, cancellationToken);
+
+            Solution? fixedSolution = null;
+            var tried = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var inside in new[] { false, true })
+            {
+                if (WithExtensionUsings(rename, root, text, broken, lineEnding, inside) is not { } newRoot ||
+                    !tried.Add(newRoot.ToFullString()))
+                {
+                    continue;
+                }
+
+                var newText = text.WithChanges(new TextChange(new TextSpan(0, text.Length), newRoot.ToFullString()));
+                var candidate = ids.Aggregate(result, (s, id) => s.WithDocumentText(id, newText));
+                var lines = MapLines(text, newText);
+                if ((await BrokenCallsAsync(candidate, ids, broken, lines, cancellationToken)).Count == 0 &&
+                    await IntroducedErrors.FindAsync(result, candidate, ids, cancellationToken, matchLines: false) == null)
+                {
+                    fixedSolution = candidate;
+                    added += newRoot.DescendantNodes(n => n is CompilationUnitSyntax or BaseNamespaceDeclarationSyntax).OfType<UsingDirectiveSyntax>().Count() -
+                        root.DescendantNodes(n => n is CompilationUnitSyntax or BaseNamespaceDeclarationSyntax).OfType<UsingDirectiveSyntax>().Count();
+                    break;
+                }
+            }
+
+            if (fixedSolution != null)
+            {
+                result = fixedSolution;
+                continue;
+            }
+
+            // Left as it is: a call that now calls another extension method compiles, so say so.
+            foreach (var ((line, name, occurrence), call) in broken)
+            {
+                foreach (var id in ids)
+                {
+                    var version = result.GetDocument(id)!;
+                    if (await version.GetSyntaxRootAsync(cancellationToken) is not { } versionRoot ||
+                        await version.GetSemanticModelAsync(cancellationToken) is not { } model ||
+                        FindCall(versionRoot, await version.GetTextAsync(cancellationToken), line, name, occurrence) is not { } found ||
+                        CalledExtension(model, found, cancellationToken) is not { } now)
+                    {
+                        continue;
+                    }
+
+                    warnings.Add($"{version.FilePath}({line + 1}): '{name}' called '{call.Display}' through an enclosing namespace the " +
+                        $"rename leaves and now calls '{now.ToDisplayString()}'; a 'using {call.Namespace};' did not make it call the old one again.");
+                    break;
+                }
+            }
+        }
+
+        return (result, added, warnings);
+    }
+
+    /// <summary>
+    /// The recorded calls that, in some document of the file, no longer call their method. With
+    /// <paramref name="lines"/>, a call's line is mapped through it first (usings were added).
+    /// </summary>
+    private static async Task<Dictionary<(int Line, string Name, int Occurrence), ExtensionCall>> BrokenCallsAsync(
+        Solution solution,
+        List<DocumentId> ids,
+        IReadOnlyDictionary<(int Line, string Name, int Occurrence), ExtensionCall> calls,
+        int[]? lines,
+        CancellationToken cancellationToken)
+    {
+        var broken = new Dictionary<(int Line, string Name, int Occurrence), ExtensionCall>();
+        foreach (var id in ids)
+        {
+            var document = solution.GetDocument(id)!;
+            if (await document.GetSyntaxRootAsync(cancellationToken) is not { } root ||
+                await document.GetSemanticModelAsync(cancellationToken) is not { } model)
+            {
+                continue;
+            }
+
+            var text = await document.GetTextAsync(cancellationToken);
+            foreach (var (key, call) in calls)
+            {
+                var line = lines == null ? key.Line : key.Line < lines.Length ? lines[key.Line] : -1;
+                if (FindCall(root, text, line, key.Name, key.Occurrence) is { } found &&
+                    (CalledExtension(model, found, cancellationToken) is not { } method || ExtensionKey(method, ns => ns) != call.Key))
+                {
+                    broken.TryAdd(key, call);
+                }
+            }
+        }
+
+        return broken;
+    }
+
+    /// <summary>
+    /// <paramref name="root"/> with the usings the <paramref name="broken"/> calls need, in the
+    /// renamed declaration that encloses each call (the outermost declaring the new namespace or
+    /// one under it): inside it when <paramref name="inside"/> is set or the file keeps its
+    /// usings there, else at the top of the file. Null when nothing would change.
+    /// </summary>
+    private static CompilationUnitSyntax? WithExtensionUsings(
+        NamespaceRename rename,
+        CompilationUnitSyntax root,
+        SourceText text,
+        Dictionary<(int Line, string Name, int Occurrence), ExtensionCall> broken,
+        string lineEnding,
+        bool inside)
+    {
+        var targets = new Dictionary<BaseNamespaceDeclarationSyntax, SortedSet<string>>();
+        foreach (var ((line, name, occurrence), call) in broken)
+        {
+            if (FindCall(root, text, line, name, occurrence) is not { } found ||
+                found.Ancestors().OfType<BaseNamespaceDeclarationSyntax>().LastOrDefault(ns => FullName(ns) is var full &&
+                    (full == rename.New || full.StartsWith(rename.New + ".", StringComparison.Ordinal))) is not { } outermost)
+            {
+                continue;
+            }
+
+            if (!targets.TryGetValue(outermost, out var namespaces))
+                targets[outermost] = namespaces = new SortedSet<string>(StringComparer.Ordinal);
+            namespaces.Add(call.Namespace);
+        }
+
+        if (targets.Count == 0)
+            return null;
+
+        var atTop = !inside && targets.Count == 1 && targets.Keys.Single() is var only &&
+            only.Usings.Count == 0 && root.Members.Count == 1 && root.Members[0] == only;
+        var newRoot = atTop
+            ? UsingDirectives.Add(root, targets.Values.Single(), lineEnding)
+            : root.ReplaceNodes(targets.Keys, (original, rewritten) =>
+                UsingDirectives.AddInside((BaseNamespaceDeclarationSyntax)rewritten, targets[original], lineEnding));
+        return newRoot.ToFullString() == root.ToFullString() ? null : newRoot;
+    }
+
+    /// <summary>
+    /// For each line of <paramref name="before"/>, its line in <paramref name="after"/>, which has
+    /// only lines inserted.
+    /// </summary>
+    private static int[] MapLines(SourceText before, SourceText after)
+    {
+        var map = new int[before.Lines.Count];
+        var j = 0;
+        for (var i = 0; i < before.Lines.Count; i++)
+        {
+            var line = before.Lines[i].ToString();
+            while (j < after.Lines.Count && after.Lines[j].ToString() != line)
+                j++;
+            map[i] = j < after.Lines.Count ? j++ : -1;
+        }
+
+        return map;
+    }
 
     /// <summary>
     /// The namespace or top-level type <paramref name="name"/> binds to, or null: an alias, a
@@ -1199,6 +1463,12 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
         /// </summary>
         public HashSet<string> EnclosingMemberNames { get; } = new(StringComparer.Ordinal);
 
+        /// <summary>
+        /// The names of the extension methods declared in <see cref="EnclosingNamespaces"/>: only a
+        /// call spelled like one of them can find another extension method after the rename.
+        /// </summary>
+        public HashSet<string> EnclosingExtensionNames { get; } = new(StringComparer.Ordinal);
+
         private static IEnumerable<string> Prefixes(string[] segments) =>
             Enumerable.Range(1, segments.Length - 1).Select(length => string.Join('.', segments.Take(length)));
 
@@ -1232,6 +1502,12 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
 
         /// <summary>The names referring to the old namespace, found in any of the documents.</summary>
         public HashSet<TextSpan> ReferenceSpans { get; } = [];
+
+        /// <summary>
+        /// The extension method calls inside renamed declarations that may lose their method,
+        /// by the line, name and occurrence of the call (see <see cref="CollectExtensionCalls"/>).
+        /// </summary>
+        public Dictionary<(int Line, string Name, int Occurrence), ExtensionCall> ExtensionCalls { get; } = [];
 
         public int Declarations => DeclarationSpans.Count;
 
@@ -1277,4 +1553,10 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
     /// (null for the global namespace).
     /// </summary>
     private sealed record EnclosedName(SyntaxAnnotation Annotation, string Key, string? Container);
+
+    /// <summary>
+    /// An extension method call inside a renamed declaration: what it must call after the rename
+    /// (<see cref="ExtensionKey"/>), the namespace to import for that, and the method as written.
+    /// </summary>
+    private sealed record ExtensionCall(string Key, string Namespace, string Display);
 }

@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Collections.Immutable;
 using System.Text;
 using Microsoft.CodeAnalysis;
@@ -696,12 +697,16 @@ public sealed class WorkspaceContext : IDisposable
     /// started, raises no event, so without this the workspace kept the older text until the
     /// file changed again, and the next refactoring wrote it back. Takes the file-update lease;
     /// each recent file is read and applied as <see cref="SyncDocumentFromDiskAsync"/> does,
-    /// files not written since the load are only stat'ed.
+    /// files not written since the load are only stat'ed — except those whose text the load
+    /// decoded with replacement characters, which are read again and decoded as
+    /// <see cref="SourceFileEncoding.Decode"/> does (see <see cref="MayHaveBeenDecodedLenientlyAsync"/>).
     /// </summary>
     /// <returns>
-    /// The tracked files that are gone (whose projects need a re-evaluation, as for a deletion the
-    /// watcher reports), and whether a file-based program's <c>#:</c> directives changed (the
-    /// workspace must be rebuilt; that file's text is left as it was).
+    /// How many files' text changed, and how many of them were read again only because the load
+    /// had decoded them with replacement characters; the tracked files that are gone (whose
+    /// projects need a re-evaluation, as for a deletion the watcher reports); and whether a
+    /// file-based program's <c>#:</c> directives changed (the workspace must be rebuilt; that
+    /// file's text is left as it was).
     /// </returns>
     /// <remarks>
     /// The last-write time decides, so an edit that sets an older time (a copy that keeps the
@@ -726,11 +731,13 @@ public sealed class WorkspaceContext : IDisposable
             var sol = _s.Solution;
             var missing = new List<string>();
             var updated = 0;
+            var redecoded = 0;
             var reloadRequired = false;
             foreach (var (path, tracked) in IndexDocumentsByPath(sol))
             {
                 var file = new FileInfo(path);
-                if (file.Exists && file.LastWriteTimeUtc < threshold)
+                var unchangedSinceLoad = file.Exists && file.LastWriteTimeUtc < threshold;
+                if (unchangedSinceLoad && !await MayHaveBeenDecodedLenientlyAsync(tracked, cancellationToken).ConfigureAwait(false))
                     continue;
 
                 var bytes = file.Exists ? await TryReadFileAsync(path, cancellationToken).ConfigureAwait(false) : null;
@@ -752,15 +759,68 @@ public sealed class WorkspaceContext : IDisposable
                 {
                     sol = next;
                     updated++;
+                    if (unchangedSinceLoad)
+                        redecoded++;
                 }
             }
 
             _s.Solution = sol;
-            return new ChangedDuringLoad(updated, missing, reloadRequired);
+            return new ChangedDuringLoad(updated, missing, reloadRequired, redecoded);
         }
         finally
         {
             _s.Gate.ExitFileUpdate();
+        }
+    }
+
+    /// <summary>
+    /// Whether a document of <paramref name="tracked"/> holds text that a lenient UTF-8 decode
+    /// may have made: U+FFFD in text read as UTF-8 without byte order mark (or with no encoding
+    /// recorded). MSBuild's loader reads a file without byte order mark that is not valid UTF-8
+    /// in the system's ANSI code page; where that is UTF-8 (Windows' "Beta: Use Unicode UTF-8"
+    /// setting, Linux, macOS), every byte it cannot read became U+FFFD, and a commit then refused
+    /// the file until it was read again. Text decoded otherwise — in a code page, or by its byte
+    /// order mark — would read the same again. Only the text in memory is scanned, so on a
+    /// large solution just the documents holding U+FFFD are read again.
+    /// </summary>
+    private static async Task<bool> MayHaveBeenDecodedLenientlyAsync(
+        IReadOnlyList<Document> tracked, CancellationToken cancellationToken)
+    {
+        foreach (var document in tracked)
+        {
+            var text = await document.GetTextAsync(cancellationToken).ConfigureAwait(false);
+            if (text.Encoding is { } encoding &&
+                (encoding.CodePage != Encoding.UTF8.CodePage || encoding.Preamble.Length > 0))
+            {
+                continue;
+            }
+
+            if (ContainsReplacementCharacter(text))
+                return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>Whether <paramref name="text"/> contains U+FFFD, scanned in chunks.</summary>
+    private static bool ContainsReplacementCharacter(SourceText text)
+    {
+        var buffer = ArrayPool<char>.Shared.Rent(Math.Min(Math.Max(text.Length, 1), 8192));
+        try
+        {
+            for (var start = 0; start < text.Length; start += buffer.Length)
+            {
+                var count = Math.Min(buffer.Length, text.Length - start);
+                text.CopyTo(start, buffer, 0, count);
+                if (buffer.AsSpan(0, count).Contains('�'))
+                    return true;
+            }
+
+            return false;
+        }
+        finally
+        {
+            ArrayPool<char>.Shared.Return(buffer);
         }
     }
 
@@ -1754,7 +1814,11 @@ public sealed class WorkspaceContext : IDisposable
 /// <param name="Updated">How many files' text changed in the solution.</param>
 /// <param name="Missing">Tracked files (normalized paths) that are gone from disk; the solution still has them.</param>
 /// <param name="ReloadRequired">A file-based program's <c>#:</c> directives changed, so the workspace must be rebuilt.</param>
-internal sealed record ChangedDuringLoad(int Updated, IReadOnlyList<string> Missing, bool ReloadRequired);
+/// <param name="Redecoded">
+/// How many of <paramref name="Updated"/> were not written since the load but had been decoded
+/// with replacement characters by it, and now read in their code page.
+/// </param>
+internal sealed record ChangedDuringLoad(int Updated, IReadOnlyList<string> Missing, bool ReloadRequired, int Redecoded = 0);
 
 /// <summary>
 /// Outcome of <see cref="WorkspaceContext.SyncDocumentFromDiskAsync"/>.

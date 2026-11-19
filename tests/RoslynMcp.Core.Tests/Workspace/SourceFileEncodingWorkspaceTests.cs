@@ -233,6 +233,81 @@ public sealed class SourceFileEncodingWorkspaceTests
     }
 
     [Fact]
+    public async Task LoadSync_TextDecodedWithReplacementCharacters_IsReadAgainInItsCodePage()
+    {
+        // Where the system's ANSI code page is UTF-8, MSBuild's load reads a windows-1252 file
+        // as UTF-8 with U+FFFD for each umlaut, and every commit refused the file (4002) until
+        // it was read again. Simulated: such a text in the workspace, windows-1252 on disk.
+        var ct = TestContext.Current.CancellationToken;
+        using var ws = TestWorkspace.Create(("Legacy.cs", "internal sealed class Placeholder { }\n"), ("Other.cs", "internal sealed class Other { }\n"));
+        var path = ws.PathOf("Legacy.cs");
+        var bytes = Windows1252.GetBytes(Legacy);
+        await File.WriteAllBytesAsync(path, bytes, ct);
+        var lenientUtf8 = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+        var id = ws.Context.GetDocumentByPath(path)!.Id;
+        await ws.Context.UpdateSolutionInWriterAsync(
+            s => s.WithDocumentText(id, SourceText.From(lenientUtf8.GetString(bytes), lenientUtf8)), ct);
+        var before = ws.Context.Solution;
+
+        // The sync after the load, with every file older than the load.
+        var changed = await ws.Context.SyncFilesChangedSinceAsync(DateTime.UtcNow.AddHours(1), ct);
+
+        Assert.Equal(1, changed.Updated);
+        Assert.Equal(1, changed.Redecoded);
+        var text = await ws.Context.GetDocumentByPath(path)!.GetTextAsync(ct);
+        Assert.Equal(Legacy, text.ToString());
+        Assert.True(SourceFileEncoding.IsCodePage(text.Encoding!));
+        var other = ws.Context.GetDocumentByPath(ws.PathOf("Other.cs"))!.Id;
+        Assert.DoesNotContain(other, ws.Context.Solution.GetChanges(before).GetProjectChanges().SelectMany(p => p.GetChangedDocuments()));
+
+        // So a refactoring of the file is no longer refused, and keeps its bytes.
+        var renamed = Legacy.Replace("class Legacy", "class Altlast", StringComparison.Ordinal);
+        var commit = await ws.Context.CommitInWriterAsync(s => s.WithDocumentText(id, SourceText.From(renamed)), ct);
+        Assert.True(commit.Success, commit.Error);
+        Assert.Equal(text.Encoding!.GetBytes(renamed), await File.ReadAllBytesAsync(path, ct));
+    }
+
+    [Fact]
+    public async Task LoadSync_ReplacementCharacterTheFileHolds_LeavesTheTextAlone()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        const string Source = "// � stands for what could not be read\ninternal sealed class Marker { }\n";
+        using var ws = TestWorkspace.Create(("Marker.cs", Source));
+        var id = ws.Context.GetDocumentByPath(ws.PathOf("Marker.cs"))!.Id;
+        await ws.Context.UpdateSolutionInWriterAsync(
+            s => s.WithDocumentText(id, SourceText.From(Source, SourceFileEncoding.Utf8WithoutBom)), ct);
+        var before = ws.Context.Solution;
+
+        var changed = await ws.Context.SyncFilesChangedSinceAsync(DateTime.UtcNow.AddHours(1), ct);
+
+        Assert.Equal(0, changed.Updated);
+        Assert.Same(before, ws.Context.Solution);
+    }
+
+    [Fact]
+    public async Task CachedLoad_TextDecodedWithReplacementCharacters_IsReadAgainBeforeAnyCallSeesIt()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        using var ws = TestWorkspace.Create(("Legacy.cs", "internal sealed class Placeholder { }\n"));
+        var path = ws.PathOf("Legacy.cs");
+        var bytes = Windows1252.GetBytes(Legacy);
+        await File.WriteAllBytesAsync(path, bytes, ct);
+        File.SetLastWriteTimeUtc(path, DateTime.UtcNow.AddMinutes(-5)); // written well before the load
+        var lenientUtf8 = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+        var id = ws.Context.GetDocumentByPath(path)!.Id;
+        await ws.Context.UpdateSolutionInWriterAsync(
+            s => s.WithDocumentText(id, SourceText.From(lenientUtf8.GetString(bytes), lenientUtf8)), ct);
+        using var cache = new WorkspaceCache(idleTtl: TimeSpan.FromHours(1), sweepInterval: TimeSpan.FromHours(1));
+
+        var (context, _) = await cache.GetOrCreateAsync(ws.Directory, _ => Task.FromResult(ws.Context), ct);
+
+        using (context)
+        {
+            Assert.Equal(Legacy, (await context.GetDocumentByPath(path)!.GetTextAsync(ct)).ToString());
+        }
+    }
+
+    [Fact]
     public async Task MsBuildWorkspace_Windows1252Files_AreReadAndWrittenInTheirCodePage()
     {
         if (!ModuleInitializer.MsBuildAvailable)

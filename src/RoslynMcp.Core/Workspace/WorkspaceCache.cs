@@ -507,10 +507,11 @@ public sealed class WorkspaceCache : IDisposable
         public bool IsInvalidated => IsTombstoned(Volatile.Read(ref _state));
 
         /// <summary>
-        /// Syncs the files changed since <paramref name="loadStartUtc"/>, once the watchers run
-        /// (see <see cref="WorkspaceContext.SyncFilesChangedSinceAsync"/>), and re-evaluates the
-        /// projects of tracked files that are gone, as the watcher does for a deletion. Runs
-        /// before the entry is published, so no operation holds a lease yet.
+        /// Syncs the files changed since <paramref name="loadStartUtc"/>, once the watchers run,
+        /// and reads again the files the load decoded with replacement characters (see
+        /// <see cref="WorkspaceContext.SyncFilesChangedSinceAsync"/>); re-evaluates the projects
+        /// of tracked files that are gone, as the watcher does for a deletion. Runs before the
+        /// entry is published, so no operation holds a lease yet.
         /// </summary>
         /// <returns>
         /// True when the workspace must be loaded afresh: a file-based program's directives
@@ -519,9 +520,12 @@ public sealed class WorkspaceCache : IDisposable
         public async Task<bool> SyncChangedDuringLoadAsync(DateTime loadStartUtc)
         {
             var changed = await Context.SyncFilesChangedSinceAsync(loadStartUtc).ConfigureAwait(false);
-            if (changed.Updated > 0)
+            if (changed.Updated > changed.Redecoded)
                 _cache.LogCallback?.Invoke(
-                    $"{changed.Updated} file(s) of '{_key}' changed while it loaded; took over their text.");
+                    $"{changed.Updated - changed.Redecoded} file(s) of '{_key}' changed while it loaded; took over their text.");
+            if (changed.Redecoded > 0)
+                _cache.LogCallback?.Invoke(
+                    $"{changed.Redecoded} file(s) of '{_key}' were loaded with replacement characters (not UTF-8, read as UTF-8); read them again in their code page.");
 
             if (changed.ReloadRequired)
             {

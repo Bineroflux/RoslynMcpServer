@@ -56,7 +56,7 @@ public sealed class WorkspaceCacheBehaviorTests
             // Touch the solution so we can confirm every caller got a live workspace.
             var projectCount = ctx.Solution.Projects.Count();
             Assert.True(projectCount > 0, "Solution should contain at least one project.");
-            return ctx;
+            return (Handle: ctx, ctx.Workspace);
         }, cts.Token)).ToArray();
 
         var wallClock = Stopwatch.StartNew();
@@ -71,10 +71,9 @@ public sealed class WorkspaceCacheBehaviorTests
 
         // Every caller should observe the same underlying workspace, each through a handle
         // of its own (the lease it releases).
-        var firstContext = contexts[0];
         foreach (var c in contexts)
-            Assert.Same(firstContext.Workspace, c.Workspace);
-        Assert.Equal(ParallelCallers, contexts.Distinct().Count());
+            Assert.Same(contexts[0].Workspace, c.Workspace);
+        Assert.Equal(ParallelCallers, contexts.Select(c => c.Handle).Distinct().Count());
     }
 
     [Fact]
@@ -165,10 +164,10 @@ public sealed class WorkspaceCacheBehaviorTests
         // way a refactoring does — this writes Models.cs via the atomic temp+delete+rename
         // path, which is exactly what used to make the watcher invalidate the entry.
         const string markerClassName = "SelfWriteCommitMarker";
-        WorkspaceContext first;
+        Microsoft.CodeAnalysis.Workspace first;
         using (var ctx = await provider.CreateContextAsync(working.SolutionPath, ct))
         {
-            first = ctx;
+            first = ctx.Workspace;
             var doc = ctx.GetDocumentByPath(modelsPath);
             Assert.NotNull(doc);
 
@@ -190,10 +189,10 @@ public sealed class WorkspaceCacheBehaviorTests
         // re-acquire stays a plain cache hit (same instance, no second MSBuild load).
         await Task.Delay(2000, ct);
 
-        WorkspaceContext second;
+        Microsoft.CodeAnalysis.Workspace second;
         using (var ctx = await provider.CreateContextAsync(working.SolutionPath, ct))
-            second = ctx;
-        Assert.Same(first.Workspace, second.Workspace);
+            second = ctx.Workspace;
+        Assert.Same(first, second);
         Assert.Equal(1, missCount);
     }
 
@@ -224,10 +223,10 @@ public sealed class WorkspaceCacheBehaviorTests
         var newFilePath = Path.Combine(working.ProjectDir, "BrandNewType.cs");
         const string newTypeName = "BrandNewType";
 
-        WorkspaceContext first;
+        Microsoft.CodeAnalysis.Workspace first;
         using (var ctx = await provider.CreateContextAsync(working.SolutionPath, ct))
         {
-            first = ctx;
+            first = ctx.Workspace;
             Assert.Null(ctx.GetDocumentByPath(newFilePath)); // not present before
         }
 
@@ -238,12 +237,12 @@ public sealed class WorkspaceCacheBehaviorTests
 
         var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(30);
         var tracked = false;
-        WorkspaceContext last = first;
+        var last = first;
         while (DateTime.UtcNow < deadline)
         {
             using (var ctx = await provider.CreateContextAsync(working.SolutionPath, ct))
             {
-                last = ctx;
+                last = ctx.Workspace;
                 if (ctx.GetDocumentByPath(newFilePath) != null &&
                     await TypeExistsInWorkspaceAsync(ctx, newTypeName, ct))
                 {
@@ -256,7 +255,7 @@ public sealed class WorkspaceCacheBehaviorTests
 
         Assert.True(tracked, "A newly created .cs file should be added to the workspace via project re-evaluation.");
         Assert.Equal(1, missCount);   // added incrementally — never a full reload
-        Assert.Same(first.Workspace, last.Workspace);     // same cached workspace throughout
+        Assert.Same(first, last);     // same cached workspace throughout
     }
 
     [Fact]
@@ -288,10 +287,10 @@ public sealed class WorkspaceCacheBehaviorTests
 
         // Rename-style commit through the cached context (writes Models.cs atomically).
         const string commitMarker = "CommitMarkerAlpha";
-        WorkspaceContext first;
+        Microsoft.CodeAnalysis.Workspace first;
         using (var ctx = await provider.CreateContextAsync(working.SolutionPath, ct))
         {
-            first = ctx;
+            first = ctx.Workspace;
             var doc = ctx.GetDocumentByPath(modelsPath);
             Assert.NotNull(doc);
             var text = (await doc!.GetTextAsync(ct)).ToString();
@@ -315,12 +314,12 @@ public sealed class WorkspaceCacheBehaviorTests
 
         var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(15);
         var visible = false;
-        WorkspaceContext last = first;
+        var last = first;
         while (DateTime.UtcNow < deadline)
         {
             using (var ctx = await provider.CreateContextAsync(working.SolutionPath, ct))
             {
-                last = ctx;
+                last = ctx.Workspace;
                 if (await TypeExistsInWorkspaceAsync(ctx, externalMarker, ct))
                 {
                     visible = true;
@@ -332,7 +331,7 @@ public sealed class WorkspaceCacheBehaviorTests
 
         Assert.True(visible, "External edit made shortly after a commit must be reflected in the workspace.");
         Assert.Equal(1, missCount);          // reflected incrementally — never reloaded
-        Assert.Same(first.Workspace, last.Workspace);     // same cached workspace throughout
+        Assert.Same(first, last);     // same cached workspace throughout
     }
 
     [Fact]
@@ -362,10 +361,10 @@ public sealed class WorkspaceCacheBehaviorTests
         var modelsPath = Path.Combine(working.ProjectDir, "Models.cs");
         Assert.True(File.Exists(modelsPath), $"Models.cs not found at {modelsPath}.");
 
-        WorkspaceContext first;
+        Microsoft.CodeAnalysis.Workspace first;
         using (var ctx = await provider.CreateContextAsync(working.SolutionPath, ct))
         {
-            first = ctx;
+            first = ctx.Workspace;
             Assert.NotNull(ctx.GetDocumentByPath(modelsPath)); // tracked before deletion
         }
 
@@ -373,12 +372,12 @@ public sealed class WorkspaceCacheBehaviorTests
 
         var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(15);
         var stillTracked = true;
-        WorkspaceContext last = first;
+        var last = first;
         while (DateTime.UtcNow < deadline)
         {
             using (var ctx = await provider.CreateContextAsync(working.SolutionPath, ct))
             {
-                last = ctx;
+                last = ctx.Workspace;
                 if (ctx.GetDocumentByPath(modelsPath) == null)
                 {
                     stillTracked = false;
@@ -390,7 +389,7 @@ public sealed class WorkspaceCacheBehaviorTests
 
         Assert.False(stillTracked, "A deleted .cs file must be removed from the in-memory solution.");
         Assert.Equal(1, missCount);          // removed incrementally — never reloaded
-        Assert.Same(first.Workspace, last.Workspace);     // same cached workspace throughout
+        Assert.Same(first, last);     // same cached workspace throughout
     }
 
     [Fact]

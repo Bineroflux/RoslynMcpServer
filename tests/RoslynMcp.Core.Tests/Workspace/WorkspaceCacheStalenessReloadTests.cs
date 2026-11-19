@@ -45,10 +45,10 @@ public sealed class WorkspaceCacheStalenessReloadTests
         // First load: cache miss. Capture the context identity and confirm the local
         // analyzer is actually being tracked as a mutable reference (otherwise the rest
         // of the test would vacuously pass).
-        WorkspaceContext first;
+        Microsoft.CodeAnalysis.Workspace first;
         using (var ctx = await provider.CreateContextAsync(fixture.SolutionPath, ct))
         {
-            first = ctx;
+            first = ctx.Workspace;
             var tracksLocalAnalyzer = ctx.Solution.Projects
                 .SelectMany(p => p.AnalyzerReferences)
                 .OfType<AnalyzerFileReference>()
@@ -60,10 +60,10 @@ public sealed class WorkspaceCacheStalenessReloadTests
         }
 
         // Second load with the DLL unchanged: cache hit, same workspace instance.
-        WorkspaceContext second;
+        Microsoft.CodeAnalysis.Workspace second;
         using (var ctx = await provider.CreateContextAsync(fixture.SolutionPath, ct))
-            second = ctx;
-        Assert.Same(first.Workspace, second.Workspace);
+            second = ctx.Workspace;
+        Assert.Same(first, second);
         Assert.Equal(1, misses);
 
         // Rewrite the tracked analyzer DLL so its (last-write, length) stamp changes —
@@ -71,19 +71,19 @@ public sealed class WorkspaceCacheStalenessReloadTests
         fixture.RewriteAnalyzer();
 
         // Third load: the staleness check must fire, drop the stale entry, and reload.
-        WorkspaceContext third;
+        Microsoft.CodeAnalysis.Workspace third;
         using (var ctx = await provider.CreateContextAsync(fixture.SolutionPath, ct))
-            third = ctx;
+            third = ctx.Workspace;
 
         Assert.True(reloads >= 1, "Expected the changed analyzer DLL to trigger a reload.");
         Assert.Equal(2, misses);
-        Assert.NotSame(first.Workspace, third.Workspace);
+        Assert.NotSame(first, third);
 
         // The reloaded entry is itself stable: a follow-up access is a plain cache hit.
-        WorkspaceContext fourth;
+        Microsoft.CodeAnalysis.Workspace fourth;
         using (var ctx = await provider.CreateContextAsync(fixture.SolutionPath, ct))
-            fourth = ctx;
-        Assert.Same(third.Workspace, fourth.Workspace);
+            fourth = ctx.Workspace;
+        Assert.Same(third, fourth);
         Assert.Equal(2, misses);
     }
 

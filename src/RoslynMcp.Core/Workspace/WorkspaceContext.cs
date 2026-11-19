@@ -19,7 +19,8 @@ namespace RoslynMcp.Core.Workspace;
 /// When created directly (non-cached), callers must <see cref="Dispose"/> when done.
 /// When obtained from <see cref="WorkspaceCache"/>, each caller gets a handle of its own
 /// on the cached workspace: its <see cref="Dispose"/> releases that caller's lease, once,
-/// and the cache owns the actual workspace lifetime. Concurrent read access to
+/// and the cache owns the actual workspace lifetime. A disposed handle throws
+/// <see cref="ObjectDisposedException"/> when used. Concurrent read access to
 /// <see cref="Solution"/> is safe. Mutations are serialized two ways: refactorings run as
 /// the single writer (<see cref="RunWriterAsync{T}"/>), and file-watcher updates take the
 /// gate's exclusive file-update lease, which no operation holds at the same time.
@@ -37,12 +38,28 @@ public sealed class WorkspaceContext : IDisposable
     /// <summary>
     /// Current solution snapshot.
     /// </summary>
-    public Solution Solution => _s.Solution;
+    /// <exception cref="ObjectDisposedException">This handle on a cached workspace was disposed.</exception>
+    public Solution Solution
+    {
+        get
+        {
+            ThrowIfReleased();
+            return _s.Solution;
+        }
+    }
 
     /// <summary>
     /// The underlying Roslyn workspace.
     /// </summary>
-    public Microsoft.CodeAnalysis.Workspace Workspace => _s.Workspace;
+    /// <exception cref="ObjectDisposedException">This handle on a cached workspace was disposed.</exception>
+    public Microsoft.CodeAnalysis.Workspace Workspace
+    {
+        get
+        {
+            ThrowIfReleased();
+            return _s.Workspace;
+        }
+    }
 
     /// <summary>
     /// Path to the loaded solution or project.
@@ -173,6 +190,8 @@ public sealed class WorkspaceContext : IDisposable
     {
         private int _released;
 
+        public bool IsReleased => Volatile.Read(ref _released) != 0;
+
         public void Release()
         {
             if (Interlocked.Exchange(ref _released, 1) != 0)
@@ -188,17 +207,29 @@ public sealed class WorkspaceContext : IDisposable
     /// <summary>
     /// Creates a type symbol resolver for this workspace.
     /// </summary>
-    public TypeSymbolResolver CreateSymbolResolver() => new(this);
+    public TypeSymbolResolver CreateSymbolResolver()
+    {
+        ThrowIfReleased();
+        return new(this);
+    }
 
     /// <summary>
     /// Creates a general-purpose symbol resolver that can find any symbol by position or name.
     /// </summary>
-    public SymbolResolver CreateGeneralSymbolResolver() => new(this);
+    public SymbolResolver CreateGeneralSymbolResolver()
+    {
+        ThrowIfReleased();
+        return new(this);
+    }
 
     /// <summary>
     /// Creates a reference tracker for this workspace.
     /// </summary>
-    public ReferenceTracker CreateReferenceTracker() => new(this);
+    public ReferenceTracker CreateReferenceTracker()
+    {
+        ThrowIfReleased();
+        return new(this);
+    }
 
     /// <summary>
     /// Gets a document by its file path. The path may be spelled any equivalent way: both
@@ -209,6 +240,7 @@ public sealed class WorkspaceContext : IDisposable
     /// <returns>Document if found, null otherwise.</returns>
     public Document? GetDocumentByPath(string filePath)
     {
+        ThrowIfReleased();
         var normalizedPath = PathResolver.NormalizePath(filePath);
         return _s.Solution.Projects
             .SelectMany(p => p.Documents)
@@ -228,6 +260,7 @@ public sealed class WorkspaceContext : IDisposable
     /// </exception>
     public void UpdateSolution(Solution newSolution)
     {
+        ThrowIfDisposed();
         EnsureWriterBaseIsCurrent(nameof(UpdateSolution));
 
         // Moves the section made on disk before repointing documents (a file moved to the folder
@@ -595,13 +628,15 @@ public sealed class WorkspaceContext : IDisposable
         string filePath,
         CancellationToken cancellationToken = default)
     {
-        ThrowIfDisposed();
+        // A file update takes no operation lease, so a released handle may start one too.
+        ObjectDisposedException.ThrowIf(_s.Disposed, this);
         ThrowIfInWriterSection();
 
         await _s.Gate.EnterFileUpdateAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            ThrowIfDisposed();
+            // A handle may be released by now (an update needs no lease); the workspace must still be there.
+            ObjectDisposedException.ThrowIf(_s.Disposed, this);
 
             var bytes = await TryReadFileAsync(filePath, cancellationToken).ConfigureAwait(false);
             if (bytes == null)
@@ -669,13 +704,15 @@ public sealed class WorkspaceContext : IDisposable
         DateTime sinceUtc,
         CancellationToken cancellationToken = default)
     {
-        ThrowIfDisposed();
+        // A file update takes no operation lease, so a released handle may start one too.
+        ObjectDisposedException.ThrowIf(_s.Disposed, this);
         ThrowIfInWriterSection();
 
         await _s.Gate.EnterFileUpdateAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            ThrowIfDisposed();
+            // A handle may be released by now (an update needs no lease); the workspace must still be there.
+            ObjectDisposedException.ThrowIf(_s.Disposed, this);
 
             var threshold = sinceUtc - LoadClockTolerance;
             var sol = _s.Solution;
@@ -743,7 +780,8 @@ public sealed class WorkspaceContext : IDisposable
         string projectFilePath,
         CancellationToken cancellationToken = default)
     {
-        ThrowIfDisposed();
+        // A file update takes no operation lease, so a released handle may start one too.
+        ObjectDisposedException.ThrowIf(_s.Disposed, this);
         ThrowIfInWriterSection();
 
         // Evaluate outside the gate — an MSBuild evaluation must not block operations.
@@ -1552,6 +1590,25 @@ public sealed class WorkspaceContext : IDisposable
     private void ThrowIfDisposed()
     {
         ObjectDisposedException.ThrowIf(_s.Disposed, this);
+        ThrowIfReleased();
+    }
+
+    /// <summary>
+    /// A handle on a cached workspace works only while it holds its lease: once disposed, file
+    /// updates may change the solution under it and the workspace may be torn down, so using it
+    /// is a bug that must not run silently. <see cref="State"/> and the load-time information
+    /// (<see cref="LoadedPath"/>, <see cref="GeneratorLoadIssues"/>, <see cref="LoadDiagnostics"/>)
+    /// stay readable, and a file update (<see cref="SyncDocumentFromDiskAsync"/>,
+    /// <see cref="ReconcileProjectDocumentsAsync"/>), which never runs under an operation lease,
+    /// may still be started through it.
+    /// </summary>
+    private void ThrowIfReleased()
+    {
+        if (_lease is { IsReleased: true })
+            throw new ObjectDisposedException(
+                nameof(WorkspaceContext),
+                "This workspace context was disposed, which released its lease on the cached workspace; " +
+                "get a new one from the workspace provider.");
     }
 }
 

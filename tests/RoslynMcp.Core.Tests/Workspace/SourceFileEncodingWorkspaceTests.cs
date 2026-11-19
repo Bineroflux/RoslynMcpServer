@@ -208,7 +208,8 @@ public sealed class SourceFileEncodingWorkspaceTests
         // The cache's watcher may get there first; either way the file goes through the
         // re-evaluation. It waits for leases, so the context's is released above.
         await cached.ReconcileProjectDocumentsAsync(Path.Combine(working.ProjectDir, "TestProject.csproj"), ct);
-        Assert.Contains("// Überprüfung", (await cached.GetDocumentByPath(added)!.GetTextAsync(ct)).ToString());
+        using var probe = await provider.CreateContextAsync(working.SolutionPath, ct);
+        Assert.Contains("// Überprüfung", (await probe.GetDocumentByPath(added)!.GetTextAsync(ct)).ToString());
     }
 
     [Fact]

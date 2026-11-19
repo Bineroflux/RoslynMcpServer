@@ -1,5 +1,9 @@
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.Text;
 using RoslynMcp.Contracts.Enums;
+using RoslynMcp.Contracts.Models;
+using RoslynMcp.Core.Refactoring;
+using RoslynMcp.Core.Refactoring.Rename;
 using RoslynMcp.Core.Workspace;
 using Xunit;
 
@@ -65,6 +69,61 @@ public sealed class WorkspaceCacheLeaseTests
             Interlocked.Increment(ref loads);
             var workspace = new AdhocWorkspace();
             return Task.FromResult(new WorkspaceContext(workspace, workspace.CurrentSolution, solutionPath));
+        }
+    }
+
+    [Fact]
+    public async Task DisposedHandle_ThrowsWhenUsed_WhileOtherHandlesWork()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        const string widget = "internal sealed class Widget\n{\n}\n";
+        var directory = Path.Combine(Path.GetTempPath(), $"RoslynMcpServer.CacheLease-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, "Widget.cs");
+        File.WriteAllText(path, widget);
+        var solutionPath = Path.Combine(directory, "App.slnx");
+        using var cache = new WorkspaceCache(idleTtl: TimeSpan.FromHours(1), sweepInterval: TimeSpan.FromHours(1));
+        try
+        {
+            var (released, _) = await cache.GetOrCreateAsync(solutionPath, _ => Task.FromResult(Load()), ct);
+            var (held, _) = await cache.GetOrCreateAsync(solutionPath, _ => throw new InvalidOperationException("loaded twice"), ct);
+            var resolverMadeEarlier = released.CreateSymbolResolver();
+            var renameMadeEarlier = new RenameSymbolOperation(released);
+            released.Dispose();
+
+            // Without its lease, file updates may change the solution under it: every use throws.
+            Assert.Throws<ObjectDisposedException>(() => released.Solution);
+            Assert.Throws<ObjectDisposedException>(() => released.Workspace);
+            Assert.Throws<ObjectDisposedException>(() => released.GetDocumentByPath(path));
+            Assert.Throws<ObjectDisposedException>(() => released.CreateSymbolResolver());
+            Assert.Throws<ObjectDisposedException>(() => released.CreateGeneralSymbolResolver());
+            Assert.Throws<ObjectDisposedException>(() => released.CreateReferenceTracker());
+            await Assert.ThrowsAsync<ObjectDisposedException>(() => resolverMadeEarlier.FindTypeInFileAsync(path, "Widget", cancellationToken: ct));
+            await Assert.ThrowsAsync<ObjectDisposedException>(() => released.RunWriterAsync(_ => Task.CompletedTask, ct));
+
+            // A refactoring made before the release fails without writing anything.
+            var refused = await Assert.ThrowsAsync<RefactoringException>(() => renameMadeEarlier.ExecuteAsync(
+                new RenameSymbolParams { SourceFile = path, SymbolName = "Widget", NewName = "Gadget" }, ct));
+            Assert.IsType<ObjectDisposedException>(refused.InnerException);
+            Assert.Equal(widget, File.ReadAllText(path));
+
+            // Its state, a second Dispose and the other caller's handle are unaffected.
+            Assert.Equal(WorkspaceState.Ready, released.State);
+            released.Dispose();
+            Assert.NotNull(held.GetDocumentByPath(path));
+            held.Dispose();
+        }
+        finally
+        {
+            try { Directory.Delete(directory, recursive: true); } catch (IOException) { /* best effort */ }
+        }
+
+        WorkspaceContext Load()
+        {
+            var workspace = new AdhocWorkspace();
+            var project = workspace.CurrentSolution.AddProject("App", "App", LanguageNames.CSharp);
+            var solution = project.AddDocument("Widget.cs", SourceText.From(widget), filePath: path).Project.Solution;
+            return new WorkspaceContext(workspace, solution, solutionPath);
         }
     }
 }

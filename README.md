@@ -258,7 +258,7 @@ All tools accept a `solutionPath` parameter (absolute path to a `.sln`, `.slnx`,
 | `convert_foreach_linq` | Convert foreach loops with Add patterns to LINQ Select/Where expressions. | `sourceFile`, `line` |
 | `convert_to_pattern_matching` | Convert if/is chains and switch statements to switch expressions. | `sourceFile`, `line` |
 | `convert_to_interpolated_string` | Convert string.Format() calls and concatenation to interpolated strings. | `sourceFile`, `line` |
-| `introduce_parameter` | Promote a local variable to a method parameter, updating all call sites. | `sourceFile`, `variableName`, `line` |
+| `introduce_parameter` | Promote a local variable to a method parameter. Every call, in any project, passes the variable's initializer with the call's own arguments in it; a call where it cannot be written gets a placeholder, listed in warnings with method groups that cannot be updated. Refused for a method that overrides, implements or is overridden. | `sourceFile`, `variableName`, `line` |
 
 ### Using Directives
 

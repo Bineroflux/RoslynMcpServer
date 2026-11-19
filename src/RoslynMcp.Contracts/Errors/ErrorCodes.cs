@@ -351,8 +351,9 @@ public static class ErrorCodes
     public const string SymbolStillReferenced = "3120";
 
     /// <summary>
-    /// The member to delete overrides or implements another member, or is overridden or
-    /// implemented; deleting one member of the family breaks the others.
+    /// The member to delete (safe_delete) or to give a new parameter (introduce_parameter)
+    /// overrides or implements another member, or is overridden or implemented; changing one
+    /// member of the family alone breaks the others.
     /// </summary>
     public const string MemberInFamily = "3121";
 

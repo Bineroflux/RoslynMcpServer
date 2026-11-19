@@ -28,7 +28,7 @@ public sealed class IntroduceParameterTool : IToolHandler
     public string Name => "introduce_parameter";
 
     /// <inheritdoc />
-    public string Description => "Promote a local variable to a method parameter and update all call sites.";
+    public string Description => "Promote a local variable to a method parameter. Every call, in any project, passes the variable's initializer with the call's own arguments in it; a call where it cannot be written gets a placeholder, listed in warnings with method groups that cannot be updated. Refused for a method that overrides, implements or is overridden.";
 
     /// <inheritdoc />
     public object InputSchema => new

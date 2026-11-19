@@ -105,7 +105,8 @@ public sealed class ImplementInterfaceOperation : RefactoringOperationBase<Imple
         // otherwise implicit stubs implement nothing and explicit ones do not compile
         // (CS0540). The members are then determined against the updated type, so members
         // it already has that now implement the interface are not generated again.
-        var addsInterface = !typeSymbol.AllInterfaces.Contains(interfaceSymbol, SymbolEqualityComparer.Default);
+        // The interface may have been found in another project's compilation.
+        var addsInterface = !typeSymbol.AllInterfaces.Any(i => SymbolIdentity.SameType(i, interfaceSymbol));
         if (addsInterface)
         {
             if (interfaceSymbol.IsGenericType && interfaceSymbol.Equals(interfaceSymbol.OriginalDefinition, SymbolEqualityComparer.Default))

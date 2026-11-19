@@ -83,7 +83,7 @@ internal static class MovedCodeUsings
                 return;
 
             var bound = targetModel.GetSpeculativeSymbolInfo(position, name, SpeculativeBindingOption.BindAsTypeOrNamespace);
-            if (bound.Symbol != null && SameSymbol(bound.Symbol, named))
+            if (bound.Symbol != null && SymbolIdentity.SameDeclaration(bound.Symbol, named))
                 return;
 
             CheckVisible(named);
@@ -118,8 +118,9 @@ internal static class MovedCodeUsings
         // An extension method called in extension form: the namespace of its class.
         void ExtensionUsing(IMethodSymbol extension)
         {
+            // The target may be in another project, whose compilation has other symbols.
             if (targetModel.LookupNamespacesAndTypes(position, name: extension.ContainingType.Name)
-                .Any(s => SymbolEqualityComparer.Default.Equals(s.OriginalDefinition, extension.ContainingType.OriginalDefinition)))
+                .Any(s => SymbolIdentity.SameDeclaration(s, extension.ContainingType)))
             {
                 return;
             }
@@ -137,7 +138,7 @@ internal static class MovedCodeUsings
         void StaticMemberUsing(SimpleNameSyntax name, ISymbol member, INamedTypeSymbol containing)
         {
             var bound = targetModel.GetSpeculativeSymbolInfo(position, SyntaxFactory.IdentifierName(name.Identifier), SpeculativeBindingOption.BindAsExpression);
-            if (bound.Symbol is { } symbol ? SameSymbol(symbol, member) : bound.CandidateSymbols.Any(c => SameSymbol(c, member)))
+            if (bound.Symbol is { } symbol ? SymbolIdentity.SameDeclaration(symbol, member) : bound.CandidateSymbols.Any(c => SymbolIdentity.SameDeclaration(c, member)))
                 return;
 
             CheckVisible(containing);
@@ -161,7 +162,7 @@ internal static class MovedCodeUsings
         void AliasUsing(IdentifierNameSyntax name, IAliasSymbol alias)
         {
             var targetAlias = targetModel.GetSpeculativeAliasInfo(position, name, SpeculativeBindingOption.BindAsTypeOrNamespace);
-            if (targetAlias != null && SameSymbol(targetAlias.Target, alias.Target))
+            if (targetAlias != null && SymbolIdentity.SameDeclaration(targetAlias.Target, alias.Target))
                 return;
 
             if (alias.Target is ITypeSymbol aliasedType)
@@ -201,13 +202,6 @@ internal static class MovedCodeUsings
         static bool WrittenFor(SimpleNameSyntax name, INamedTypeSymbol type) =>
             name.Identifier.ValueText == type.Name ||
             (name.Identifier.ValueText + "Attribute" == type.Name && name.Ancestors().OfType<AttributeSyntax>().Any());
-
-        // The same symbol, also across compilations (the target may be in another project).
-        static bool SameSymbol(ISymbol left, ISymbol right) =>
-            SymbolEqualityComparer.Default.Equals(left.OriginalDefinition, right.OriginalDefinition) ||
-            (left.Kind == right.Kind &&
-                left.OriginalDefinition.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) == right.OriginalDefinition.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) &&
-                left.OriginalDefinition.GetDocumentationCommentId() == right.OriginalDefinition.GetDocumentationCommentId());
 
         // A type as a using directive names it: fully qualified, without global::.
         static string TypeName(ITypeSymbol type) =>

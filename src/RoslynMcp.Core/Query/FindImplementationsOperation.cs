@@ -6,6 +6,7 @@ using RoslynMcp.Core.FileSystem;
 using RoslynMcp.Core.Query.Base;
 using RoslynMcp.Core.Query.Utilities;
 using RoslynMcp.Core.Refactoring;
+using RoslynMcp.Core.Refactoring.Utilities;
 using RoslynMcp.Core.Resolution;
 using RoslynMcp.Core.Workspace;
 
@@ -144,14 +145,10 @@ public sealed class FindImplementationsOperation : QueryOperationBase<FindImplem
 
     /// <summary>
     /// Whether two symbols are the same member. One may come from another project's
-    /// compilation, so the documentation ID and assembly also decide, and a generic type's
-    /// member counts as its definition.
+    /// compilation, and a generic type's member counts as its definition.
     /// </summary>
     private static bool IsSameMember(ISymbol? candidate, ISymbol member) =>
-        candidate is not null &&
-        (SymbolEqualityComparer.Default.Equals(candidate.OriginalDefinition, member.OriginalDefinition) ||
-         (candidate.OriginalDefinition.GetDocumentationCommentId() == member.OriginalDefinition.GetDocumentationCommentId() &&
-          candidate.ContainingAssembly?.Name == member.ContainingAssembly?.Name));
+        candidate is not null && SymbolIdentity.SameDeclaration(candidate, member);
 
     /// <summary>
     /// The implementations of interface or interface member <paramref name="symbol"/> by types
@@ -178,9 +175,10 @@ public sealed class FindImplementationsOperation : QueryOperationBase<FindImplem
         var implementingTypes = await SymbolFinder.FindImplementationsAsync(
             containingInterface, Context.Solution, transitive: false, cancellationToken: cancellationToken);
 
-        // Several types can share one implementation, e.g. inherited from a common base class.
+        // Several types can share one implementation, e.g. inherited from a common base class,
+        // also when they are in other projects (or target frameworks) that see it as other symbols.
         var implementations = new List<ISymbol>();
-        var seen = new HashSet<ISymbol>(SymbolEqualityComparer.Default);
+        var seen = new HashSet<ISymbol>(SymbolIdentity.Declarations);
         foreach (var implementingType in implementingTypes)
         {
             if (FindImplementationOf(implementingType, symbol) is { } implementation && seen.Add(implementation.OriginalDefinition))
@@ -198,20 +196,13 @@ public sealed class FindImplementationsOperation : QueryOperationBase<FindImplem
     /// </summary>
     private static ISymbol? FindImplementationOf(INamedTypeSymbol type, ISymbol member)
     {
-        var interfaceId = member.ContainingType.OriginalDefinition.GetDocumentationCommentId();
-        var memberId = member.OriginalDefinition.GetDocumentationCommentId();
-        var assemblyName = member.ContainingAssembly?.Name;
-
         foreach (var implemented in type.AllInterfaces)
         {
-            if (implemented.OriginalDefinition.GetDocumentationCommentId() != interfaceId ||
-                implemented.ContainingAssembly?.Name != assemblyName)
-            {
+            if (!SymbolIdentity.SameDeclaration(implemented, member.ContainingType))
                 continue;
-            }
 
             var constructedMember = implemented.GetMembers(member.Name)
-                .FirstOrDefault(m => m.OriginalDefinition.GetDocumentationCommentId() == memberId);
+                .FirstOrDefault(m => SymbolIdentity.SameDeclaration(m, member));
             if (constructedMember is not null &&
                 type.FindImplementationForInterfaceMember(constructedMember) is { } implementation)
             {

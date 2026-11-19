@@ -514,8 +514,9 @@ public sealed class InlineMethodOperation : RefactoringOperationBase<InlineMetho
     }
 
     /// <summary>
-    /// Whether <paramref name="actual"/> is the member with the documentation ID
-    /// <paramref name="expected"/>, or what it becomes once a type argument is known: an override
+    /// Whether <paramref name="actual"/> is the member with the identity <paramref name="expected"/>
+    /// (<see cref="InlinedBody.Identity"/>: documentation ID and assembly, so a member of the same
+    /// name in another assembly does not count), or what it becomes once a type argument is known: an override
     /// of it, or the implementation of an interface member (a call through a type parameter's
     /// constraint binds to the type argument's own member).
     /// </summary>
@@ -527,7 +528,7 @@ public sealed class InlineMethodOperation : RefactoringOperationBase<InlineMetho
                 return true;
         }
 
-        if (DocumentationCommentId.GetFirstSymbolForDeclarationId(expected, compilation) is not { ContainingType: { TypeKind: TypeKind.Interface } definingInterface } definition ||
+        if (DocumentationCommentId.GetFirstSymbolForDeclarationId(InlinedBody.DocumentationId(expected), compilation) is not { ContainingType: { TypeKind: TypeKind.Interface } definingInterface } definition ||
             actual.ContainingType is not { } type)
         {
             return false;

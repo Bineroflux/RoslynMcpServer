@@ -159,7 +159,8 @@ public sealed class MoveTypeToNamespaceOperation : RefactoringOperationBase<Move
             $"{@params.TargetNamespace}.{resolution.Symbol.Name}",
             cancellationToken);
 
-        if (targetType != null && !SymbolEqualityComparer.Default.Equals(targetType, resolution.Symbol))
+        // The type found may come from another project's compilation.
+        if (targetType != null && !SymbolIdentity.SameDeclaration(targetType, resolution.Symbol))
         {
             throw new RefactoringException(
                 ErrorCodes.NameCollision,

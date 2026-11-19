@@ -567,13 +567,13 @@ public sealed class ConvertPropertyOperation : RefactoringOperationBase<ConvertP
         return function is ConstructorDeclarationSyntax constructor &&
             model.GetDeclaredSymbol(constructor, cancellationToken) is { } symbol &&
             symbol.IsStatic == property.IsStatic &&
-            SymbolEqualityComparer.Default.Equals(symbol.ContainingType.OriginalDefinition, property.ContainingType.OriginalDefinition) &&
+            SymbolIdentity.SameDeclaration(symbol.ContainingType, property.ContainingType) &&
             (property.IsStatic || reference.Instance is IInstanceReferenceOperation { ReferenceKind: InstanceReferenceKind.ContainingTypeInstance });
     }
 
     private static bool IsInsideType(SyntaxNode site, INamedTypeSymbol type, SemanticModel model, CancellationToken cancellationToken) =>
         site.Ancestors().OfType<TypeDeclarationSyntax>().Any(declaration =>
-            SymbolEqualityComparer.Default.Equals(model.GetDeclaredSymbol(declaration, cancellationToken)?.OriginalDefinition, type.OriginalDefinition));
+            model.GetDeclaredSymbol(declaration, cancellationToken) is { } declared && SymbolIdentity.SameDeclaration(declared, type));
 
     /// <summary>Whether a reference is in the initializer of a field or property.</summary>
     private static bool IsInInitializer(ReferenceLocation reference, CancellationToken cancellationToken) =>

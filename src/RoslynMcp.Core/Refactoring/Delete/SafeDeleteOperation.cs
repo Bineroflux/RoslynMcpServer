@@ -349,7 +349,7 @@ public sealed class SafeDeleteOperation : RefactoringOperationBase<SafeDeletePar
     {
         for (var current = Overridden(member); current != null; current = Overridden(current))
         {
-            if (current.GetDocumentationCommentId() == candidateBase.GetDocumentationCommentId())
+            if (SymbolIdentity.SameDeclaration(current, candidateBase))
                 return true;
         }
 
@@ -406,7 +406,7 @@ public sealed class SafeDeleteOperation : RefactoringOperationBase<SafeDeletePar
         Solution solution,
         CancellationToken cancellationToken)
     {
-        var deleted = new HashSet<ISymbol>(DeclarationIdentity.Instance);
+        var deleted = new HashSet<ISymbol>(SymbolIdentity.Declarations);
         var searched = new List<ISymbol>();
         AddDeleted(symbol, deleted, searched);
 
@@ -505,7 +505,7 @@ public sealed class SafeDeleteOperation : RefactoringOperationBase<SafeDeletePar
             {
                 if (derivedConstructor.IsImplicitlyDeclared)
                 {
-                    if (DeclarationIdentity.Instance.Equals(ImplicitlyCalledConstructor(constructor.ContainingType), constructor) &&
+                    if (SymbolIdentity.SameDeclaration(ImplicitlyCalledConstructor(constructor.ContainingType), constructor) &&
                         derived.Locations.FirstOrDefault(l => l.IsInSource) is { } typeLocation)
                     {
                         calls.Add(BlockingReference.Create(typeLocation.SourceTree!.FilePath, typeLocation, "implicit", cancellationToken));
@@ -525,7 +525,7 @@ public sealed class SafeDeleteOperation : RefactoringOperationBase<SafeDeletePar
                     }
 
                     if (initializer.DescendantsAndSelf().OfType<IInvocationOperation>()
-                        .Any(call => DeclarationIdentity.Instance.Equals(call.TargetMethod, constructor)))
+                        .Any(call => SymbolIdentity.SameDeclaration(call.TargetMethod, constructor)))
                     {
                         calls.Add(BlockingReference.Create(document.FilePath ?? "", declaration.Identifier.GetLocation(), "implicit", cancellationToken));
                     }
@@ -622,7 +622,7 @@ public sealed class SafeDeleteOperation : RefactoringOperationBase<SafeDeletePar
                 foreach (var derived in await SymbolFinder.FindDerivedClassesAsync(type, before, transitive: false, cancellationToken: cancellationToken))
                     documents.UnionWith(derived.DeclaringSyntaxReferences.Select(r => before.GetDocument(r.SyntaxTree)?.Id).OfType<DocumentId>());
 
-                if (!type.IsStatic && type.InstanceConstructors.All(c => c.IsImplicitlyDeclared || DeclarationIdentity.Instance.Equals(c, constructor)) &&
+                if (!type.IsStatic && type.InstanceConstructors.All(c => c.IsImplicitlyDeclared || SymbolIdentity.SameDeclaration(c, constructor)) &&
                     !(constructor.Parameters.Length == 0 && constructor.DeclaredAccessibility == (type.IsAbstract ? Accessibility.Protected : Accessibility.Public)))
                 {
                     notes.Add($"'{type.ToDisplayString()}' has no constructor left, so the compiler gives it a " +
@@ -678,31 +678,6 @@ public sealed class SafeDeleteOperation : RefactoringOperationBase<SafeDeletePar
 
     /// <summary>The removals in one file.</summary>
     private sealed record FileEdit(Document Document, SourceText Text, List<(SyntaxNode Node, TextSpan Span)> Removals, bool DeletesFile);
-
-    /// <summary>
-    /// Equality of declarations across compilations: the same symbol, or the same declaration ID
-    /// in the same assembly (a project referenced through metadata yields other symbol instances).
-    /// </summary>
-    private sealed class DeclarationIdentity : IEqualityComparer<ISymbol>
-    {
-        public static readonly DeclarationIdentity Instance = new();
-
-        public bool Equals(ISymbol? left, ISymbol? right)
-        {
-            if (left is null || right is null)
-                return left is null && right is null;
-
-            return SymbolEqualityComparer.Default.Equals(left.OriginalDefinition, right.OriginalDefinition) ||
-                (left.OriginalDefinition.GetDocumentationCommentId() is { } id &&
-                 id == right.OriginalDefinition.GetDocumentationCommentId() &&
-                 left.ContainingAssembly?.Name == right.ContainingAssembly?.Name);
-        }
-
-        public int GetHashCode(ISymbol symbol) =>
-            symbol.OriginalDefinition.GetDocumentationCommentId() is { } id
-                ? StringComparer.Ordinal.GetHashCode(id)
-                : SymbolEqualityComparer.Default.GetHashCode(symbol.OriginalDefinition);
-    }
 }
 
 /// <summary>A reference that keeps <c>safe_delete</c> from deleting a symbol.</summary>

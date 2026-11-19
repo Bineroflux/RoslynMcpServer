@@ -559,7 +559,7 @@ public static class SyntaxGenerationHelper
                 : member.DeclaredAccessibility;
 
     private static bool IsSameAssemblyOrFriend(ISymbol member, INamedTypeSymbol emittingType) =>
-        SymbolEqualityComparer.Default.Equals(member.ContainingAssembly, emittingType.ContainingAssembly)
+        SymbolIdentity.SameDeclaration(member.ContainingAssembly, emittingType.ContainingAssembly)
         || member.ContainingAssembly.GivesAccessTo(emittingType.ContainingAssembly);
 
     private static IEnumerable<SyntaxToken> AccessibilityModifiers(Accessibility accessibility) =>

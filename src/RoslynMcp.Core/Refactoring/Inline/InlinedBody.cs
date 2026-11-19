@@ -582,14 +582,18 @@ internal sealed class InlinedBody
     }
 
     /// <summary>
-    /// A member's identity across compilations: the documentation ID of its definition (of the
-    /// extension method itself for a call in extension form).
+    /// A member's identity across compilations (<see cref="SymbolIdentity.Key"/>): the
+    /// documentation ID of its definition (of the extension method itself for a call in
+    /// extension form) and its assembly; null when it has no documentation ID.
     /// </summary>
     public static string? Identity(ISymbol symbol)
     {
-        var definition = symbol is IMethodSymbol { ReducedFrom: { } reducedFrom } ? reducedFrom : symbol;
-        return definition.OriginalDefinition.GetDocumentationCommentId();
+        var definition = (symbol is IMethodSymbol { ReducedFrom: { } reducedFrom } ? reducedFrom : symbol).OriginalDefinition;
+        return definition.GetDocumentationCommentId() == null ? null : SymbolIdentity.Key(definition);
     }
+
+    /// <summary>The documentation ID in an <see cref="Identity"/>.</summary>
+    public static string DocumentationId(string identity) => identity[..identity.IndexOf('|', StringComparison.Ordinal)];
 
     /// <summary>Whether a type can be written in source: no anonymous, error or pointer types.</summary>
     public static bool IsWritable(ITypeSymbol type) => type switch

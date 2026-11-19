@@ -120,8 +120,7 @@ internal sealed class UnusedSymbolSearch
     }
 
     /// <summary>Identifies a symbol across the projects compiling its file.</summary>
-    private static string KeyOf(ISymbol symbol) =>
-        $"{symbol.GetDocumentationCommentId() ?? symbol.ToDisplayString()}|{symbol.ContainingAssembly?.Name}";
+    private static string KeyOf(ISymbol symbol) => SymbolIdentity.Key(symbol);
 
     private async Task<List<Candidate>> CollectAsync(Project project, CancellationToken cancellationToken)
     {

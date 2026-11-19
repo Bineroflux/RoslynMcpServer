@@ -381,10 +381,13 @@ public sealed class EncapsulateFieldOperation : RefactoringOperationBase<Encapsu
         return SyntaxFactory.TokenList(result);
     }
 
-    /// <summary>Whether the reference is in a declaration of the field's type (any part of a partial type, or a type nested in it).</summary>
+    /// <summary>
+    /// Whether the reference is in a declaration of the field's type (any part of a partial type,
+    /// or a type nested in it), also in another target framework's document of its file.
+    /// </summary>
     private static bool IsInside(SyntaxNode reference, INamedTypeSymbol type, SemanticModel model, CancellationToken cancellationToken) =>
         reference.Ancestors().OfType<TypeDeclarationSyntax>().Any(declaration =>
-            SymbolEqualityComparer.Default.Equals(model.GetDeclaredSymbol(declaration, cancellationToken)?.OriginalDefinition, type.OriginalDefinition));
+            model.GetDeclaredSymbol(declaration, cancellationToken) is { } declared && SymbolIdentity.SameDeclaration(declared, type));
 
     /// <summary>
     /// Why a reference needs the field itself rather than a value: passed by reference, its

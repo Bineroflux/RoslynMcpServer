@@ -2,6 +2,7 @@ using System.Collections.Immutable;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.FindSymbols;
 using RoslynMcp.Contracts.Errors;
+using RoslynMcp.Core.Refactoring.Utilities;
 
 namespace RoslynMcp.Core.Refactoring.Signature;
 
@@ -583,30 +584,19 @@ internal sealed class MemberFamily
     private static bool Same(ISymbol left, ISymbol right) => MemberIdentity.Instance.Equals(left, right);
 
     /// <summary>
-    /// Equality of declarations across compilations: the same symbol, or the same declaration
-    /// ID in the same assembly.
+    /// Equality of members across compilations (<see cref="SymbolIdentity.SameDeclaration"/>),
+    /// both parts of a partial member being one.
     /// </summary>
     private sealed class MemberIdentity : IEqualityComparer<ISymbol>
     {
         public static readonly MemberIdentity Instance = new();
 
-        public bool Equals(ISymbol? left, ISymbol? right)
-        {
-            if (left is null || right is null)
-                return left is null && right is null;
+        public bool Equals(ISymbol? left, ISymbol? right) =>
+            left is null || right is null
+                ? left is null && right is null
+                : SymbolIdentity.SameDeclaration(Normalize(left), Normalize(right));
 
-            left = Normalize(left);
-            right = Normalize(right);
-            return SymbolEqualityComparer.Default.Equals(left, right)
-                || (left.GetDocumentationCommentId() is { } id
-                    && id == right.GetDocumentationCommentId()
-                    && left.ContainingAssembly?.Name == right.ContainingAssembly?.Name);
-        }
-
-        public int GetHashCode(ISymbol symbol) =>
-            Normalize(symbol).GetDocumentationCommentId() is { } id
-                ? StringComparer.Ordinal.GetHashCode(id)
-                : SymbolEqualityComparer.Default.GetHashCode(Normalize(symbol));
+        public int GetHashCode(ISymbol symbol) => SymbolIdentity.Declarations.GetHashCode(Normalize(symbol));
     }
 
     /// <summary>

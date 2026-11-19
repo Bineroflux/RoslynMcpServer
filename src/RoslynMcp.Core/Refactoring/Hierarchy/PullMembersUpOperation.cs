@@ -901,10 +901,7 @@ public sealed class PullMembersUpOperation : RefactoringOperationBase<PullMember
         }
 
         // The class, also as another project sees it.
-        bool IsTarget(ITypeSymbol type) =>
-            SymbolEqualityComparer.Default.Equals(type.OriginalDefinition, target) ||
-            (type.ContainingAssembly?.Name == target.ContainingAssembly.Name &&
-                type.OriginalDefinition.GetDocumentationCommentId() == target.GetDocumentationCommentId());
+        bool IsTarget(ITypeSymbol type) => SymbolIdentity.SameDeclaration(type, target);
 
         static SyntaxToken CalledName(InvocationExpressionSyntax invocation) => invocation.Expression switch
         {
@@ -970,7 +967,8 @@ public sealed class PullMembersUpOperation : RefactoringOperationBase<PullMember
             related.AddRange(await SymbolFinder.FindDerivedClassesAsync(target, solution, transitive: true, cancellationToken: cancellationToken));
 
         var notes = new List<string>();
-        foreach (var other in related.Where(r => !SymbolEqualityComparer.Default.Equals(r.OriginalDefinition, type.OriginalDefinition)))
+        // SymbolFinder's types come from every project's compilation (the type itself, too).
+        foreach (var other in related.Where(r => !SymbolIdentity.SameDeclaration(r, type)))
         {
             if (target.TypeKind == TypeKind.Interface || makeAbstract)
                 continue;

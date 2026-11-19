@@ -48,7 +48,8 @@ internal sealed class InlineCallPlanner
 
         var method = _body.Method;
         var within = EnclosingType(model, invocation.SpanStart);
-        var sameType = within != null && SymbolEqualityComparer.Default.Equals(within.OriginalDefinition, method.ContainingType.OriginalDefinition);
+        // The call may be in another target framework's compilation of the method's type.
+        var sameType = within != null && SymbolIdentity.SameDeclaration(within, method.ContainingType);
 
         // The receiver of an instance call, when it is not (implicitly) this or base.
         ExpressionSyntax? receiver = null;

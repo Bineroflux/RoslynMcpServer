@@ -3,6 +3,7 @@ using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.Editing;
+using Microsoft.CodeAnalysis.FindSymbols;
 using Microsoft.CodeAnalysis.Text;
 using RoslynMcp.Contracts.Enums;
 using RoslynMcp.Contracts.Errors;
@@ -10,6 +11,8 @@ using RoslynMcp.Contracts.Models;
 using RoslynMcp.Core.FileSystem;
 using RoslynMcp.Core.Refactoring.Base;
 using RoslynMcp.Core.Refactoring.Delete;
+using RoslynMcp.Core.Refactoring.Rename;
+using RoslynMcp.Core.Refactoring.Signature;
 using RoslynMcp.Core.Refactoring.Utilities;
 using RoslynMcp.Core.Resolution;
 using RoslynMcp.Core.Workspace;
@@ -62,6 +65,13 @@ public sealed class MoveTypeToNamespaceOperation : RefactoringOperationBase<Move
         var move = @params.UpdateFileLocation
             ? NamespaceFolderMove.Plan(resolution.Document, resolution.Declaration, @params.TargetNamespace, Context.Solution)
             : null;
+
+        // What the move leaves to do by hand, and the compiler errors it causes anywhere that
+        // sees the type (Razor files' generated code included). The added using directives move
+        // the lines below them, so errors are matched without their line.
+        AddWarnings(changeStats.Warnings);
+        var affected = references.ReferencesByDocument.Keys.Append(resolution.Document.Id);
+        AddWarnings(await IntroducedErrors.FindInProjectsAsync(Context.Solution, newSolution, affected, cancellationToken, matchLines: false) ?? []);
 
         // If preview mode, return without applying
         if (@params.Preview)
@@ -187,11 +197,12 @@ public sealed class MoveTypeToNamespaceOperation : RefactoringOperationBase<Move
             newNamespace,
             cancellationToken);
 
-        // Update using directives in all referencing documents
-        foreach (var (docId, _) in references.ReferencesByDocument)
+        // Update using directives in all referencing documents; generated ones come below.
+        foreach (var (docId, locations) in references.ReferencesByDocument)
         {
             var doc = solution.GetDocument(docId);
-            if (doc == null) continue;
+            if (doc == null || locations.Any(l => GeneratedReferences.IsGenerated(l, cancellationToken)))
+                continue;
 
             var (newDoc, added, removed) = await UpdateUsingDirectivesAsync(
                 doc,
@@ -219,7 +230,124 @@ public sealed class MoveTypeToNamespaceOperation : RefactoringOperationBase<Move
             stats.UsingsRemoved += stale.Removed;
         }
 
+        solution = await UpdateGeneratedReferencesAsync(solution, resolution.Symbol, references, newNamespace, stats, cancellationToken);
         return (solution, stats);
+    }
+
+    /// <summary>
+    /// The references in generated code, which is not edited. A Razor file whose generated code
+    /// names the type by its simple name, or as the Razor compiler binds a component
+    /// (<c>global::Old.Circle</c>, which the generated code does not map back to the file: the
+    /// file is the one its <c>#pragma checksum</c> names), gets a <c>@using</c> of the new
+    /// namespace (<see cref="RazorUsings"/>); a name the Razor file qualifies itself, and a
+    /// reference in other generated code, is reported in <see cref="ChangeStats.Warnings"/>, at
+    /// its place after the <c>@using</c> was added.
+    /// </summary>
+    private static async Task<Solution> UpdateGeneratedReferencesAsync(
+        Solution solution,
+        INamedTypeSymbol type,
+        ReferenceSearchResult references,
+        string newNamespace,
+        ChangeStats stats,
+        CancellationToken cancellationToken)
+    {
+        var oldName = type.ToDisplayString();
+        var newName = $"{newNamespace}.{oldName[(type.ContainingNamespace.IsGlobalNamespace ? 0 : type.ContainingNamespace.ToDisplayString().Length + 1)..]}";
+        var razorFiles = new List<string>();
+        var qualified = new List<(string Path, int Line, int Column)>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var location in references.ReferencesByDocument.Values.SelectMany(l => l))
+        {
+            if (!GeneratedReferences.IsGenerated(location, cancellationToken))
+                continue;
+
+            var place = GeneratedReferences.Place(location.Location);
+            if (!seen.Add(place.Text))
+                continue;
+
+            if (await RazorFileAsync(location, place, cancellationToken) is not { } razorFile)
+            {
+                stats.Warnings.Add(GeneratedReferences.Warning(location.Location, $"the reference to '{oldName}' (now '{newName}')", "changed"));
+            }
+            else if (await QualifiedInSourceAsync(location, cancellationToken))
+            {
+                qualified.Add((place.Path, place.Line, place.Column));
+            }
+            else if (!razorFiles.Contains(razorFile, StringComparer.OrdinalIgnoreCase))
+            {
+                razorFiles.Add(razorFile);
+            }
+        }
+
+        var inserted = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var path in razorFiles)
+        {
+            (solution, var line) = await RazorUsings.AddAsync(solution, path, newNamespace, cancellationToken);
+            if (line is { } added)
+            {
+                inserted[path] = added;
+                stats.UsingsAdded++;
+                stats.RazorUsings.Add(path);
+            }
+        }
+
+        // A line added above a reference moves it down one.
+        foreach (var (path, line, column) in qualified)
+        {
+            var now = inserted.TryGetValue(path, out var added) && added <= line ? line + 1 : line;
+            stats.Warnings.Add($"{path}({now},{column}): uses '{oldName}', now '{newName}'; qualify it here by hand (it is written with its namespace).");
+        }
+
+        return solution;
+    }
+
+    /// <summary>
+    /// The Razor file a reference in generated code comes from: where its <c>#line</c> directive
+    /// maps it, or for a reference the Razor compiler hides (a component it bound), the file the
+    /// generated document's <c>#pragma checksum</c> names. Null when it is not from a Razor file.
+    /// </summary>
+    private static async Task<string?> RazorFileAsync(
+        ReferenceLocation location,
+        (string Text, string Path, int Line, int Column, bool Mapped) place,
+        CancellationToken cancellationToken)
+    {
+        if (place.Mapped)
+            return RazorNamespaceDirectives.IsRazorFile(place.Path) ? place.Path : null;
+
+        if (location.Location.SourceTree is not { } tree)
+            return null;
+
+        var checksum = (await tree.GetRootAsync(cancellationToken)).GetLeadingTrivia()
+            .Select(trivia => trivia.GetStructure())
+            .OfType<PragmaChecksumDirectiveTriviaSyntax>()
+            .FirstOrDefault();
+        return RazorNamespaceDirectives.IsRazorFile(checksum?.File.ValueText) ? checksum!.File.ValueText : null;
+    }
+
+    /// <summary>
+    /// Whether the generated code names the type with a namespace the source wrote
+    /// (<c>Old.Circle</c>), rather than by its simple name or as the Razor compiler qualifies a
+    /// component it bound (<c>global::Old.Circle</c>).
+    /// </summary>
+    private static async Task<bool> QualifiedInSourceAsync(ReferenceLocation location, CancellationToken cancellationToken)
+    {
+        if (await location.Document.GetSyntaxRootAsync(cancellationToken) is not { } root)
+            return false;
+
+        SyntaxNode node = root.FindNode(location.Location.SourceSpan, getInnermostNodeForTie: true);
+        var qualifiedHere = node.Parent switch
+        {
+            QualifiedNameSyntax qualifiedName => qualifiedName.Right == node,
+            MemberAccessExpressionSyntax access => access.Name == node,
+            _ => false
+        };
+        if (!qualifiedHere)
+            return false;
+
+        var leftmost = node.Parent;
+        while (leftmost is QualifiedNameSyntax or MemberAccessExpressionSyntax)
+            leftmost = leftmost is QualifiedNameSyntax qualified ? qualified.Left : ((MemberAccessExpressionSyntax)leftmost).Expression;
+        return leftmost is not AliasQualifiedNameSyntax { Alias.Identifier.ValueText: "global" };
     }
 
     /// <summary>
@@ -679,13 +807,23 @@ public sealed class MoveTypeToNamespaceOperation : RefactoringOperationBase<Move
             }
         };
 
-        if (stats.UsingsAdded > 0)
+        if (stats.UsingsAdded > stats.RazorUsings.Count)
         {
             pendingChanges.Add(new PendingChange
             {
                 File = "(multiple files)",
                 ChangeType = ChangeKind.Modify,
-                Description = $"Add using directive for {@params.TargetNamespace} in {stats.UsingsAdded} file(s)"
+                Description = $"Add using directive for {@params.TargetNamespace} in {stats.UsingsAdded - stats.RazorUsings.Count} file(s)"
+            });
+        }
+
+        foreach (var razorFile in stats.RazorUsings)
+        {
+            pendingChanges.Add(new PendingChange
+            {
+                File = razorFile,
+                ChangeType = ChangeKind.Modify,
+                Description = $"Add '@using {@params.TargetNamespace}' for '{resolution.Symbol.Name}'"
             });
         }
 
@@ -722,5 +860,11 @@ public sealed class MoveTypeToNamespaceOperation : RefactoringOperationBase<Move
     {
         public int UsingsAdded { get; set; }
         public int UsingsRemoved { get; set; }
+
+        /// <summary>The Razor files that got a <c>@using</c> of the new namespace.</summary>
+        public List<string> RazorUsings { get; } = [];
+
+        /// <summary>What the move leaves to do by hand (references in generated code).</summary>
+        public List<string> Warnings { get; } = [];
     }
 }

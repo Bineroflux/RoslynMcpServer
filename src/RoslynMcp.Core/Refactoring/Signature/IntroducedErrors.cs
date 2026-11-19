@@ -102,7 +102,7 @@ internal static class IntroducedErrors
         if (withErrors.Count > 0)
             added.AddRange(await FindAsync(before, after, withErrors, cancellationToken, matchLines) ?? []);
         if (withGeneratedErrors.Count > 0)
-            added.AddRange(await FindInGeneratedAsync(before, after, withGeneratedErrors, _ => true, cancellationToken) ?? []);
+            added.AddRange(await FindInGeneratedAsync(before, after, withGeneratedErrors, _ => true, cancellationToken, matchLines) ?? []);
         added.AddRange(unlocated);
 
         return added.Count == 0 ? null : added;
@@ -164,26 +164,31 @@ internal static class IntroducedErrors
     /// <paramref name="after"/> has and <paramref name="before"/> had not, located where the
     /// generated code's <c>#line</c> directives map them (a Razor component's errors in its
     /// <c>.razor</c> file), for the files <paramref name="mappedTo"/> accepts; null when there are
-    /// none. Written and compared as <see cref="FindAsync"/> does, lines included.
+    /// none. Written and compared as <see cref="FindAsync"/> does.
     /// </summary>
     /// <param name="before">The solution before the change.</param>
     /// <param name="after">The solution after the change.</param>
     /// <param name="projects">The projects whose generated documents to check.</param>
     /// <param name="mappedTo">Whether errors located in a file count.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
+    /// <param name="matchLines">
+    /// As for <see cref="FindAsync"/>: false when the change adds or removes lines in the files
+    /// the errors are located in (a <c>@using</c> added to a Razor file).
+    /// </param>
     public static async Task<IReadOnlyList<string>?> FindInGeneratedAsync(
         Solution before,
         Solution after,
         IReadOnlyCollection<ProjectId> projects,
         Func<string, bool> mappedTo,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool matchLines = true)
     {
-        var remaining = (await GetGeneratedErrorsAsync(before, projects, mappedTo, cancellationToken))
+        var remaining = (await GetGeneratedErrorsAsync(before, projects, mappedTo, matchLines, cancellationToken))
             .GroupBy(e => e.Key)
             .ToDictionary(g => g.Key, g => g.Count());
 
         var added = new List<string>();
-        foreach (var (key, text) in await GetGeneratedErrorsAsync(after, projects, mappedTo, cancellationToken))
+        foreach (var (key, text) in await GetGeneratedErrorsAsync(after, projects, mappedTo, matchLines, cancellationToken))
         {
             if (remaining.TryGetValue(key, out var count) && count > 0)
                 remaining[key] = count - 1;
@@ -198,6 +203,7 @@ internal static class IntroducedErrors
         Solution solution,
         IEnumerable<ProjectId> projects,
         Func<string, bool> mappedTo,
+        bool matchLines,
         CancellationToken cancellationToken)
     {
         var errors = new List<(string Path, int Line, int Column, string Key, string Text)>();
@@ -222,7 +228,7 @@ internal static class IntroducedErrors
                         span.Path,
                         line,
                         column,
-                        $"{span.Path}|{line}|{diagnostic.Id}|{message}",
+                        matchLines ? $"{span.Path}|{line}|{diagnostic.Id}|{message}" : $"{span.Path}|{diagnostic.Id}|{message}",
                         $"{span.Path}({line},{column}): error {diagnostic.Id}: {message}"));
                 }
             }

@@ -77,10 +77,11 @@ public sealed class ExtractVariableOperation : RefactoringOperationBase<ExtractV
         var sourceText = await document.GetTextAsync(cancellationToken);
         var startPosition = TextPositionHelper.GetPosition(sourceText, @params.StartLine, @params.StartColumn);
         var endPosition = TextPositionHelper.GetPosition(sourceText, @params.EndLine, @params.EndColumn);
-        var span = TextSpan.FromBounds(startPosition, endPosition);
+        var span = TextPositionHelper.Trim(sourceText, TextSpan.FromBounds(startPosition, endPosition));
 
-        // Find expression at span
-        var node = root.FindNode(span);
+        // Find expression at span: the innermost node, so a selected argument is the
+        // expression rather than its ArgumentSyntax (whose parents only lead to the whole call).
+        var node = root.FindNode(span, getInnermostNodeForTie: true);
         var expression = FindEnclosingExpression(node, span) is { } found ? MinValueLiterals.WithNegation(found) : null;
 
         if (expression == null)
@@ -156,7 +157,8 @@ public sealed class ExtractVariableOperation : RefactoringOperationBase<ExtractV
                         .WithInitializer(SyntaxFactory.EqualsValueClause(
                             // The reference below keeps the expression's trivia; don't
                             // copy it (and any comments in it) into the declaration too.
-                            expression.WithoutTrivia())))));
+                            // The expression keeps its layout; its other lines move with its first.
+                            GeneratedCodeFormatter.KeepLayout(expression.WithoutTrivia(), expression.WithoutTrivia(), expression))))));
 
         // Create variable reference
         var variableRef = IdentifierNames.Name(@params.VariableName);

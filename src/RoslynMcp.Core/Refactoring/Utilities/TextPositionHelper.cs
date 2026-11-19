@@ -42,4 +42,16 @@ internal static class TextPositionHelper
 
         return lineInfo.Start + columnIndex;
     }
+
+    /// <summary>The span without the whitespace (indentation, line breaks) at its ends.</summary>
+    public static TextSpan Trim(SourceText text, TextSpan span)
+    {
+        var start = span.Start;
+        var end = span.End;
+        while (start < end && char.IsWhiteSpace(text[start]))
+            start++;
+        while (end > start && char.IsWhiteSpace(text[end - 1]))
+            end--;
+        return TextSpan.FromBounds(start, end);
+    }
 }

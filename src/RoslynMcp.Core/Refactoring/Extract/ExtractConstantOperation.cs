@@ -85,10 +85,11 @@ public sealed class ExtractConstantOperation : RefactoringOperationBase<ExtractC
         var sourceText = await document.GetTextAsync(cancellationToken);
         var startPosition = TextPositionHelper.GetPosition(sourceText, @params.StartLine, @params.StartColumn);
         var endPosition = TextPositionHelper.GetPosition(sourceText, @params.EndLine, @params.EndColumn);
-        var span = TextSpan.FromBounds(startPosition, endPosition);
+        var span = TextPositionHelper.Trim(sourceText, TextSpan.FromBounds(startPosition, endPosition));
 
-        // Find literal at span (a negative number with its sign)
-        var node = root.FindNode(span);
+        // Find literal at span (a negative number with its sign); the innermost node, so a
+        // literal argument is the literal rather than its ArgumentSyntax.
+        var node = root.FindNode(span, getInnermostNodeForTie: true);
         var literal = FindLiteralExpression(node, span);
 
         if (literal == null)
@@ -294,7 +295,8 @@ public sealed class ExtractConstantOperation : RefactoringOperationBase<ExtractC
             SyntaxFactory.VariableDeclaration(type.WithTrailingTrivia(SyntaxFactory.Space))
                 .WithVariables(SyntaxFactory.SingletonSeparatedList(
                     SyntaxFactory.VariableDeclarator(IdentifierNames.Token(name))
-                        .WithInitializer(SyntaxFactory.EqualsValueClause(initializer)))))
+                        .WithInitializer(SyntaxFactory.EqualsValueClause(
+                            GeneratedCodeFormatter.KeepLayout(initializer.WithoutTrivia(), initializer.WithoutTrivia(), initializer))))))
             .WithModifiers(SyntaxFactory.TokenList(modifiers))
             .NormalizeWhitespace();
     }

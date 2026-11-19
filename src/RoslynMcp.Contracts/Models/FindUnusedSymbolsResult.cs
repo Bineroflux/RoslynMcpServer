@@ -72,4 +72,18 @@ public sealed class UnusedSymbolEntry
     /// 1-based column of the symbol's name.
     /// </summary>
     public required int Column { get; init; }
+
+    /// <summary>
+    /// Why it is listed: <see cref="Unreferenced"/> (nothing outside its declaration references
+    /// it) or <see cref="WriteOnly"/> (a field or auto-property that is assigned but never read;
+    /// deleting it means deleting the assignments too, so <c>safe_delete</c> refuses it until
+    /// they are gone).
+    /// </summary>
+    public string Reason { get; init; } = Unreferenced;
+
+    /// <summary><see cref="Reason"/> of a symbol nothing references outside its declaration.</summary>
+    public const string Unreferenced = "unreferenced";
+
+    /// <summary><see cref="Reason"/> of a field or auto-property whose references only write it.</summary>
+    public const string WriteOnly = "write-only";
 }

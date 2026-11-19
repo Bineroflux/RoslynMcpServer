@@ -90,6 +90,103 @@ public sealed class FindUnusedSymbolsTests
     }
 
     [Fact]
+    public async Task FieldsAndAutoPropertiesThatAreOnlyWritten_AreReportedAsWriteOnly()
+    {
+        const string source = """
+            namespace App;
+
+            internal struct Point { public int X; }
+
+            internal class Holder
+            {
+                private int _assigned;
+                private int _incremented;
+                private int _compound;
+                private readonly int _ctorOnly;
+                private int _outOnly;
+                private int _refOnly;
+                private int _deconstructed;
+                private int _named;
+                private int _read;
+                private Point _point;
+                private int Auto { get; set; }
+                private int Computed { get => 0; set => _read = value; }
+                internal int Init { get; set; }
+
+                public Holder()
+                {
+                    _ctorOnly = 1;
+                    this._assigned = 2;
+                }
+
+                public int Run(string s)
+                {
+                    _assigned = 3;
+                    _incremented++;
+                    _compound += 2;
+                    int.TryParse(s, out _outOnly);
+                    Bump(ref _refOnly);
+                    (_deconstructed, _) = (1, 2);
+                    Auto = 4;
+                    Computed = 5;
+                    _point.X = 6;
+                    return nameof(_named).Length + _read;
+                }
+
+                private static void Bump(ref int value) => value++;
+
+                public static Holder Make() => new() { Init = 1 };
+            }
+
+            internal static class Program2
+            {
+                public static int Use() => Holder.Make().Run("1");
+            }
+            """;
+        using var ws = TestWorkspace.Create(("Holder.cs", source));
+
+        var result = await FindAsync(ws, new FindUnusedSymbolsParams());
+
+        Assert.Equal(
+            [
+                ("App.Point.X", "write-only"), ("App.Holder._assigned", "write-only"), ("App.Holder._ctorOnly", "write-only"), ("App.Holder._outOnly", "write-only"),
+                ("App.Holder._deconstructed", "write-only"), ("App.Holder.Auto", "write-only"), ("App.Holder.Init", "write-only"),
+                ("App.Program2", "unreferenced")
+            ],
+            result.Symbols.Select(s => (s.FullyQualifiedName, s.Reason)));
+
+        // Without them, only what nothing references at all is left.
+        var unreferenced = await FindAsync(ws, new FindUnusedSymbolsParams { IncludeWriteOnly = false });
+        Assert.Equal(["App.Program2"], unreferenced.Symbols.Select(s => s.FullyQualifiedName));
+    }
+
+    [Fact]
+    public async Task AFieldReadInOneTargetFrameworkAndWrittenInTheOther_IsUsed()
+    {
+        const string source = """
+            namespace App;
+
+            internal class Holder
+            {
+                private int _value;
+                private int _written;
+
+            #if NET9
+                public int Read() => _value;
+            #endif
+
+                public void Write() { _value = 1; _written = 2; }
+            }
+            """;
+        using var ws = TestWorkspace.CreateSolution(
+            new TestWorkspace.ProjectSpec("Multi", [("Holder.cs", source)], TargetFrameworks: ["net8", "net9"]));
+
+        var result = await FindAsync(ws, new FindUnusedSymbolsParams { KindFilter = "Field" });
+
+        Assert.Equal([("App.Holder._written", "write-only")], result.Symbols.Select(s => (s.FullyQualifiedName, s.Reason)));
+    }
+
+    [Fact]
     public async Task CrefFromAnotherType_IsAUse()
     {
         const string source = """

@@ -37,6 +37,12 @@ public sealed class FindUnusedSymbolsParams
     public bool? IncludeAttributed { get; init; }
 
     /// <summary>
+    /// Also report fields and auto-properties that are assigned but never read, with the reason
+    /// <c>write-only</c>. Default: true.
+    /// </summary>
+    public bool? IncludeWriteOnly { get; init; }
+
+    /// <summary>
     /// Maximum number of symbols to return. Default: 100.
     /// </summary>
     public int? MaxResults { get; init; }

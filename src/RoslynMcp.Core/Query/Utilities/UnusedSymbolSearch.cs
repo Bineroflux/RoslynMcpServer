@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Collections.Immutable;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.FindSymbols;
 using RoslynMcp.Contracts.Models;
@@ -18,7 +19,10 @@ namespace RoslynMcp.Core.Query.Utilities;
 /// <para>
 /// A reference inside the symbol's own declaration (a recursive call, a type naming itself, its
 /// own documentation comment) is not a use; every other reference Roslyn finds is, a
-/// <c>nameof</c>, a <c>cref</c> and a reference from source-generated code included. A type is
+/// <c>nameof</c>, a <c>cref</c> and a reference from source-generated code included. A field or
+/// auto-property whose only references are writes (assignments, <c>out</c> arguments, object
+/// initializers, but not <c>++</c>, <c>+=</c> or <c>ref</c>, which read too) is reported as
+/// write-only: deleting it means deleting those writes as well. A type is
 /// used when it or one of its members or nested types is referenced from outside the type, so a
 /// static class whose extension methods are called is used. A member or nested type of a type that
 /// is reported itself is not listed separately (deleting the type removes it).
@@ -61,7 +65,9 @@ internal sealed class UnusedSymbolSearch
     /// <param name="File">Only symbols declared in this file.</param>
     /// <param name="IncludePublic">Also symbols visible outside their assembly.</param>
     /// <param name="IncludeAttributed">Also attributed symbols (and fields of layout types).</param>
-    public sealed record Filter(Contracts.Enums.SymbolKind? Kind, FileScope? File, bool IncludePublic, bool IncludeAttributed);
+    /// <param name="IncludeWriteOnly">Also fields and auto-properties that are only written.</param>
+    public sealed record Filter(
+        Contracts.Enums.SymbolKind? Kind, FileScope? File, bool IncludePublic, bool IncludeAttributed, bool IncludeWriteOnly);
 
     /// <summary>
     /// The unused symbols declared in <paramref name="projects"/>, unordered, and the number of
@@ -79,27 +85,29 @@ internal sealed class UnusedSymbolSearch
         await Parallel.ForEachAsync(
             searched,
             new ParallelOptions { CancellationToken = cancellationToken, MaxDegreeOfParallelism = Environment.ProcessorCount },
-            async (candidate, token) => candidate.Outside = await FindOutsideReferencesAsync(candidate, token));
+            async (candidate, token) => (candidate.Outside, candidate.OnlyWrites) = await FindOutsideReferencesAsync(candidate, token));
 
         // A symbol of a file compiled by several projects is reported once, when every one of
-        // them leaves it unused.
-        var verdicts = new Dictionary<string, (int Instances, int Unused, Candidate First)>(StringComparer.Ordinal);
+        // them leaves it unused; it is write-only when one of them writes it.
+        var verdicts = new Dictionary<string, (int Instances, int Unused, int WriteOnly, Candidate First)>(StringComparer.Ordinal);
         foreach (var candidate in candidates.Where(c => c.Reportable))
         {
-            var unused = await IsUnusedAsync(candidate, cancellationToken);
+            var usage = await GetUsageAsync(candidate, cancellationToken);
+            var (unused, writeOnly) = (usage == Usage.Unreferenced ? 1 : 0, usage == Usage.WriteOnly ? 1 : 0);
             verdicts[candidate.Key] = verdicts.TryGetValue(candidate.Key, out var verdict)
-                ? (verdict.Instances + 1, verdict.Unused + (unused ? 1 : 0), verdict.First)
-                : (1, unused ? 1 : 0, candidate);
+                ? (verdict.Instances + 1, verdict.Unused + unused, verdict.WriteOnly + writeOnly, verdict.First)
+                : (1, unused, writeOnly, candidate);
         }
 
-        var reported = verdicts.Values.Where(v => v.Unused == v.Instances).Select(v => v.First).ToList();
+        var reported = verdicts.Values.Where(v => v.Unused + v.WriteOnly == v.Instances).Select(v => v.First).ToList();
+        var writeOnlyKeys = verdicts.Where(v => v.Value.WriteOnly > 0).Select(v => v.Key).ToHashSet(StringComparer.Ordinal);
 
         // A member or nested type of a reported type goes when the type goes; it is not listed
         // on its own.
         var unusedTypes = reported.Where(c => c.Symbol is INamedTypeSymbol).Select(c => c.Key).ToHashSet(StringComparer.Ordinal);
         var entries = reported
             .Where(c => !ContainingTypes(c.Symbol).Any(type => unusedTypes.Contains(KeyOf(type))))
-            .Select(CreateEntry)
+            .Select(c => CreateEntry(c, writeOnlyKeys.Contains(c.Key)))
             .ToList();
 
         return (entries, searched.Select(c => c.Key).Distinct(StringComparer.Ordinal).Count());
@@ -181,10 +189,12 @@ internal sealed class UnusedSymbolSearch
     {
         var reportable = (_filter.Kind is not { } kind || SymbolKindMapper.Map(symbol) == kind) &&
             (_filter.File is null || symbol.Locations.Any(l => l.IsInSource && _filter.File.ContainsFile(l.SourceTree?.FilePath)));
-        var candidate = new Candidate(symbol, context, SymbolDeclarations.Nodes(symbol, cancellationToken))
+        var declarations = SymbolDeclarations.Nodes(symbol, cancellationToken);
+        var candidate = new Candidate(symbol, context, declarations)
         {
             Reportable = reportable,
-            Searched = reportable || reportedTypes.Count > 0
+            Searched = reportable || reportedTypes.Count > 0,
+            CanBeWriteOnly = _filter.IncludeWriteOnly && CanBeWriteOnly(symbol, declarations)
         };
 
         foreach (var type in reportedTypes)
@@ -233,6 +243,20 @@ internal sealed class UnusedSymbolSearch
 
         return eligible && (_filter.IncludePublic || !SymbolVisibility.IsVisibleOutsideAssembly(symbol));
     }
+
+    /// <summary>
+    /// Whether <paramref name="symbol"/> holds a value that writes alone may leave unread: a
+    /// field that is no constant, or an auto-property (whose accessors have no code of their own
+    /// that a write would run).
+    /// </summary>
+    private static bool CanBeWriteOnly(ISymbol symbol, IReadOnlyList<SyntaxNode> declarations) => symbol switch
+    {
+        IFieldSymbol field => !field.IsConst,
+        IPropertySymbol { IsIndexer: false, SetMethod: not null } => declarations.All(d =>
+            d is PropertyDeclarationSyntax { ExpressionBody: null, AccessorList: { } accessors } &&
+            accessors.Accessors.All(a => a.Body == null && a.ExpressionBody == null)),
+        _ => false
+    };
 
     private static bool IsPartial(IMethodSymbol method) =>
         method.IsPartialDefinition || method.PartialDefinitionPart != null || method.PartialImplementationPart != null;
@@ -292,11 +316,11 @@ internal sealed class UnusedSymbolSearch
             "System.SerializableAttribute";
 
     /// <summary>
-    /// The references to the candidate outside its own declaration. The name of an explicit
-    /// interface implementation, which Roslyn reports as a reference to the interface member, is
-    /// a declaration, not a use.
+    /// The references to the candidate outside its own declaration, and whether every one of
+    /// them only writes it. The name of an explicit interface implementation, which Roslyn
+    /// reports as a reference to the interface member, is a declaration, not a use.
     /// </summary>
-    private async Task<IReadOnlyList<Location>> FindOutsideReferencesAsync(Candidate candidate, CancellationToken cancellationToken)
+    private async Task<(IReadOnlyList<Location> Outside, bool OnlyWrites)> FindOutsideReferencesAsync(Candidate candidate, CancellationToken cancellationToken)
     {
         var documents = await SearchDocumentsAsync(candidate, cancellationToken);
         var referenced = documents is null
@@ -304,6 +328,7 @@ internal sealed class UnusedSymbolSearch
             : await SymbolFinder.FindReferencesAsync(candidate.Symbol, _solution, documents, cancellationToken);
 
         var outside = new List<Location>();
+        var onlyWrites = true;
         foreach (var reference in referenced.SelectMany(r => r.Locations))
         {
             var location = reference.Location;
@@ -312,10 +337,46 @@ internal sealed class UnusedSymbolSearch
                 !IsExplicitImplementationName(location, cancellationToken))
             {
                 outside.Add(location);
+                onlyWrites &= IsWriteOnly(reference, cancellationToken);
             }
         }
 
-        return outside;
+        return (outside, onlyWrites && outside.Count > 0);
+    }
+
+    /// <summary>
+    /// Whether a reference only writes the symbol: the target of a simple assignment (also in an
+    /// object initializer, through <c>this.</c> or <c>?.</c>, or as an element of a deconstructing
+    /// tuple) or an <c>out</c> argument. A compound assignment, <c>++</c>, a <c>ref</c> argument,
+    /// <c>nameof</c>, a cref, a member access on it and an implicit reference read it (or name it).
+    /// </summary>
+    private static bool IsWriteOnly(ReferenceLocation reference, CancellationToken cancellationToken)
+    {
+        if (reference.IsImplicit ||
+            reference.Location.SourceTree!.GetRoot(cancellationToken).FindToken(reference.Location.SourceSpan.Start).Parent is not SimpleNameSyntax name)
+        {
+            return false;
+        }
+
+        SyntaxNode target = name.Parent switch
+        {
+            MemberAccessExpressionSyntax access when access.Name == name => access,
+            MemberBindingExpressionSyntax binding => binding,
+            _ => name
+        };
+        while (target.Parent is ParenthesizedExpressionSyntax)
+            target = target.Parent;
+
+        // An element of a tuple that a deconstruction assigns to.
+        while (target.Parent is ArgumentSyntax { RefKindKeyword.RawKind: 0, Parent: TupleExpressionSyntax tuple })
+            target = tuple;
+
+        return target.Parent switch
+        {
+            AssignmentExpressionSyntax assignment => assignment.IsKind(SyntaxKind.SimpleAssignmentExpression) && assignment.Left == target,
+            ArgumentSyntax argument => argument.RefKindKeyword.IsKind(SyntaxKind.OutKeyword),
+            _ => false
+        };
     }
 
     private static bool IsExplicitImplementationName(Location location, CancellationToken cancellationToken)
@@ -395,14 +456,27 @@ internal sealed class UnusedSymbolSearch
         return documents.ToImmutable();
     }
 
-    private async Task<bool> IsUnusedAsync(Candidate candidate, CancellationToken cancellationToken)
+    /// <summary>How a candidate is used outside its own declaration.</summary>
+    private enum Usage
     {
-        if (candidate.Outside!.Count > 0)
-            return false;
+        Used,
+        Unreferenced,
+        WriteOnly
+    }
+
+    private async Task<Usage> GetUsageAsync(Candidate candidate, CancellationToken cancellationToken)
+    {
+        var usage = candidate.Outside!.Count == 0 ? Usage.Unreferenced
+            : candidate.CanBeWriteOnly && candidate.OnlyWrites ? Usage.WriteOnly
+            : Usage.Used;
+        if (usage == Usage.Used)
+            return usage;
 
         if (candidate.Symbol is INamedTypeSymbol)
         {
-            return candidate.Dependents.All(d => d.Outside!.All(l => SymbolDeclarations.Contains(candidate.Declarations, l)));
+            return candidate.Dependents.All(d => d.Outside!.All(l => SymbolDeclarations.Contains(candidate.Declarations, l)))
+                ? usage
+                : Usage.Used;
         }
 
         // A public member of a class that can be derived from may implement an interface on
@@ -410,13 +484,13 @@ internal sealed class UnusedSymbolSearch
         if (candidate.Symbol is { IsStatic: false, DeclaredAccessibility: Accessibility.Public, ContainingType: { TypeKind: TypeKind.Class, IsSealed: false } } and not IMethodSymbol { MethodKind: MethodKind.Constructor })
         {
             var implemented = await SymbolFinder.FindImplementedInterfaceMembersAsync(candidate.Symbol, _solution, cancellationToken: cancellationToken);
-            return !implemented.Any();
+            return implemented.Any() ? Usage.Used : usage;
         }
 
-        return true;
+        return usage;
     }
 
-    private UnusedSymbolEntry CreateEntry(Candidate candidate)
+    private UnusedSymbolEntry CreateEntry(Candidate candidate, bool writeOnly)
     {
         var symbol = candidate.Symbol;
         var location = symbol.Locations
@@ -436,7 +510,8 @@ internal sealed class UnusedSymbolSearch
             Accessibility = AccessibilityText(symbol.DeclaredAccessibility),
             File = location.Span.Path,
             Line = location.Span.StartLinePosition.Line + 1,
-            Column = location.Span.StartLinePosition.Character + 1
+            Column = location.Span.StartLinePosition.Character + 1,
+            Reason = writeOnly ? UnusedSymbolEntry.WriteOnly : UnusedSymbolEntry.Unreferenced
         };
     }
 
@@ -478,7 +553,13 @@ internal sealed class UnusedSymbolSearch
         /// <summary>For a reported type: its members and nested types, whose uses are its uses.</summary>
         public List<Candidate> Dependents { get; } = [];
 
+        /// <summary>Whether writes alone may leave it unread (a field or an auto-property).</summary>
+        public required bool CanBeWriteOnly { get; init; }
+
         /// <summary>The references outside its declaration, once searched.</summary>
         public IReadOnlyList<Location>? Outside { get; set; }
+
+        /// <summary>Whether <see cref="Outside"/> has references, and all of them only write it.</summary>
+        public bool OnlyWrites { get; set; }
     }
 }

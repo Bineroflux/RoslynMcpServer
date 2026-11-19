@@ -9,9 +9,9 @@ using RoslynMcp.Core.Workspace;
 namespace RoslynMcp.Core.Query;
 
 /// <summary>
-/// Finds source types and members that nothing references outside their own declaration:
-/// candidates for deletion, since reflection, serialization, XAML/Razor bindings and other
-/// assemblies are invisible to it. See <see cref="UnusedSymbolSearch"/> for what counts as a use
+/// Finds source types and members that nothing references outside their own declaration, and
+/// fields and auto-properties that are only written: candidates for deletion, since reflection,
+/// serialization, XAML/Razor bindings and other assemblies are invisible to it. See <see cref="UnusedSymbolSearch"/> for what counts as a use
 /// and what is left out.
 /// </summary>
 public sealed class FindUnusedSymbolsOperation : QueryOperationBase<FindUnusedSymbolsParams, FindUnusedSymbolsResult>
@@ -58,7 +58,8 @@ public sealed class FindUnusedSymbolsOperation : QueryOperationBase<FindUnusedSy
                 ParseKindFilter(@params.KindFilter),
                 fileScope,
                 @params.IncludePublic ?? false,
-                @params.IncludeAttributed ?? false));
+                @params.IncludeAttributed ?? false,
+                @params.IncludeWriteOnly ?? true));
         var (unused, checkedCount) = await search.RunAsync(projects.ToList(), cancellationToken);
 
         var ordered = ResultOrder.ByLocation(unused, e => e.File, e => e.Line, e => e.Column, e => e.FullyQualifiedName);

@@ -29,6 +29,7 @@ public sealed class FindUnusedSymbolsToolTests
     [InlineData("kindFilter", "string")]
     [InlineData("includePublic", "boolean")]
     [InlineData("includeAttributed", "boolean")]
+    [InlineData("includeWriteOnly", "boolean")]
     [InlineData("maxResults", "integer")]
     public void Definition_HasOptionalArguments(string name, string type)
     {

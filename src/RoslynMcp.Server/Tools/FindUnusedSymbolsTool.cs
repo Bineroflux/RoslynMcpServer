@@ -31,6 +31,7 @@ public sealed class FindUnusedSymbolsTool : IToolHandler
     public string Description =>
         "List types and members declared in source that nothing references outside their own declaration " +
         "(a recursive call or a type naming itself is no use); the members of an unused type are not listed separately. " +
+        "Fields and auto-properties that are only assigned are listed with reason 'write-only' (safe_delete refuses them while the assignments exist). " +
         "By default only symbols not visible outside their " +
         "assembly, and without overrides, interface implementations, entry points, operators, parameterless " +
         "constructors and attributed members. These are candidates, not proof: reflection, serialization, " +
@@ -73,6 +74,11 @@ public sealed class FindUnusedSymbolsTool : IToolHandler
                 type = "boolean",
                 description = "Also report attributed symbols, types containing them, and fields of [StructLayout]/[Serializable] types (default: false)"
             },
+            includeWriteOnly = new
+            {
+                type = "boolean",
+                description = "Also report fields and auto-properties that are assigned but never read, with reason 'write-only' (default: true)"
+            },
             maxResults = new
             {
                 type = "integer",
@@ -105,6 +111,7 @@ public sealed class FindUnusedSymbolsTool : IToolHandler
                 KindFilter = args.KindFilter,
                 IncludePublic = args.IncludePublic,
                 IncludeAttributed = args.IncludeAttributed,
+                IncludeWriteOnly = args.IncludeWriteOnly,
                 MaxResults = args.MaxResults
             };
 
@@ -137,6 +144,7 @@ public sealed class FindUnusedSymbolsTool : IToolHandler
         public string? KindFilter { get; init; }
         public bool? IncludePublic { get; init; }
         public bool? IncludeAttributed { get; init; }
+        public bool? IncludeWriteOnly { get; init; }
         public int? MaxResults { get; init; }
     }
 }

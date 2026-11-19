@@ -51,16 +51,6 @@ internal sealed class CallPlan
     /// <summary>The local declarations the last <see cref="BuildBody"/> produced.</summary>
     public IReadOnlyList<StatementSyntax> Temps { get; private set; } = [];
 
-    /// <summary>The line and column of the call's method name, 1-based.</summary>
-    public (int Line, int Column) Position
-    {
-        get
-        {
-            var position = NameToken(Invocation).GetLocation().GetLineSpan().StartLinePosition;
-            return (position.Line + 1, position.Character + 1);
-        }
-    }
-
     private SyntaxAnnotation SiteAnnotation => new(SiteAnnotationKind, Site.ToString(CultureInfo.InvariantCulture));
 
     /// <summary>

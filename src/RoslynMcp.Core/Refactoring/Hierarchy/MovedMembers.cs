@@ -240,24 +240,6 @@ internal sealed record SelectedDeclaration(
             Enumerable.Repeat(SyntaxFactory.Token(SyntaxKind.CommaToken).WithTrailingTrivia(SyntaxFactory.Space), variables.Count - 1))));
     }
 
-    /// <summary>
-    /// <paramref name="declaration"/> (<see cref="Declaration"/> or a copy of it) without the chosen
-    /// variables of a field or event field; null when the whole declaration is chosen.
-    /// </summary>
-    public MemberDeclarationSyntax? Remaining(MemberDeclarationSyntax declaration)
-    {
-        if (IsWhole)
-            return null;
-        if (Declaration is not BaseFieldDeclarationSyntax original || declaration is not BaseFieldDeclarationSyntax copy)
-            return declaration;
-
-        var indexes = Variables.Select(v => original.Declaration.Variables.IndexOf(v)).ToHashSet();
-        var variables = copy.Declaration.Variables.Where((_, i) => !indexes.Contains(i)).Select(v => v.WithoutTrivia()).ToList();
-        return copy.WithDeclaration(copy.Declaration.WithVariables(SyntaxFactory.SeparatedList(
-            variables,
-            Enumerable.Repeat(SyntaxFactory.Token(SyntaxKind.CommaToken).WithTrailingTrivia(SyntaxFactory.Space), variables.Count - 1))));
-    }
-
     /// <summary>The syntax that leaves the old type: the whole declaration, or the chosen variables.</summary>
     public IEnumerable<SyntaxNode> Removed => IsWhole ? [Declaration] : Variables;
 }

@@ -233,8 +233,7 @@ public sealed class MoveTypeToFileOperation : RefactoringOperationBase<MoveTypeT
         {
             SourceFileEmptied = !remainingTypes,
             TargetFileCreated = targetDoc == null,
-            TypeNode = typeNode,
-            Namespace = namespaceName
+            TypeNode = typeNode
         });
     }
 
@@ -367,6 +366,5 @@ public sealed class MoveTypeToFileOperation : RefactoringOperationBase<MoveTypeT
         public bool SourceFileEmptied { get; init; }
         public bool TargetFileCreated { get; init; }
         public required TypeDeclarationSyntax TypeNode { get; init; }
-        public required string Namespace { get; init; }
     }
 }

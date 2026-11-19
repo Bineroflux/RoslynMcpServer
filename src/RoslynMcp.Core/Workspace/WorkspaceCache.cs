@@ -20,6 +20,11 @@ namespace RoslynMcp.Core.Workspace;
 ///   older than one that committed while they waited.
 /// - Project-file changes (<c>.csproj</c>, <c>.sln</c>, etc.) invalidate the entry
 ///   rather than attempting an incremental reload.
+/// - Every context the cache loads shares one writer section
+///   (<see cref="WorkspaceWriteCoordinator"/>): entries for different roots over the same files
+///   (a <c>.slnx</c> and a <c>.csproj</c> of one tree), or an invalidated entry and its reloaded
+///   successor, refactor one at a time, and each takes over what the others wrote before it
+///   computes, without waiting for its file watcher.
 /// </remarks>
 public sealed class WorkspaceCache : IDisposable
 {
@@ -34,6 +39,8 @@ public sealed class WorkspaceCache : IDisposable
 
     private readonly ConcurrentDictionary<string, CachedEntry> _entries = new(PathResolver.PathComparer);
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _loadGuards = new(PathResolver.PathComparer);
+    private readonly WorkspaceWriteCoordinator _writers = new();
+    private Task? _watcherEventsHeldUntil;
     private readonly TimeSpan _idleTtl;
     private readonly Timer _sweepTimer;
     private bool _disposed;
@@ -43,6 +50,17 @@ public sealed class WorkspaceCache : IDisposable
 
     /// <summary>Optional error-diagnostics callback.</summary>
     public Action<string, Exception?>? LogErrorCallback { get; set; }
+
+    /// <summary>
+    /// For tests: while this task is pending, the file watchers' callbacks wait for it before
+    /// they handle an event, as if the file system reported changes late. Null (the default)
+    /// lets them run at once.
+    /// </summary>
+    internal Task? WatcherEventsHeldUntil
+    {
+        get => Volatile.Read(ref _watcherEventsHeldUntil);
+        set => Volatile.Write(ref _watcherEventsHeldUntil, value);
+    }
 
     /// <summary>
     /// Creates a new workspace cache.
@@ -111,9 +129,14 @@ public sealed class WorkspaceCache : IDisposable
             }
 
             LogCallback?.Invoke($"Cache miss for '{key}'; loading workspace...");
+
+            // Writes other contexts commit from here on may be missing from what the load reads;
+            // the new context takes them over from disk when its first writer section starts.
+            var writesBeforeLoad = _writers.Sequence;
             var fresh = await loader(cancellationToken);
             var entry = new CachedEntry(this, key, fresh);
             fresh.MarkCacheOwned();
+            fresh.ShareWriters(_writers, writesBeforeLoad);
 
             // Take the first lease for the caller before publishing, so a sweep
             // can never see RefCount == 0 between publish and return.
@@ -489,6 +512,9 @@ public sealed class WorkspaceCache : IDisposable
         {
             try
             {
+                if (_cache.WatcherEventsHeldUntil is { } held)
+                    await held.ConfigureAwait(false);
+
                 // Ignore the transient wrapper projects materialized for standalone .cs files
                 // (named <entry>.cs.csproj). They are created and deleted during a workspace load;
                 // treating them as ordinary project files would invalidate or churn the workspace.

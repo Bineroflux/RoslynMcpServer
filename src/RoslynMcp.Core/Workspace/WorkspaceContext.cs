@@ -141,20 +141,22 @@ public sealed class WorkspaceContext : IDisposable
         public readonly WorkspaceOperationGate Gate = new();
 
         // The writer section (RunWriterAsync): one refactoring at a time reads the solution,
-        // computes its change and commits it. Taken inside an operation lease, never the other
-        // way round, and never waited for by a file update.
-        public readonly SemaphoreSlim WriterLock = new(1, 1);
+        // computes its change and commits it, across every context sharing these writers (a
+        // cache shares its own among all its contexts; ShareWriters). Taken inside an operation
+        // lease, never the other way round, and never waited for by a file update. Replaced only
+        // before the context is handed to anyone.
+        public WorkspaceWriteCoordinator Writers = new();
 
-        // The running writer section (a fresh object per section; null when none runs), and the
-        // section each async flow belongs to. A commit or UpdateSolution is accepted only from the
-        // flow of the running section, so neither a caller outside one nor work an earlier section
-        // left behind can race it.
-        public object? CurrentWriterSection;
-        public readonly AsyncLocal<object?> WriterSectionOfFlow = new();
+        // The sequence number of Writers up to which this session holds every recorded write:
+        // its own, and those of the other contexts, taken over from disk when a section starts.
+        // Touched only by this session's running section (and before the context is shared).
+        public long WritesSeen;
 
         // The snapshot the running writer section builds on: the solution when it started, moved
-        // on by its own commits and UpdateSolution calls; null when no section runs. Touched only
-        // by the section holding WriterLock.
+        // on by its own commits and UpdateSolution calls; null when no section of this session
+        // runs. A commit or UpdateSolution is accepted only from the flow of the running section
+        // while it is set, so neither a caller outside one, nor work an earlier section left
+        // behind, nor a section of another context can race it. Touched only by that section.
         public Solution? WriterBase;
 
         public Solution Solution = solution;
@@ -227,6 +229,10 @@ public sealed class WorkspaceContext : IDisposable
     public void UpdateSolution(Solution newSolution)
     {
         EnsureWriterBaseIsCurrent(nameof(UpdateSolution));
+
+        // Moves the section made on disk before repointing documents (a file moved to the folder
+        // of its new namespace) are news for the other contexts sharing the writers.
+        _s.Writers.RecordWrites(GetMovedFiles(_s.Solution, newSolution));
         _s.Solution = newSolution;
         _s.WriterBase = newSolution;
     }
@@ -239,41 +245,59 @@ public sealed class WorkspaceContext : IDisposable
     /// <see cref="UpdateSolution"/> only work inside a section.
     /// </summary>
     /// <remarks>
+    /// <para>
+    /// The section is shared with every context over possibly the same files (all contexts of
+    /// one <see cref="WorkspaceCache"/>, e.g. a <c>.slnx</c> and a <c>.csproj</c> of one tree),
+    /// so their refactorings run one after another too. Before the body runs, the section takes
+    /// over from disk every file such a context wrote since this one last looked: its text, and
+    /// for a file created, deleted or moved, the project's evaluated documents (see
+    /// <see cref="WorkspaceWriteCoordinator"/>). The body thus never computes on text another
+    /// context has replaced, though this context's file watcher may not have caught up yet. When
+    /// nothing was written elsewhere, that costs nothing.
+    /// </para>
+    /// <para>
     /// A cached context's caller holds an operation lease while it waits here, which keeps
     /// file updates out until every waiting writer is done; so the body must never wait for
     /// a file update (<see cref="SyncDocumentFromDiskAsync"/> and
     /// <see cref="ReconcileProjectDocumentsAsync"/> refuse to run inside a section) or for
-    /// another operation. Not re-entrant. The section ends, and the lock is released, when the
-    /// body completes, throws or is cancelled.
+    /// another operation. Not re-entrant, also not through another context. The section ends,
+    /// and the lock is released, when the body completes, throws or is cancelled.
+    /// </para>
     /// </remarks>
+    /// <exception cref="RefactoringException">
+    /// <see cref="ErrorCodes.WorkspaceBusy"/>: another context created or deleted files, and
+    /// MSBuild could not re-evaluate a project of this one to take that over; the body did not run.
+    /// </exception>
     public async Task<T> RunWriterAsync<T>(
         Func<CancellationToken, Task<T>> body,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(body);
         ThrowIfDisposed();
-        if (FlowRunsWriterSection())
-            throw new InvalidOperationException(
-                "This flow is already inside the workspace's writer section, which is not re-entrant.");
 
-        await _s.WriterLock.WaitAsync(cancellationToken).ConfigureAwait(false);
-        var section = new object();
-        try
-        {
-            ThrowIfDisposed();
-            _s.WriterBase = _s.Solution;
-            Volatile.Write(ref _s.CurrentWriterSection, section);
-            // Flows into the body (and whatever it starts); this method's caller keeps its own
-            // value, since an async method restores the caller's context when it returns.
-            _s.WriterSectionOfFlow.Value = section;
-            return await body(cancellationToken).ConfigureAwait(false);
-        }
-        finally
-        {
-            Volatile.Write(ref _s.CurrentWriterSection, null);
-            _s.WriterBase = null;
-            _s.WriterLock.Release();
-        }
+        var writers = _s.Writers;
+        return await writers.RunSectionAsync(
+            async ct =>
+            {
+                ThrowIfDisposed();
+                await TakeOverOtherWritesAsync(writers, ct).ConfigureAwait(false);
+
+                _s.WriterBase = _s.Solution;
+                try
+                {
+                    var result = await body(ct).ConfigureAwait(false);
+
+                    // The section's own writes are in the solution now. (After a failure they
+                    // may not all be, so the next section takes them over from disk too.)
+                    _s.WritesSeen = writers.Sequence;
+                    return result;
+                }
+                finally
+                {
+                    _s.WriterBase = null;
+                }
+            },
+            cancellationToken).ConfigureAwait(false);
     }
 
     /// <inheritdoc cref="RunWriterAsync{T}"/>
@@ -299,7 +323,10 @@ public sealed class WorkspaceContext : IDisposable
     /// </summary>
     private void EnsureWriterBaseIsCurrent(string action)
     {
-        if (!FlowRunsWriterSection() || _s.WriterBase is null)
+        // WriterBase is set only while a section of this session runs, and only one section of
+        // the shared writers runs at a time: a flow of the running section with WriterBase set
+        // is a flow of this session's section.
+        if (!_s.Writers.FlowRunsSection() || _s.WriterBase is null)
             throw new InvalidOperationException(
                 $"{action} must run inside the workspace's writer section (RunWriterAsync).");
 
@@ -310,22 +337,164 @@ public sealed class WorkspaceContext : IDisposable
                 "(applying it would have reverted that change). Nothing was written; run it again.");
     }
 
-    /// <summary>Whether the calling flow belongs to the writer section that is running now.</summary>
-    private bool FlowRunsWriterSection()
-    {
-        var section = _s.WriterSectionOfFlow.Value;
-        return section != null && ReferenceEquals(section, Volatile.Read(ref _s.CurrentWriterSection));
-    }
-
     /// <summary>
     /// A file update waits until no operation holds a lease, and a writer section runs inside
-    /// one: waiting for an update from inside a section would never end.
+    /// one: waiting for an update from inside a section would never end. Nor may a section of
+    /// another context sharing the writers wait for one, whose operation may be waiting for
+    /// that section.
     /// </summary>
     private void ThrowIfInWriterSection()
     {
-        if (FlowRunsWriterSection())
+        if (_s.Writers.FlowRunsSection())
             throw new InvalidOperationException(
                 "A filesystem-driven update cannot run inside the workspace's writer section; it would wait for the section's own operation lease.");
+    }
+
+    /// <summary>
+    /// Shares <paramref name="writers"/> with the other contexts of a cache: their refactorings
+    /// then run one at a time with this context's, and this one takes over what they write (see
+    /// <see cref="RunWriterAsync{T}"/>). <paramref name="writesSeen"/> is the
+    /// <see cref="WorkspaceWriteCoordinator.Sequence"/> read before this workspace was loaded:
+    /// every write after it may be missing from what the load read, and is taken over when the
+    /// first section starts. Only before the context is handed to anyone.
+    /// </summary>
+    internal void ShareWriters(WorkspaceWriteCoordinator writers, long writesSeen)
+    {
+        ArgumentNullException.ThrowIfNull(writers);
+        if (_lease != null || _s.WriterBase != null)
+            throw new InvalidOperationException("Writers can be shared only before the context is in use.");
+
+        _s.Writers = writers;
+        _s.WritesSeen = writesSeen;
+    }
+
+    /// <summary>
+    /// Brings the solution in line with the disk for every file another context sharing
+    /// <paramref name="writers"/> wrote since this session last looked: a tracked file gets the
+    /// text on disk; a file created, deleted or moved has its project re-evaluated with MSBuild,
+    /// whose documents are then added and removed as <see cref="ReconcileProjectDocumentsAsync"/>
+    /// does. Runs at the start of a section: the section's lock keeps every other writer out, and
+    /// a cached context's operation lease keeps its file updates out, so the disk read here is
+    /// the disk the section computes on. Changes nothing (and keeps <see cref="Session.WritesSeen"/>)
+    /// when it fails.
+    /// </summary>
+    private async Task TakeOverOtherWritesAsync(WorkspaceWriteCoordinator writers, CancellationToken cancellationToken)
+    {
+        var (through, written) = writers.GetWrittenSince(_s.WritesSeen);
+        if (written.Count == 0)
+        {
+            _s.WritesSeen = through;
+            return;
+        }
+
+        var sol = _s.Solution;
+        var documentsByPath = IndexDocumentsByPath(sol);
+        var toEvaluate = new List<string>();
+        foreach (var (path, structural) in written)
+        {
+            documentsByPath.TryGetValue(path, out var tracked);
+            var bytes = await TryReadFileAsync(path, cancellationToken).ConfigureAwait(false);
+            if (bytes == null)
+            {
+                // Deleted or moved away: the project decides whether the document goes.
+                if (tracked != null)
+                    toEvaluate.Add(path);
+                continue;
+            }
+
+            if (tracked == null)
+            {
+                // Created or moved here: the project decides whether it compiles the file. A file
+                // the project left out before and that was only edited stays out.
+                if (structural)
+                    toEvaluate.Add(path);
+                continue;
+            }
+
+            var text = await DecodeFromDiskAsync(tracked, bytes, cancellationToken).ConfigureAwait(false);
+            sol = await WithDiskTextAsync(sol, tracked, text, bytes, cancellationToken).ConfigureAwait(false);
+        }
+
+        var projectFiles = toEvaluate
+            .SelectMany(path => FindProjectFilesForPath(sol, path))
+            .Distinct(PathResolver.PathComparer);
+        foreach (var projectFile in projectFiles)
+        {
+            try
+            {
+                var evaluated = await EvaluateProjectAsync(projectFile, cancellationToken).ConfigureAwait(false);
+                if (evaluated is { Count: > 0 })
+                {
+                    sol = await WithEvaluatedDocumentsAsync(sol, projectFile, evaluated, cancellationToken)
+                        .ConfigureAwait(false);
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                throw new RefactoringException(
+                    ErrorCodes.WorkspaceBusy,
+                    $"A refactoring through another workspace over the same files created or deleted files of " +
+                    $"'{projectFile}', and MSBuild could not re-evaluate it to take that over ({ex.Message}). " +
+                    "Nothing was written; run it again.",
+                    ex);
+            }
+        }
+
+        _s.Solution = sol;
+        _s.WritesSeen = through;
+    }
+
+    /// <summary>
+    /// The files a solution change moves, adds or removes documents at (old and new paths), as
+    /// structural writes for <see cref="WorkspaceWriteCoordinator.RecordWrites"/>. Text changes
+    /// are left out: <see cref="UpdateSolution"/> writes no text to disk.
+    /// </summary>
+    private static List<(string Path, bool Structural)> GetMovedFiles(Solution before, Solution after)
+    {
+        var files = new List<(string Path, bool Structural)>();
+        foreach (var projectChanges in after.GetChanges(before).GetProjectChanges())
+        {
+            foreach (var id in projectChanges.GetAddedDocuments())
+                AddPath(after.GetDocument(id)?.FilePath);
+            foreach (var id in projectChanges.GetRemovedDocuments())
+                AddPath(before.GetDocument(id)?.FilePath);
+            foreach (var id in projectChanges.GetChangedDocuments())
+            {
+                var oldPath = before.GetDocument(id)?.FilePath;
+                var newPath = after.GetDocument(id)?.FilePath;
+                if (!PathResolver.PathsEqual(oldPath, newPath))
+                {
+                    AddPath(oldPath);
+                    AddPath(newPath);
+                }
+            }
+        }
+
+        return files;
+
+        void AddPath(string? path)
+        {
+            if (!string.IsNullOrEmpty(path))
+                files.Add((path, true));
+        }
+    }
+
+    /// <summary>The documents of <paramref name="solution"/> by their normalized file path.</summary>
+    private static Dictionary<string, List<Document>> IndexDocumentsByPath(Solution solution)
+    {
+        var index = new Dictionary<string, List<Document>>(PathResolver.PathComparer);
+        foreach (var document in solution.Projects.SelectMany(p => p.Documents))
+        {
+            if (string.IsNullOrEmpty(document.FilePath))
+                continue;
+
+            var path = PathResolver.NormalizePath(document.FilePath);
+            if (!index.TryGetValue(path, out var documents))
+                index[path] = documents = [];
+            documents.Add(document);
+        }
+
+        return index;
     }
 
     /// <summary>
@@ -446,12 +615,7 @@ public sealed class WorkspaceContext : IDisposable
                     PathResolver.PathComparer.Equals(PathResolver.NormalizePath(d.FilePath), normalized))
                 .ToList();
 
-            // A file that is not UTF-8 is read in the code page it was read in before (which
-            // may be the project's), not in whatever the system's is.
-            var readBefore = tracked.Count > 0
-                ? (await tracked[0].GetTextAsync(cancellationToken).ConfigureAwait(false)).Encoding
-                : null;
-            var text = SourceFileEncoding.Decode(bytes, fallbackEncoding: readBefore);
+            var text = await DecodeFromDiskAsync(tracked, bytes, cancellationToken).ConfigureAwait(false);
 
             // A file-based program whose #: directives changed has to be rebuilt; leave the
             // solution as it is for the caller to invalidate.
@@ -461,21 +625,11 @@ public sealed class WorkspaceContext : IDisposable
             if (tracked.Count == 0)
                 return DiskSyncOutcome.NotTracked;
 
-            var changed = false;
-            foreach (var doc in tracked)
-            {
-                var current = await doc.GetTextAsync(cancellationToken).ConfigureAwait(false);
-                if (current.ContentEquals(text) && !IsReencoded(current.Encoding, text.Encoding, bytes))
-                    continue;
-
-                sol = sol.WithDocumentText(doc.Id, text, PreservationMode.PreserveIdentity);
-                changed = true;
-            }
-
-            if (!changed)
+            var updated = await WithDiskTextAsync(sol, tracked, text, bytes, cancellationToken).ConfigureAwait(false);
+            if (ReferenceEquals(updated, sol))
                 return DiskSyncOutcome.Unchanged;
 
-            _s.Solution = sol;
+            _s.Solution = updated;
             return DiskSyncOutcome.Updated;
         }
         finally
@@ -516,90 +670,148 @@ public sealed class WorkspaceContext : IDisposable
         if (freshInfos is not { Count: > 0 })
             return false;
 
-        var normalizedProjectPath = PathResolver.NormalizePath(projectFilePath);
-
         await _s.Gate.EnterFileUpdateAsync(cancellationToken);
         try
         {
             if (_s.Disposed) return false;
             var sol = _s.Solution;
+            var updated = await WithEvaluatedDocumentsAsync(sol, projectFilePath, freshInfos, cancellationToken);
+            if (ReferenceEquals(updated, sol))
+                return false;
 
-            // Existing in-memory projects for this csproj. A multi-targeted project shares
-            // its file path across one entry per target framework, matched 1:1 below.
-            var candidates = sol.Projects
-                .Where(p => p.FilePath != null &&
-                    PathResolver.PathComparer.Equals(PathResolver.NormalizePath(p.FilePath), normalizedProjectPath))
-                .ToList();
-
-            var changed = false;
-            foreach (var fresh in freshInfos)
-            {
-                var existing = MatchExistingProject(candidates, fresh);
-                if (existing == null)
-                {
-                    // Ambiguous (e.g. a target framework was added/removed): bail without
-                    // mutating the snapshot so the caller falls back to a safe full reload.
-                    throw new InvalidOperationException(
-                        $"Re-evaluated project '{fresh.Name}' did not map to exactly one loaded project.");
-                }
-
-                var freshDocs = new Dictionary<string, DocumentInfo>(PathResolver.PathComparer);
-                foreach (var d in fresh.Documents)
-                    if (d.FilePath != null) freshDocs[PathResolver.NormalizePath(d.FilePath)] = d;
-
-                var existingDocs = new Dictionary<string, Document>(PathResolver.PathComparer);
-                foreach (var d in existing.Documents)
-                    if (d.FilePath != null) existingDocs[PathResolver.NormalizePath(d.FilePath)] = d;
-
-                // Remove documents that are no longer part of the evaluated project, once their
-                // file is gone from disk (checked now, under the lease). The evaluation ran
-                // before the lease was taken, so a file an operation created or moved in between
-                // — writing the file and the solution within its own lease — is missing from it
-                // although the project compiles it. Removing it dropped it from the solution, for
-                // good once its own watcher event had already found it tracked. Within a cache entry
-                // the project files don't change (an edit to one invalidates the entry), so
-                // membership only changes as files appear and disappear: a tracked file that
-                // still exists is still a member.
-                var toRemove = existingDocs
-                    .Where(kv => !freshDocs.ContainsKey(kv.Key) && !File.Exists(kv.Value.FilePath))
-                    .Select(kv => kv.Value.Id)
-                    .ToImmutableArray();
-                if (toRemove.Length > 0)
-                {
-                    sol = sol.RemoveDocuments(toRemove);
-                    changed = true;
-                }
-
-                // Add documents that newly match the project (preserving MSBuild-evaluated
-                // name, folders, and source-code kind).
-                foreach (var (path, info) in freshDocs)
-                {
-                    if (existingDocs.ContainsKey(path)) continue;
-                    var bytes = await TryReadFileAsync(info.FilePath!, cancellationToken);
-                    if (bytes == null) continue; // vanished again mid-reconcile; a later event settles it
-
-                    // Decoded as MSBuild's loader would: in the project's code page if it sets one.
-                    var text = SourceFileEncoding.Decode(
-                        bytes, projectEncoding: (info.TextLoader as FileTextLoader)?.DefaultEncoding);
-                    sol = sol.AddDocument(DocumentInfo.Create(
-                        DocumentId.CreateNewId(existing.Id),
-                        info.Name,
-                        folders: info.Folders,
-                        sourceCodeKind: info.SourceCodeKind,
-                        loader: TextLoader.From(TextAndVersion.Create(text, VersionStamp.Create(), info.FilePath)),
-                        filePath: info.FilePath));
-                    changed = true;
-                }
-            }
-
-            if (changed)
-                _s.Solution = sol;
-            return changed;
+            _s.Solution = updated;
+            return true;
         }
         finally
         {
             _s.Gate.ExitFileUpdate();
         }
+    }
+
+    /// <summary>
+    /// <paramref name="solution"/> with the documents of <paramref name="projectFilePath"/>
+    /// brought in line with <paramref name="freshInfos"/>, its re-evaluation (one per target
+    /// framework): documents the evaluation newly compiles are added, and documents it no longer
+    /// compiles are removed once their file is gone from disk. The same instance when nothing
+    /// changes. The caller holds what keeps the other writers out (the file-update lease, or the
+    /// writer section), so the disk checked here is the disk the result is applied to.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">
+    /// A re-evaluated project does not map to exactly one loaded project (e.g. a target framework
+    /// was added or removed); the caller falls back to a full reload.
+    /// </exception>
+    private static async Task<Solution> WithEvaluatedDocumentsAsync(
+        Solution solution,
+        string projectFilePath,
+        IReadOnlyList<ProjectInfo> freshInfos,
+        CancellationToken cancellationToken)
+    {
+        var normalizedProjectPath = PathResolver.NormalizePath(projectFilePath);
+        var sol = solution;
+
+        // Existing in-memory projects for this csproj. A multi-targeted project shares
+        // its file path across one entry per target framework, matched 1:1 below.
+        var candidates = sol.Projects
+            .Where(p => p.FilePath != null &&
+                PathResolver.PathComparer.Equals(PathResolver.NormalizePath(p.FilePath), normalizedProjectPath))
+            .ToList();
+
+        foreach (var fresh in freshInfos)
+        {
+            var existing = MatchExistingProject(candidates, fresh);
+            if (existing == null)
+            {
+                // Ambiguous (e.g. a target framework was added/removed): bail without
+                // mutating the snapshot so the caller falls back to a safe full reload.
+                throw new InvalidOperationException(
+                    $"Re-evaluated project '{fresh.Name}' did not map to exactly one loaded project.");
+            }
+
+            var freshDocs = new Dictionary<string, DocumentInfo>(PathResolver.PathComparer);
+            foreach (var d in fresh.Documents)
+                if (d.FilePath != null) freshDocs[PathResolver.NormalizePath(d.FilePath)] = d;
+
+            var existingDocs = new Dictionary<string, Document>(PathResolver.PathComparer);
+            foreach (var d in existing.Documents)
+                if (d.FilePath != null) existingDocs[PathResolver.NormalizePath(d.FilePath)] = d;
+
+            // Remove documents that are no longer part of the evaluated project, once their
+            // file is gone from disk (checked now, while the other writers are kept out). The
+            // evaluation may have run before that, so a file an operation created or moved in
+            // between — writing the file and the solution within its own lease — is missing from
+            // it although the project compiles it. Removing it dropped it from the solution, for
+            // good once its own watcher event had already found it tracked. Within a cache entry
+            // the project files don't change (an edit to one invalidates the entry), so
+            // membership only changes as files appear and disappear: a tracked file that
+            // still exists is still a member.
+            var toRemove = existingDocs
+                .Where(kv => !freshDocs.ContainsKey(kv.Key) && !File.Exists(kv.Value.FilePath))
+                .Select(kv => kv.Value.Id)
+                .ToImmutableArray();
+            if (toRemove.Length > 0)
+                sol = sol.RemoveDocuments(toRemove);
+
+            // Add documents that newly match the project (preserving MSBuild-evaluated
+            // name, folders, and source-code kind).
+            foreach (var (path, info) in freshDocs)
+            {
+                if (existingDocs.ContainsKey(path)) continue;
+                var bytes = await TryReadFileAsync(info.FilePath!, cancellationToken);
+                if (bytes == null) continue; // vanished again mid-reconcile; a later event settles it
+
+                // Decoded as MSBuild's loader would: in the project's code page if it sets one.
+                var text = SourceFileEncoding.Decode(
+                    bytes, projectEncoding: (info.TextLoader as FileTextLoader)?.DefaultEncoding);
+                sol = sol.AddDocument(DocumentInfo.Create(
+                    DocumentId.CreateNewId(existing.Id),
+                    info.Name,
+                    folders: info.Folders,
+                    sourceCodeKind: info.SourceCodeKind,
+                    loader: TextLoader.From(TextAndVersion.Create(text, VersionStamp.Create(), info.FilePath)),
+                    filePath: info.FilePath));
+            }
+        }
+
+        return sol;
+    }
+
+    /// <summary>
+    /// The text of a file read as <paramref name="bytes"/>, decoded as the compiler would (see
+    /// <see cref="SourceFileEncoding.Decode"/>). A file that is not UTF-8 is read in the code page
+    /// the documents at its path were read in before (which may be the project's), not in
+    /// whatever the system's is.
+    /// </summary>
+    private static async Task<SourceText> DecodeFromDiskAsync(
+        IReadOnlyList<Document> tracked, byte[] bytes, CancellationToken cancellationToken)
+    {
+        var readBefore = tracked.Count > 0
+            ? (await tracked[0].GetTextAsync(cancellationToken).ConfigureAwait(false)).Encoding
+            : null;
+        return SourceFileEncoding.Decode(bytes, fallbackEncoding: readBefore);
+    }
+
+    /// <summary>
+    /// <paramref name="solution"/> with <paramref name="text"/>, the file's text on disk, as the
+    /// text of every document in <paramref name="tracked"/> that differs from it (or that only
+    /// changed its encoding); the same instance when none does, so compilations stay cached.
+    /// </summary>
+    private static async Task<Solution> WithDiskTextAsync(
+        Solution solution,
+        IReadOnlyList<Document> tracked,
+        SourceText text,
+        byte[] bytes,
+        CancellationToken cancellationToken)
+    {
+        foreach (var doc in tracked)
+        {
+            var current = await doc.GetTextAsync(cancellationToken).ConfigureAwait(false);
+            if (current.ContentEquals(text) && !IsReencoded(current.Encoding, text.Encoding, bytes))
+                continue;
+
+            solution = solution.WithDocumentText(doc.Id, text, PreservationMode.PreserveIdentity);
+        }
+
+        return solution;
     }
 
     /// <summary>
@@ -680,14 +892,18 @@ public sealed class WorkspaceContext : IDisposable
     /// created file is considered). The caller re-evaluates these and lets MSBuild decide
     /// actual membership.
     /// </summary>
-    internal IReadOnlyCollection<string> FindProjectFilesForPath(string filePath)
+    internal IReadOnlyCollection<string> FindProjectFilesForPath(string filePath) =>
+        FindProjectFilesForPath(_s.Solution, filePath);
+
+    /// <inheritdoc cref="FindProjectFilesForPath(string)"/>
+    private static IReadOnlyCollection<string> FindProjectFilesForPath(Solution solution, string filePath)
     {
         var normalized = PathResolver.NormalizePath(filePath);
         var result = new HashSet<string>(PathResolver.PathComparer);
         string? deepestProjectFile = null;
         var deepestDirLen = -1;
 
-        foreach (var project in _s.Solution.Projects)
+        foreach (var project in solution.Projects)
         {
             if (project.FilePath == null) continue;
             var projFile = PathResolver.NormalizePath(project.FilePath);
@@ -1008,6 +1224,10 @@ public sealed class WorkspaceContext : IDisposable
             var fileOperations = new List<(string FilePath, Func<Task> Operation, string Category)>();
             var written = new List<(DocumentId Id, Encoding Encoding)>();
 
+            // What the other contexts sharing the writers take over (RunWriterAsync); a file
+            // created, deleted or moved may change what a project compiles.
+            var files = new List<(string Path, bool Structural)>();
+
             Encoding? sourceEncoding = null;
             var sourceEncodingRead = false;
 
@@ -1035,6 +1255,7 @@ public sealed class WorkspaceContext : IDisposable
                         warnings);
                     fileOperations.Add((filePath, () => _s.FileWriter.WriteAsync(filePath, content, encoding, cancellationToken), "created"));
                     written.Add((docId, encoding));
+                    files.Add((filePath, true));
                     filesCreated.Add(filePath);
                 }
 
@@ -1054,7 +1275,8 @@ public sealed class WorkspaceContext : IDisposable
                     var decodedWith = (oldDoc == null ? null : (await oldDoc.GetTextAsync(cancellationToken)).Encoding)
                         ?? text.Encoding;
                     var oldPath = oldDoc?.FilePath;
-                    var encodingFrom = oldPath != null && !PathResolver.PathsEqual(oldPath, filePath) ? oldPath : filePath;
+                    var moved = oldPath != null && !PathResolver.PathsEqual(oldPath, filePath);
+                    var encodingFrom = moved ? oldPath! : filePath;
 
                     var encoding = Representable(
                         filePath,
@@ -1063,6 +1285,10 @@ public sealed class WorkspaceContext : IDisposable
                         warnings);
                     fileOperations.Add((filePath, () => _s.FileWriter.WriteAsync(filePath, content, encoding, cancellationToken), "modified"));
                     written.Add((docId, encoding));
+                    files.Add((filePath, moved));
+                    if (moved)
+                        files.Add((oldPath!, true)); // the operation deletes the old file afterwards
+
                     filesModified.Add(filePath);
                 }
 
@@ -1078,6 +1304,7 @@ public sealed class WorkspaceContext : IDisposable
                         _s.FileWriter.Delete(filePath);
                         return Task.CompletedTask;
                     }, "deleted"));
+                    files.Add((filePath, true));
                     filesDeleted.Add(filePath);
                 }
             }
@@ -1086,7 +1313,9 @@ public sealed class WorkspaceContext : IDisposable
             // and prevent potential deadlocks with external file locks
             fileOperations.Sort((a, b) => string.Compare(a.FilePath, b.FilePath, StringComparison.OrdinalIgnoreCase));
 
-            // Execute file operations sequentially to prevent race conditions
+            // Execute file operations sequentially to prevent race conditions. Recorded first, so
+            // a commit that fails halfway is taken over as far as it got.
+            _s.Writers.RecordWrites(files);
             writing = true;
             foreach (var (_, operation, _) in fileOperations)
             {

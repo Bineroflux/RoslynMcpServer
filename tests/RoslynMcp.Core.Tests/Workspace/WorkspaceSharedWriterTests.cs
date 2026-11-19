@@ -189,6 +189,37 @@ public sealed class WorkspaceSharedWriterTests
         Assert.Equal(first.ReadFile("Widget.cs"), back);
     }
 
+    [Fact]
+    public async Task ARazorFileOneContextRewrote_IsTakenOverByTheOther()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        const string imports = "@using App.Old\n";
+        using var first = TestWorkspace.Create(
+            [("Model.cs", "namespace App.Old;\n\npublic class Model { }\n")],
+            [],
+            additionalFiles: [("_Imports.razor", imports)]);
+        var path = first.PathOf("_Imports.razor");
+        var secondWorkspace = new AdhocWorkspace();
+        var project = secondWorkspace.CurrentSolution.AddProject("Second", "Second", LanguageNames.CSharp);
+        using var second = new WorkspaceContext(
+            secondWorkspace,
+            project.AddAdditionalDocument("_Imports.razor", SourceText.From(imports), filePath: path).Project.Solution,
+            first.Directory);
+
+        var writers = new WorkspaceWriteCoordinator();
+        first.Context.ShareWriters(writers, writers.Sequence);
+        second.ShareWriters(writers, writers.Sequence);
+
+        var renamed = await new RenameNamespaceOperation(first.Context).ExecuteAsync(
+            new RenameNamespaceParams { OldNamespace = "App.Old", NewNamespace = "App.New" }, ct);
+        Assert.True(renamed.Success, renamed.Error?.Message);
+        Assert.Equal("@using App.New\n", first.ReadFile("_Imports.razor"));
+
+        var seen = await second.RunWriterAsync(
+            async c => (await second.Solution.Projects.Single().AdditionalDocuments.Single().GetTextAsync(c)).ToString(), ct);
+        Assert.Equal("@using App.New\n", seen);
+    }
+
     private static async Task<string> TextAsync(WorkspaceContext context, string path, CancellationToken ct) =>
         (await context.GetDocumentByPath(path)!.GetTextAsync(ct)).ToString();
 

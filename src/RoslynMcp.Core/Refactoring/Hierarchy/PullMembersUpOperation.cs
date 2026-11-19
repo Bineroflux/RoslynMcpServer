@@ -166,10 +166,17 @@ public sealed class PullMembersUpOperation : RefactoringOperationBase<PullMember
                 }
             }
 
-            newMembers.Add(forTarget
+            var inserted = forTarget
                 .WithLeadingTrivia(MovedMembers.Comments(declaration.Declaration).Insert(0, SyntaxFactory.ElasticCarriageReturnLineFeed))
                 .WithTrailingTrivia(SyntaxFactory.ElasticCarriageReturnLineFeed)
-                .WithAdditionalAnnotations(Formatter.Annotation, new SyntaxAnnotation(InsertedAnnotationKind, declaration.Symbols[0].Name)));
+                .WithAdditionalAnnotations(Formatter.Annotation, new SyntaxAnnotation(InsertedAnnotationKind, declaration.Symbols[0].Name));
+
+            // A member moved whole keeps the layout it is written with (only re-indented); a
+            // signature made for an interface or an abstract member is laid out like generated code.
+            newMembers.Add(signatureOnly
+                ? inserted
+                : GeneratedCodeFormatter.KeepMemberLayout(
+                    inserted, forTarget.WithLeadingTrivia(MovedMembers.CommentLines(declaration.Declaration)), declaration.Declaration));
         }
 
         if (dependencies.Count > 0)

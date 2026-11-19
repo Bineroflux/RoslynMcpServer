@@ -28,7 +28,7 @@ public sealed class ConvertPropertyTool : IToolHandler
     public string Name => "convert_property";
 
     /// <inheritdoc />
-    public string Description => "Convert a C# property between auto-property and full property with backing field.";
+    public string Description => "Convert a C# property between auto-property and full property with backing field. To an auto-property only when the accessors just read and write a field of the type: the field is removed and its other uses go through the property.";
 
     /// <inheritdoc />
     public object InputSchema => new

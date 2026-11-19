@@ -74,25 +74,9 @@ public sealed class ConvertPropertyLayoutTests
 
         var result = await ConvertAsync(ws, "Age", "ToAutoProperty");
 
+        // The round trip: the backing field goes with the accessors.
         Assert.True(result.Success, result.Error?.Message);
-        Assert.Equal(
-            FullProperty.ReplaceLineEndings("\n")
-                .Replace("""
-                            public int Age
-                            {
-                                get
-                                {
-                                    return _age;
-                                }
-
-                                set
-                                {
-                                    _age = value;
-                                }
-                            }
-                    """.ReplaceLineEndings("\n"), "        public int Age { get; set; }", StringComparison.Ordinal)
-                .ReplaceLineEndings(lineEnding),
-            ws.ReadFile("Person.cs"));
+        Assert.Equal(Source.ReplaceLineEndings(lineEnding), ws.ReadFile("Person.cs"));
     }
 
     [Fact]

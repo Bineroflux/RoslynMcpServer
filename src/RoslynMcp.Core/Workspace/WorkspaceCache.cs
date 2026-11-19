@@ -132,7 +132,10 @@ public sealed class WorkspaceCache : IDisposable
 
             // Writes other contexts commit from here on may be missing from what the load reads;
             // the new context takes them over from disk when its first writer section starts.
+            // Files anyone changes from here on may be missing too, and the watchers start only
+            // after the load: the files written since are synced once they run.
             var writesBeforeLoad = _writers.Sequence;
+            var loadStartUtc = DateTime.UtcNow;
             var fresh = await loader(cancellationToken);
             var entry = new CachedEntry(this, key, fresh);
             fresh.MarkCacheOwned();
@@ -143,11 +146,38 @@ public sealed class WorkspaceCache : IDisposable
             if (!entry.TryAcquire())
                 throw new InvalidOperationException("Failed to acquire freshly constructed cache entry.");
 
-            _entries[key] = entry;
+            // Watch first, then sync what changed since the load started: a change after the
+            // watchers start raises an event, one before is found by the sync. Both happen before
+            // the entry is published, so no caller sees the workspace without them.
             entry.StartWatching();
+            bool rebuild;
+            try
+            {
+                // Not cancelled with the caller: the load is paid for, and the next caller gets
+                // the entry even if this one gives up (as when it cancels just below).
+                rebuild = await entry.SyncChangedDuringLoadAsync(loadStartUtc);
+            }
+            catch
+            {
+                entry.BeginTeardown();
+                entry.OnLeaseReleased();
+                throw;
+            }
 
-            // The freshly loaded workspace has no outstanding leases, so the
-            // operation gate is idle — this await completes synchronously.
+            _entries[key] = entry;
+            if (rebuild)
+            {
+                // The caller still gets this workspace; the next one loads afresh.
+                InvalidateEntry(key, entry);
+            }
+            else if (entry.IsInvalidated)
+            {
+                // A watcher invalidated the entry before it was published, finding nothing to
+                // remove: remove it now, or it would stay published until the next load.
+                _entries.TryRemove(new KeyValuePair<string, CachedEntry>(key, entry));
+            }
+
+            // Waits only for a file update a watcher queued meanwhile.
             var loadedHandle = await EnterOperationOrRelease(entry, cancellationToken);
 
             stopwatch.Stop();
@@ -465,12 +495,59 @@ public sealed class WorkspaceCache : IDisposable
 
             Interlocked.Exchange(ref _watchers, started.ToArray());
 
-            // The entry is published before its watchers start, so it may have been torn down
-            // meanwhile, finding nothing to dispose; then dispose them here. (A teardown that
-            // tombstones the entry after this check still disposes them: the final Teardown
-            // runs once the lease our caller holds is released.)
+            // The watchers started first may already have invalidated the entry (a project file
+            // changed) before the array was stored, finding nothing to dispose; then dispose them
+            // here. (A teardown that tombstones the entry after this check still disposes them:
+            // the final Teardown runs once the lease our caller holds is released.)
             if (IsTombstoned(Volatile.Read(ref _state)))
                 DisposeWatchers();
+        }
+
+        /// <summary>Whether the entry has been invalidated or evicted.</summary>
+        public bool IsInvalidated => IsTombstoned(Volatile.Read(ref _state));
+
+        /// <summary>
+        /// Syncs the files changed since <paramref name="loadStartUtc"/>, once the watchers run
+        /// (see <see cref="WorkspaceContext.SyncFilesChangedSinceAsync"/>), and re-evaluates the
+        /// projects of tracked files that are gone, as the watcher does for a deletion. Runs
+        /// before the entry is published, so no operation holds a lease yet.
+        /// </summary>
+        /// <returns>
+        /// True when the workspace must be loaded afresh: a file-based program's directives
+        /// changed, or a project could not be re-evaluated.
+        /// </returns>
+        public async Task<bool> SyncChangedDuringLoadAsync(DateTime loadStartUtc)
+        {
+            var changed = await Context.SyncFilesChangedSinceAsync(loadStartUtc).ConfigureAwait(false);
+            if (changed.Updated > 0)
+                _cache.LogCallback?.Invoke(
+                    $"{changed.Updated} file(s) of '{_key}' changed while it loaded; took over their text.");
+
+            if (changed.ReloadRequired)
+            {
+                _cache.LogCallback?.Invoke(
+                    $"File-based program directives of '{_key}' changed while it loaded; the next call rebuilds it.");
+                return true;
+            }
+
+            var projectFiles = changed.Missing
+                .SelectMany(Context.FindProjectFilesForPath)
+                .Distinct(PathResolver.PathComparer);
+            foreach (var projectFile in projectFiles)
+            {
+                try
+                {
+                    await Context.ReconcileProjectDocumentsAsync(projectFile).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is not ObjectDisposedException)
+                {
+                    _cache.LogErrorCallback?.Invoke(
+                        $"Re-evaluating '{projectFile}' for files deleted while '{_key}' loaded failed; the next call reloads it.", ex);
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         private void DisposeWatchers()

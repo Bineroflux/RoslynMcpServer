@@ -639,6 +639,87 @@ public sealed class WorkspaceContext : IDisposable
     }
 
     /// <summary>
+    /// How much earlier than the start of a load a file's last-write time may lie and still count
+    /// as "changed during the load" for <see cref="SyncFilesChangedSinceAsync"/>: file systems
+    /// that store times coarsely (FAT: 2 s) or a clock that differs from the file server's. A
+    /// file changed shortly before the load is read once more and found unchanged.
+    /// </summary>
+    private static readonly TimeSpan LoadClockTolerance = TimeSpan.FromSeconds(2);
+
+    /// <summary>
+    /// Brings the documents whose file was written at or after <paramref name="sinceUtc"/>, the
+    /// start of this workspace's load, in line with the disk; called once the file watchers run.
+    /// A file changed after MSBuild (or the compilation) read it, but before the watchers
+    /// started, raises no event, so without this the workspace kept the older text until the
+    /// file changed again, and the next refactoring wrote it back. Takes the file-update lease;
+    /// each recent file is read and applied as <see cref="SyncDocumentFromDiskAsync"/> does,
+    /// files not written since the load are only stat'ed.
+    /// </summary>
+    /// <returns>
+    /// The tracked files that are gone (whose projects need a re-evaluation, as for a deletion the
+    /// watcher reports), and whether a file-based program's <c>#:</c> directives changed (the
+    /// workspace must be rebuilt; that file's text is left as it was).
+    /// </returns>
+    /// <remarks>
+    /// The last-write time decides, so an edit that sets an older time (a copy that keeps the
+    /// source's time) is not seen, nor is a file created during the load that MSBuild's
+    /// evaluation missed.
+    /// </remarks>
+    internal async Task<ChangedDuringLoad> SyncFilesChangedSinceAsync(
+        DateTime sinceUtc,
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        ThrowIfInWriterSection();
+
+        await _s.Gate.EnterFileUpdateAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            ThrowIfDisposed();
+
+            var threshold = sinceUtc - LoadClockTolerance;
+            var sol = _s.Solution;
+            var missing = new List<string>();
+            var updated = 0;
+            var reloadRequired = false;
+            foreach (var (path, tracked) in IndexDocumentsByPath(sol))
+            {
+                var file = new FileInfo(path);
+                if (file.Exists && file.LastWriteTimeUtc < threshold)
+                    continue;
+
+                var bytes = file.Exists ? await TryReadFileAsync(path, cancellationToken).ConfigureAwait(false) : null;
+                if (bytes == null)
+                {
+                    missing.Add(path);
+                    continue;
+                }
+
+                var text = await DecodeFromDiskAsync(tracked, bytes, cancellationToken).ConfigureAwait(false);
+                if (ShouldReloadOnSourceChange(path, text))
+                {
+                    reloadRequired = true;
+                    continue;
+                }
+
+                var next = await WithDiskTextAsync(sol, tracked, text, bytes, cancellationToken).ConfigureAwait(false);
+                if (!ReferenceEquals(next, sol))
+                {
+                    sol = next;
+                    updated++;
+                }
+            }
+
+            _s.Solution = sol;
+            return new ChangedDuringLoad(updated, missing, reloadRequired);
+        }
+        finally
+        {
+            _s.Gate.ExitFileUpdate();
+        }
+    }
+
+    /// <summary>
     /// Re-evaluates a single project with MSBuild and reconciles its source-document set
     /// into the in-memory solution as an incremental delta — adding files that newly
     /// match the project's globs and removing files that no longer do — without a full
@@ -1473,6 +1554,14 @@ public sealed class WorkspaceContext : IDisposable
         ObjectDisposedException.ThrowIf(_s.Disposed, this);
     }
 }
+
+/// <summary>
+/// Outcome of <see cref="WorkspaceContext.SyncFilesChangedSinceAsync"/>.
+/// </summary>
+/// <param name="Updated">How many files' text changed in the solution.</param>
+/// <param name="Missing">Tracked files (normalized paths) that are gone from disk; the solution still has them.</param>
+/// <param name="ReloadRequired">A file-based program's <c>#:</c> directives changed, so the workspace must be rebuilt.</param>
+internal sealed record ChangedDuringLoad(int Updated, IReadOnlyList<string> Missing, bool ReloadRequired);
 
 /// <summary>
 /// Outcome of <see cref="WorkspaceContext.SyncDocumentFromDiskAsync"/>.

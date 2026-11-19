@@ -234,6 +234,9 @@ internal static class GeneratedCodeFormatter
         if (from == to)
             return node;
 
+        if (from.Length == 0)
+            return IndentFromColumnZero(node, to, startsLine);
+
         var lineStarts = new HashSet<SyntaxTrivia>();
         var atLineStart = startsLine;
         void Visit(SyntaxTrivia trivia)
@@ -268,6 +271,60 @@ internal static class GeneratedCodeFormatter
         });
     }
 
+    /// <summary>
+    /// <see cref="Reindent"/> of code written at column 0, whose lines have no whitespace to
+    /// change: each line that starts with a token or a comment gets <paramref name="to"/> in front
+    /// (a documentation comment's later lines in front of their <c>///</c>). Blank lines,
+    /// directives and disabled text stay at column 0, and the text of tokens and comments, so
+    /// lines inside strings, is not touched.
+    /// </summary>
+    private static TNode IndentFromColumnZero<TNode>(TNode node, string to, bool startsLine)
+        where TNode : SyntaxNode
+    {
+        var atLineStart = startsLine;
+        var replacements = new Dictionary<SyntaxToken, SyntaxToken>();
+        foreach (var token in node.DescendantTokens())
+        {
+            var leading = Indent(token.LeadingTrivia);
+            if (atLineStart)
+                leading.Add(SyntaxFactory.Whitespace(to));
+            atLineStart = false;
+            var trailing = Indent(token.TrailingTrivia);
+            replacements[token] = token.WithLeadingTrivia(leading).WithTrailingTrivia(trailing);
+        }
+
+        return node.ReplaceTokens(replacements.Keys, (original, _) => replacements[original]);
+
+        List<SyntaxTrivia> Indent(SyntaxTriviaList list)
+        {
+            var result = new List<SyntaxTrivia>();
+            foreach (var trivia in list)
+            {
+                if (atLineStart && trivia.IsKind(SyntaxKind.WhitespaceTrivia))
+                    result.Add(SyntaxFactory.Whitespace(to + trivia.ToString()));
+                else if (atLineStart && !trivia.IsKind(SyntaxKind.EndOfLineTrivia) && !trivia.IsDirective && !trivia.IsKind(SyntaxKind.DisabledTextTrivia))
+                    result.AddRange([SyntaxFactory.Whitespace(to), IndentDocumentation(trivia)]);
+                else
+                    result.Add(IndentDocumentation(trivia));
+
+                atLineStart = trivia.IsKind(SyntaxKind.EndOfLineTrivia) || trivia.IsDirective || trivia.ToFullString().EndsWith('\n');
+            }
+
+            return result;
+        }
+
+        // The lines of a documentation comment after its first start with its exterior (///).
+        SyntaxTrivia IndentDocumentation(SyntaxTrivia trivia)
+        {
+            if (trivia.GetStructure() is not DocumentationCommentTriviaSyntax comment)
+                return trivia;
+
+            var later = comment.DescendantTrivia(descendIntoTrivia: true)
+                .Where(t => t.IsKind(SyntaxKind.DocumentationCommentExteriorTrivia) && t.SpanStart > comment.FullSpan.Start);
+            return SyntaxFactory.Trivia(comment.ReplaceTrivia(later, (original, _) => SyntaxFactory.DocumentationCommentExterior(to + original.ToString())));
+        }
+    }
+
     /// <summary>The blank lines at the start of leading trivia: everything up to the line its first comment or token is on.</summary>
     private static SyntaxTriviaList BlankLines(SyntaxTriviaList trivia)
     {
@@ -297,6 +354,20 @@ internal static class GeneratedCodeFormatter
         if (kept.Count == 0 || !kept[0].IsKind(SyntaxKind.WhitespaceTrivia))
             kept.Insert(0, SyntaxFactory.Whitespace(indentation));
         return SyntaxFactory.TriviaList(kept);
+    }
+
+    /// <summary>
+    /// A new file laid out by <c>NormalizeWhitespace</c>, with what it leaves out: a blank line
+    /// after the usings and after a file-scoped namespace line, and a line break at the end.
+    /// </summary>
+    internal static CompilationUnitSyntax LayOutNewFile(CompilationUnitSyntax unit, string lineEnding)
+    {
+        var lineBreak = SyntaxFactory.EndOfLine(lineEnding);
+        var blankLineAfter = unit.Usings.Select(u => u.GetLastToken()).TakeLast(1)
+            .Concat(unit.Members.OfType<FileScopedNamespaceDeclarationSyntax>().Select(n => n.SemicolonToken))
+            .ToList();
+        unit = unit.ReplaceTokens(blankLineAfter, (_, token) => token.WithTrailingTrivia(lineBreak, lineBreak));
+        return unit.ReplaceToken(unit.GetLastToken(), unit.GetLastToken().WithTrailingTrivia(lineBreak));
     }
 
     /// <summary>The indentation of the line a node starts on.</summary>

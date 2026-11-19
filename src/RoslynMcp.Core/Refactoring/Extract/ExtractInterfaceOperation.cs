@@ -271,10 +271,12 @@ public sealed class ExtractInterfaceOperation : RefactoringOperationBase<Extract
             filePath: targetFile);
         var lineEnding = await LineEndings.GetAsync(newDoc, cancellationToken);
 
-        var compilationUnit = SyntaxFactory.CompilationUnit()
-            .WithUsings(SyntaxFactory.List(usings))
-            .WithMembers(SyntaxFactory.SingletonList(wrappedInterface))
-            .NormalizeWhitespace(eol: lineEnding);
+        var compilationUnit = GeneratedCodeFormatter.LayOutNewFile(
+            SyntaxFactory.CompilationUnit()
+                .WithUsings(SyntaxFactory.List(usings))
+                .WithMembers(SyntaxFactory.SingletonList(wrappedInterface))
+                .NormalizeWhitespace(eol: lineEnding),
+            lineEnding);
 
         // Shorten the interface's type names to what the copied usings allow; then the whole
         // file has the one line ending, also in what came from the source (comments of usings).

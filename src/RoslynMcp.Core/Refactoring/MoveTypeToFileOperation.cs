@@ -211,7 +211,8 @@ public sealed class MoveTypeToFileOperation : RefactoringOperationBase<MoveTypeT
                 qualified,
                 cancellationToken);
             var moved = qualified.Count == 0 ? typeNode : typeNode.ReplaceNodes(qualified.Keys, (original, _) => qualified[original]);
-            var newTargetRoot = AddTypeToExistingFile(targetRoot, LineEndings.Convert(moved, lineEnding, out keptLiterals), namespaceName);
+            var newTargetRoot = AddTypeToExistingFile(
+                targetRoot, LineEndings.Convert(moved, lineEnding, out keptLiterals), GeneratedCodeFormatter.IndentationOf(typeNode), namespaceName, lineEnding);
             solution = solution.WithDocumentSyntaxRoot(targetDoc.Id, UsingDirectives.Add(newTargetRoot, needed, lineEnding));
             if (qualified.Count > 0)
                 solution = (await Simplifier.ReduceAsync(solution.GetDocument(targetDoc.Id)!, Simplifier.Annotation, cancellationToken: cancellationToken)).Project.Solution;
@@ -228,6 +229,7 @@ public sealed class MoveTypeToFileOperation : RefactoringOperationBase<MoveTypeT
                 ?? await LineEndings.GetAsync(sourceDoc, cancellationToken);
             var targetContent = CreateTargetFileContent(
                 LineEndings.Convert(typeNode, lineEnding, out keptLiterals),
+                GeneratedCodeFormatter.IndentationOf(typeNode),
                 namespaceName,
                 NewFileUsings.FromSource(sourceRoot).Select(u => LineEndings.Convert(u, lineEnding, out _)).ToList(),
                 lineEnding);
@@ -269,8 +271,9 @@ public sealed class MoveTypeToFileOperation : RefactoringOperationBase<MoveTypeT
         });
     }
 
-    private string CreateTargetFileContent(
+    private static string CreateTargetFileContent(
         TypeDeclarationSyntax typeNode,
+        string writtenAt,
         string namespaceName,
         List<UsingDirectiveSyntax> usings,
         string lineEnding)
@@ -281,10 +284,9 @@ public sealed class MoveTypeToFileOperation : RefactoringOperationBase<MoveTypeT
         // Use file-scoped namespace (modern C# style)
         var namespaceDecl = $"namespace {namespaceName};";
 
-        // Get the type declaration with original formatting, without the blank lines and
-        // indentation before it (the namespace line is followed by one blank line)
-        var typeDecl = typeNode.WithLeadingTrivia(typeNode.GetLeadingTrivia()
-            .SkipWhile(t => t.IsKind(SyntaxKind.WhitespaceTrivia) || t.IsKind(SyntaxKind.EndOfLineTrivia))).ToFullString();
+        // The type declaration as written, at the namespace's top level (the namespace line is
+        // followed by one blank line)
+        var typeDecl = Placed(typeNode, writtenAt, indentation: "").ToFullString();
 
         var blankLine = lineEnding + lineEnding;
         var content = string.IsNullOrEmpty(usingStatements)
@@ -302,15 +304,45 @@ public sealed class MoveTypeToFileOperation : RefactoringOperationBase<MoveTypeT
         root.DescendantNodes().OfType<BaseNamespaceDeclarationSyntax>().FirstOrDefault(n => n.Name.ToString() == namespaceName) ??
         root.DescendantNodes().OfType<FileScopedNamespaceDeclarationSyntax>().FirstOrDefault();
 
+    /// <summary>
+    /// <paramref name="root"/> with the type added after the members of its
+    /// <see cref="TargetContainer"/>: indented like those members (in an empty namespace block,
+    /// one level deeper than the block), after a blank line.
+    /// </summary>
     private static CompilationUnitSyntax AddTypeToExistingFile(
         CompilationUnitSyntax root,
         TypeDeclarationSyntax typeNode,
-        string namespaceName)
+        string writtenAt,
+        string namespaceName,
+        string lineEnding)
     {
-        // The matching namespace, else the first file-scoped one, else the file itself.
-        return TargetContainer(root, namespaceName) is { } container
-            ? root.ReplaceNode(container, container.AddMembers(typeNode))
-            : root.AddMembers(typeNode);
+        var container = TargetContainer(root, namespaceName);
+        var members = container?.Members ?? root.Members;
+        var indentation = members.FirstOrDefault() is { } first
+            ? GeneratedCodeFormatter.IndentationOf(first)
+            : container is NamespaceDeclarationSyntax block ? GeneratedCodeFormatter.IndentationOf(block) + "    " : "";
+        var placed = Placed(typeNode, writtenAt, indentation);
+        if (members.Count > 0)
+            placed = placed.WithLeadingTrivia(placed.GetLeadingTrivia().Insert(0, SyntaxFactory.EndOfLine(lineEnding)));
+
+        return container != null
+            ? root.ReplaceNode(container, container.AddMembers(placed))
+            : root.AddMembers(placed);
+    }
+
+    /// <summary>
+    /// The type for a place whose members start at <paramref name="indentation"/>: without the
+    /// blank lines before it, and its lines re-indented from <paramref name="writtenAt"/>, the
+    /// indentation it was written at (the text of its tokens, string literals included, stays).
+    /// </summary>
+    private static TypeDeclarationSyntax Placed(TypeDeclarationSyntax type, string writtenAt, string indentation)
+    {
+        var trimmed = type.WithLeadingTrivia(type.GetLeadingTrivia()
+            .SkipWhile(t => t.IsKind(SyntaxKind.WhitespaceTrivia) || t.IsKind(SyntaxKind.EndOfLineTrivia)));
+        var reindented = GeneratedCodeFormatter.Reindent(trimmed, writtenAt, indentation, startsLine: false);
+        return indentation.Length == 0
+            ? reindented
+            : reindented.WithLeadingTrivia(reindented.GetLeadingTrivia().Insert(0, SyntaxFactory.Whitespace(indentation)));
     }
 
     private Contracts.Models.SymbolInfo CreateSymbolInfo(SymbolResolutionResult resolution, string targetFile)

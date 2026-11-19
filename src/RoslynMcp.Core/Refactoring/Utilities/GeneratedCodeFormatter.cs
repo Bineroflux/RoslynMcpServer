@@ -56,19 +56,21 @@ internal static class GeneratedCodeFormatter
     /// <param name="node">The member as it goes into the new tree (it may be laid out anew there).</param>
     /// <param name="written">The member as it is to be written: the original with its changes, its leading trivia from its first comment on.</param>
     /// <param name="original">The member in its original tree, which tells the indentation it was written at.</param>
-    public static TNode KeepLayout<TNode>(TNode node, SyntaxNode written, MemberDeclarationSyntax original)
+    public static TNode KeepMemberLayout<TNode>(TNode node, SyntaxNode written, MemberDeclarationSyntax original)
         where TNode : SyntaxNode =>
         KeepLayout(node, new KeptLayout(written, IndentationOf(original), First: true, Last: true, Inline: false));
 
     /// <summary>
-    /// Marks an expression an operation moves into generated code: after formatting, it is put
-    /// back as written; its first line stays where the formatter put it, its other lines move
-    /// with it.
+    /// Marks code an operation moves into generated code inside a line (an expression), or
+    /// rewrites as it copies it (a statement of an inlined body): after formatting, it is put
+    /// back as <paramref name="written"/>; its first line and its outer trivia stay as the
+    /// formatter made them, its other lines move with its first. What the written code marks
+    /// for simplification is simplified again afterwards.
     /// </summary>
-    /// <param name="node">The expression as it goes into the new tree.</param>
-    /// <param name="written">The expression with the layout to keep (its content may differ from the original's, e.g. a rewritten declaration).</param>
-    /// <param name="original">The expression in its original tree, which tells the indentation it was written at.</param>
-    public static TNode KeepLayout<TNode>(TNode node, ExpressionSyntax written, ExpressionSyntax original)
+    /// <param name="node">The code as it goes into the new tree.</param>
+    /// <param name="written">The code with the layout to keep (its content may differ from the original's, e.g. a rewritten declaration).</param>
+    /// <param name="original">The code in its original tree, which tells the indentation it was written at.</param>
+    public static TNode KeepLayout<TNode>(TNode node, SyntaxNode written, SyntaxNode original)
         where TNode : SyntaxNode =>
         KeepLayout(node, new KeptLayout(written, IndentationOf(original), First: false, Last: false, Inline: true));
 
@@ -128,7 +130,12 @@ internal static class GeneratedCodeFormatter
         var lineEnding = await LineEndings.GetAsync(originalDocument, cancellationToken);
         document = await Simplifier.ReduceAsync(document, Simplifier.Annotation, cancellationToken: cancellationToken);
         document = await Formatter.FormatAsync(document, Formatter.Annotation, cancellationToken: cancellationToken);
-        document = await RestoreKeptLayoutAsync(document, cancellationToken);
+        var restored = await RestoreKeptLayoutAsync(document, cancellationToken);
+        if (restored != document)
+        {
+            // The code put back is the code before simplification.
+            document = await Simplifier.ReduceAsync(restored, Simplifier.Annotation, cancellationToken: cancellationToken);
+        }
 
         // Generated nodes carry NormalizeWhitespace's CRLFs and the formatter writes its own
         // NewLine; give every line break it may have touched (inside the marked nodes and

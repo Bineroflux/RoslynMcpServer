@@ -160,7 +160,7 @@ public sealed class ExtractBaseClassOperation : RefactoringOperationBase<Extract
                 var moved = member.WithModifiers(
                     MovedMembers.MovedModifiers(member.Modifiers, selected[i].Symbols[0], @params.BaseClassName, sameAssembly: true).Modifiers);
                 var written = moved.WithLeadingTrivia(MovedMembers.CommentLines(selected[i].Declaration));
-                return GeneratedCodeFormatter.KeepLayout(moved, written, selected[i].Declaration);
+                return GeneratedCodeFormatter.KeepMemberLayout(moved, written, selected[i].Declaration);
             })
             .ToList();
 

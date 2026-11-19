@@ -104,7 +104,7 @@ internal sealed class CallPlan
     {
         var body = ((ExpressionSyntax)BuildBody(invocation, out _)!).WithoutTrivia().WithAdditionalAnnotations(SiteAnnotation);
         if (body.GetText().Lines.Count > 1)
-            body = GeneratedCodeFormatter.Mark(body);
+            body = GeneratedCodeFormatter.Mark(KeepBodyLayout(body, Body.Root));
 
         if (Body.Method.ReturnsVoid)
             return body.WithTriviaFrom(invocation);
@@ -122,18 +122,21 @@ internal sealed class CallPlan
         var statements = new List<StatementSyntax>(Temps);
         if (body is BlockSyntax block)
         {
-            statements.AddRange(block.Statements.Select(s => Mark(s.WithAdditionalAnnotations(SiteAnnotation))));
+            var originals = ((BlockSyntax)Body.Root).Statements;
+            statements.AddRange(block.Statements.Select((s, i) => Mark(
+                (block.Statements.Count == originals.Count ? KeepBodyLayout(s, originals[i]) : s).WithAdditionalAnnotations(SiteAnnotation))));
         }
         else
         {
             var expression = (ExpressionSyntax)body;
+            var kept = KeepBodyLayout(expression.WithoutTrivia(), Body.Root);
             if (!IsStatementExpression(expression))
             {
-                expression = SyntaxFactory.AssignmentExpression(
-                    SyntaxKind.SimpleAssignmentExpression, SyntaxFactory.ParseExpression("_"), expression.WithoutTrivia());
+                kept = SyntaxFactory.AssignmentExpression(
+                    SyntaxKind.SimpleAssignmentExpression, SyntaxFactory.ParseExpression("_"), kept);
             }
 
-            statements.Add(Mark(SyntaxFactory.ExpressionStatement(expression.WithoutTrivia())));
+            statements.Add(Mark(SyntaxFactory.ExpressionStatement(kept)));
         }
 
         return statements;
@@ -227,6 +230,15 @@ internal sealed class CallPlan
 
     private static ExpressionSyntax Parenthesize(ExpressionSyntax expression) =>
         SyntaxFactory.ParenthesizedExpression(expression.WithoutTrivia()).WithAdditionalAnnotations(Simplifier.Annotation);
+
+    /// <summary>
+    /// The method's code, rewritten for the call, marked to keep the layout the method's code is
+    /// written with: the formatter places it, but only its indentation changes; what was
+    /// substituted (arguments, qualified names) is simplified as usual.
+    /// </summary>
+    private static TNode KeepBodyLayout<TNode>(TNode rewritten, SyntaxNode original)
+        where TNode : SyntaxNode =>
+        GeneratedCodeFormatter.KeepLayout(rewritten, rewritten, original);
 
     private TStatement Mark<TStatement>(TStatement statement)
         where TStatement : StatementSyntax

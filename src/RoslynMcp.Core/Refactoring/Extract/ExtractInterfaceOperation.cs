@@ -143,6 +143,7 @@ public sealed class ExtractInterfaceOperation : RefactoringOperationBase<Extract
         if (inNewFile)
         {
             // Create new file with interface
+            var layoutNotes = new List<string>();
             newSolution = await CreateInterfaceInNewFileAsync(
                 document.Project.Solution,
                 document.Project,
@@ -150,7 +151,9 @@ public sealed class ExtractInterfaceOperation : RefactoringOperationBase<Extract
                 interfaceDecl,
                 namespaceName,
                 root,
+                layoutNotes,
                 cancellationToken);
+            AddWarnings(layoutNotes);
         }
         else
         {
@@ -242,6 +245,7 @@ public sealed class ExtractInterfaceOperation : RefactoringOperationBase<Extract
         InterfaceDeclarationSyntax interfaceDecl,
         string? namespaceName,
         SyntaxNode sourceRoot,
+        ICollection<string> layoutNotes,
         CancellationToken cancellationToken)
     {
         // Build compilation unit with usings from source
@@ -262,7 +266,7 @@ public sealed class ExtractInterfaceOperation : RefactoringOperationBase<Extract
         }
 
         // Create the new document empty first: its line ending can only come from its
-        // .editorconfig (or the platform default) since there is no text to go by.
+        // .editorconfig (or the project's files, or the platform) since there is no text to go by.
         var newDoc = project.AddDocument(
             Path.GetFileName(targetFile),
             SourceText.From(string.Empty),
@@ -274,9 +278,11 @@ public sealed class ExtractInterfaceOperation : RefactoringOperationBase<Extract
             .WithMembers(SyntaxFactory.SingletonList(wrappedInterface))
             .NormalizeWhitespace(eol: lineEnding);
 
-        // Shorten the interface's type names to what the copied usings allow.
+        // Shorten the interface's type names to what the copied usings allow; then the whole
+        // file has the one line ending, also in what came from the source (comments of usings).
         newDoc = newDoc.WithSyntaxRoot(compilationUnit);
-        return await GeneratedCodeFormatter.FormatAsync(newDoc.Project.Solution, newDoc, cancellationToken);
+        var formatted = await GeneratedCodeFormatter.FormatAsync(newDoc.Project.Solution, newDoc, cancellationToken);
+        return await LineEndings.ConvertDocumentAsync(formatted, newDoc.Id, lineEnding, layoutNotes, cancellationToken);
     }
 
     private static Solution AddInterfaceToSameFile(

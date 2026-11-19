@@ -150,7 +150,7 @@ public sealed class IntroduceParameterOperation : RefactoringOperationBase<Intro
             }
         }
 
-        var newSolution = await edits.ApplyAsync(solution, cancellationToken);
+        var newSolution = await edits.ApplyAsync(solution, cancellationToken, warnings: warnings);
         var affected = edits.Documents.Concat(references.Select(r => r.Document.Id)).Distinct().ToList();
         warnings.AddRange(await FindPlaceholdersAsync(newSolution, callSites.Keys, cancellationToken));
         warnings.AddRange(await IntroducedErrors.FindAsync(solution, newSolution, affected, cancellationToken, matchLines: false) ?? []);
@@ -421,6 +421,11 @@ public sealed class IntroduceParameterOperation : RefactoringOperationBase<Intro
         {
             value = SyntaxFactory.ParseExpression($"default /* TODO: {name} */")
                 .WithAdditionalAnnotations(new SyntaxAnnotation(PlaceholderAnnotationKind, $"{name}|{problem}"));
+        }
+        else
+        {
+            // The initializer as written in the method's file; a call in another file gets its line ending.
+            value = LineEndings.MarkMoved(value);
         }
 
         // A call in extension form passes the `this` parameter as its receiver.

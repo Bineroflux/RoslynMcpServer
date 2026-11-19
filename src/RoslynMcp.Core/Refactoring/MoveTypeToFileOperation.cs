@@ -1,6 +1,7 @@
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using Microsoft.CodeAnalysis.Text;
 using RoslynMcp.Contracts.Enums;
 using RoslynMcp.Contracts.Errors;
 using RoslynMcp.Contracts.Models;
@@ -173,30 +174,44 @@ public sealed class MoveTypeToFileOperation : RefactoringOperationBase<MoveTypeT
             .OfType<UsingDirectiveSyntax>()
             .ToList();
 
-        // Create the target file content, with the source file's line ending
-        var lineEnding = await LineEndings.GetAsync(sourceDoc, cancellationToken);
-        var targetContent = CreateTargetFileContent(typeNode, namespaceName, usings, lineEnding);
-
         // Check if target document exists
         var targetDoc = Context.GetDocumentByPath(@params.TargetFile);
 
+        // The type takes the line ending of the file it goes into (its string literals excepted).
+        int keptLiterals;
+        string lineEnding;
         if (targetDoc != null)
         {
             // Add to existing file
+            lineEnding = await LineEndings.GetAsync(targetDoc, cancellationToken);
             var targetRoot = await targetDoc.GetSyntaxRootAsync(cancellationToken);
-            var newTargetRoot = AddTypeToExistingFile(targetRoot!, typeNode, namespaceName);
+            var newTargetRoot = AddTypeToExistingFile(
+                targetRoot!, LineEndings.Convert(typeNode, lineEnding, out keptLiterals), namespaceName);
             solution = solution.WithDocumentSyntaxRoot(targetDoc.Id, newTargetRoot);
         }
         else
         {
-            // Create new document
+            // Create new document, with the end_of_line of its .editorconfig, else the line
+            // ending of the file the type comes from.
             var project = sourceDoc.Project;
+            var probe = project.AddDocument(
+                Path.GetFileNameWithoutExtension(@params.TargetFile), SourceText.From(string.Empty), filePath: @params.TargetFile);
+            lineEnding = await ProjectFileConventions.GetEditorConfigLineEndingAsync(probe, cancellationToken)
+                ?? await LineEndings.GetAsync(sourceDoc, cancellationToken);
+            var targetContent = CreateTargetFileContent(
+                LineEndings.Convert(typeNode, lineEnding, out keptLiterals),
+                namespaceName,
+                usings.Select(u => LineEndings.Convert(u, lineEnding, out _)).ToList(),
+                lineEnding);
             var newDoc = project.AddDocument(
                 Path.GetFileNameWithoutExtension(@params.TargetFile),
                 targetContent,
                 filePath: @params.TargetFile);
             solution = newDoc.Project.Solution;
         }
+
+        if (keptLiterals > 0)
+            AddWarnings([LineEndings.KeptLiteralsWarning(@params.TargetFile, keptLiterals, lineEnding)]);
 
         // Remove type from source file
         var newSourceRoot = sourceRoot.RemoveNode(typeNode, SyntaxRemoveOptions.KeepNoTrivia);

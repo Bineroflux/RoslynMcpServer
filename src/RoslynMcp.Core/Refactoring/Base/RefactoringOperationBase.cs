@@ -28,8 +28,15 @@ public abstract class RefactoringOperationBase<TParams> : IRefactoringOperation<
     /// </summary>
     protected ReferenceTracker ReferenceTracker { get; }
 
-    // Warnings of this execution's commits, added to its result's own.
+    // Warnings of this execution's commits (or of the commit a preview stands for) and those
+    // reported with AddWarnings, added to its result's own.
     private readonly List<string> _commitWarnings = [];
+
+    /// <summary>
+    /// Adds warnings to this execution's result, preview or not, e.g. what laying out code
+    /// moved into another file reported (<see cref="Utilities.LineEndings.KeptLiteralsWarning"/>).
+    /// </summary>
+    protected void AddWarnings(IEnumerable<string> warnings) => _commitWarnings.AddRange(warnings);
 
     /// <summary>
     /// Creates a new refactoring operation.

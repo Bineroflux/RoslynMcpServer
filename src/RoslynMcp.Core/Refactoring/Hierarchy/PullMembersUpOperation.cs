@@ -193,10 +193,14 @@ public sealed class PullMembersUpOperation : RefactoringOperationBase<PullMember
             Insert((TypeDeclarationSyntax)rewritten, newMembers, makesTargetAbstract));
 
         var lineEnding = await LineEndings.GetAsync(targetDocument, cancellationToken);
-        var newSolution = await edits.ApplyAsync(solution, cancellationToken, (id, newRoot) =>
-            id == targetDocument.Id && newRoot is CompilationUnitSyntax unit && namespaces.Count > 0
-                ? UsingDirectives.Add(unit, namespaces, lineEnding)
-                : newRoot);
+        var newSolution = await edits.ApplyAsync(
+            solution,
+            cancellationToken,
+            (id, newRoot) =>
+                id == targetDocument.Id && newRoot is CompilationUnitSyntax unit && namespaces.Count > 0
+                    ? UsingDirectives.Add(unit, namespaces, lineEnding)
+                    : newRoot,
+            notes);
         var annotated = newSolution;
         var removals = await RemoveMarkedAsync(newSolution, edits.Documents, cancellationToken);
         newSolution = await LinkedDocuments.SyncAsync(solution, removals.Solution, edits.Documents, cancellationToken);

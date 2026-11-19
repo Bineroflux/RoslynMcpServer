@@ -129,10 +129,15 @@ internal sealed class SyntaxEdits
     /// <param name="solution">The solution the edited nodes belong to.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <param name="finish">A last change to each edited document's root before it is simplified and formatted.</param>
+    /// <param name="warnings">
+    /// Receives what laying out the edits reports: string literals of code moved from another
+    /// file that keep line breaks other than the file's (see <see cref="GeneratedCodeFormatter.FormatAsync"/>).
+    /// </param>
     public async Task<Solution> ApplyAsync(
         Solution solution,
         CancellationToken cancellationToken,
-        Func<DocumentId, SyntaxNode, SyntaxNode>? finish = null)
+        Func<DocumentId, SyntaxNode, SyntaxNode>? finish = null,
+        ICollection<string>? warnings = null)
     {
         var result = solution;
         foreach (var (id, edits) in _edits)
@@ -144,7 +149,7 @@ internal sealed class SyntaxEdits
         }
 
         foreach (var id in _edits.Keys)
-            result = await GeneratedCodeFormatter.FormatAsync(result, solution.GetDocument(id)!, cancellationToken);
+            result = await GeneratedCodeFormatter.FormatAsync(result, solution.GetDocument(id)!, cancellationToken, warnings);
 
         return result;
     }

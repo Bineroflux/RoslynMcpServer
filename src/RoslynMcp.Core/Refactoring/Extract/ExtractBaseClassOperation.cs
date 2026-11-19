@@ -230,8 +230,17 @@ public sealed class ExtractBaseClassOperation : RefactoringOperationBase<Extract
         }
 
         newSolution = await GeneratedCodeFormatter.FormatAsync(newSolution, document, cancellationToken);
+        var layoutNotes = new List<string>();
         foreach (var target in @params.TargetFile == null ? [] : newSolution.GetDocumentIdsWithFilePath(@params.TargetFile).Where(id => id != document.Id))
+        {
+            // The new file gets one line ending, the one its generated lines have, also in the
+            // members moved there (their string literals excepted).
             newSolution = await GeneratedCodeFormatter.FormatAsync(newSolution, newSolution.GetDocument(target)!, cancellationToken);
+            var lineEnding = await LineEndings.GetAsync(newSolution.GetDocument(target)!, cancellationToken);
+            newSolution = await LineEndings.ConvertDocumentAsync(newSolution, target, lineEnding, layoutNotes, cancellationToken);
+        }
+
+        AddWarnings(layoutNotes);
 
         // Remove the extracted declarations (or variables) from the text, with their comments.
         var formatted = newSolution.GetDocument(document.Id)!;

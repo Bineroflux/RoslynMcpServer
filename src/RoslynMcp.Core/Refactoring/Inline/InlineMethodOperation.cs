@@ -148,6 +148,7 @@ public sealed class InlineMethodOperation : RefactoringOperationBase<InlineMetho
         // Apply, check that the names of every inlined body still bind as before, and drop the calls where they don't.
         Solution newSolution = solution;
         var deletes = false;
+        var layoutNotes = new List<string>();
         for (var round = 0; ; round++)
         {
             if (plans.Count == 0)
@@ -155,7 +156,8 @@ public sealed class InlineMethodOperation : RefactoringOperationBase<InlineMetho
 
             var remaining = others.Count + calls.Count - plans.Count;
             deletes = deleteMethod && remaining == 0 && !await ImplementsInterfaceAsync(method, model.Compilation, solution, cancellationToken);
-            newSolution = await ApplyAsync(solution, plans, deletes ? (document, declaration) : null, cancellationToken);
+            layoutNotes.Clear();
+            newSolution = await ApplyAsync(solution, plans, deletes ? (document, declaration) : null, layoutNotes, cancellationToken);
 
             var mismatches = await VerifyAsync(newSolution, plans, cancellationToken);
             if (mismatches.Count == 0 || round == MaxVerificationRounds)
@@ -184,6 +186,7 @@ public sealed class InlineMethodOperation : RefactoringOperationBase<InlineMetho
             .Select(r => $"{r.Span.Path}({r.Span.StartLinePosition.Line + 1},{r.Span.StartLinePosition.Character + 1}): not inlined: {r.Reason}"));
         if (deleteMethod && !deletes)
             warnings.Add(await KeptReasonAsync(method, model.Compilation, solution, others.Count + calls.Count - plans.Count, cancellationToken));
+        warnings.AddRange(layoutNotes);
         warnings.AddRange(await IntroducedErrors.FindAsync(solution, newSolution, edited, cancellationToken) ?? []);
 
         if (@params.Preview)
@@ -394,12 +397,14 @@ public sealed class InlineMethodOperation : RefactoringOperationBase<InlineMetho
     /// The solution with every planned call replaced. Expression calls replace their invocation;
     /// their locals, and the replacement of statement calls, replace the statement with a block
     /// that is then spliced into the enclosing statements. The method's declaration is marked
-    /// when it is to be deleted.
+    /// when it is to be deleted. A body inlined into another file gets that file's line ending
+    /// (its string literals excepted, which <paramref name="layoutNotes"/> reports).
     /// </summary>
     private static async Task<Solution> ApplyAsync(
         Solution solution,
         List<CallPlan> plans,
         (Document Document, MethodDeclarationSyntax Declaration)? delete,
+        ICollection<string> layoutNotes,
         CancellationToken cancellationToken)
     {
         var edits = new SyntaxEdits();
@@ -449,13 +454,17 @@ public sealed class InlineMethodOperation : RefactoringOperationBase<InlineMetho
         foreach (var group in plans.Where(p => p.Namespaces.Count > 0).GroupBy(p => p.Document.Id))
             imports[group.Key] = (group.SelectMany(p => p.Namespaces).ToList(), await LineEndings.GetAsync(group.First().Document, cancellationToken));
 
-        return await edits.ApplyAsync(solution, cancellationToken, (id, root) =>
-        {
-            root = CallPlan.Splice(root);
-            return imports.TryGetValue(id, out var import) && root is CompilationUnitSyntax unit
-                ? UsingDirectives.Add(unit, import.Namespaces, import.LineEnding)
-                : root;
-        });
+        return await edits.ApplyAsync(
+            solution,
+            cancellationToken,
+            (id, root) =>
+            {
+                root = CallPlan.Splice(root);
+                return imports.TryGetValue(id, out var import) && root is CompilationUnitSyntax unit
+                    ? UsingDirectives.Add(unit, import.Namespaces, import.LineEnding)
+                    : root;
+            },
+            layoutNotes);
 
         (DocumentId Document, CallPlan? Own, List<CallPlan> Nested) Entry(StatementSyntax statement, DocumentId document)
         {

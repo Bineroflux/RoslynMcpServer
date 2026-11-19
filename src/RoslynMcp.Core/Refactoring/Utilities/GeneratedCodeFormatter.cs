@@ -114,12 +114,15 @@ internal static class GeneratedCodeFormatter
     /// Simplifies the marked type names and formats the marked nodes of
     /// <paramref name="originalDocument"/>'s counterpart in <paramref name="solution"/>,
     /// using the line ending of the original document. Simplification only shortens names
-    /// to what the usings in scope allow; it never adds usings.
+    /// to what the usings in scope allow; it never adds usings. Code moved there (kept in its
+    /// layout, or marked with <see cref="LineEndings.MarkMoved"/>) gets that line ending too,
+    /// except inside its string literals, which <paramref name="warnings"/> reports.
     /// </summary>
     public static async Task<Solution> FormatAsync(
         Solution solution,
         Document originalDocument,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        ICollection<string>? warnings = null)
     {
         var document = solution.GetDocument(originalDocument.Id);
         if (document == null)
@@ -137,43 +140,44 @@ internal static class GeneratedCodeFormatter
             document = await Simplifier.ReduceAsync(restored, Simplifier.Annotation, cancellationToken: cancellationToken);
         }
 
-        // Generated nodes carry NormalizeWhitespace's CRLFs and the formatter writes its own
-        // NewLine; give every line break it may have touched (inside the marked nodes and
-        // between them and their neighbouring tokens) the document's line ending.
+        // Generated nodes carry NormalizeWhitespace's CRLFs, the formatter writes its own NewLine,
+        // and moved code the line ending of the file it comes from: give every line break inside
+        // those nodes (comments and documentation comments included, string literals not) the
+        // document's line ending ...
         var root = await document.GetSyntaxRootAsync(cancellationToken);
         if (root == null)
         {
             return document.Project.Solution;
         }
 
-        var lineBreaks = root.GetAnnotatedNodes(Formatter.Annotation)
-            .SelectMany(node => node.DescendantTrivia()
-                .Concat(node.GetFirstToken().GetPreviousToken().TrailingTrivia)
+        var touched = root.GetAnnotatedNodes(Formatter.Annotation)
+            .Concat(root.GetAnnotatedNodes(KeepLayoutKind))
+            .Concat(LineEndings.MovedNodes(root))
+            .ToHashSet();
+        var outermost = touched.Where(node => !node.Ancestors().Any(touched.Contains)).ToList();
+        var keptLiterals = 0;
+        var converted = root.ReplaceNodes(outermost, (_, rewritten) =>
+        {
+            var node = LineEndings.Convert(rewritten, lineEnding, out var kept);
+            keptLiterals += kept;
+            return node;
+        });
+
+        if (keptLiterals > 0)
+            warnings?.Add(LineEndings.KeptLiteralsWarning(document.FilePath ?? document.Name, keptLiterals, lineEnding));
+
+        // ... and to those between them and their neighbouring tokens.
+        var lineBreaks = converted.GetAnnotatedNodes(Formatter.Annotation)
+            .SelectMany(node => node.GetFirstToken().GetPreviousToken().TrailingTrivia
                 .Concat(node.GetLastToken().GetNextToken().LeadingTrivia))
             .Where(trivia => trivia.IsKind(SyntaxKind.EndOfLineTrivia) && trivia.ToString() != lineEnding)
             .Distinct()
             .ToList();
 
         if (lineBreaks.Count > 0)
-        {
-            root = root.ReplaceTrivia(lineBreaks, (_, _) => SyntaxFactory.EndOfLine(lineEnding));
-            document = document.WithSyntaxRoot(root);
-        }
+            converted = converted.ReplaceTrivia(lineBreaks, (_, _) => SyntaxFactory.EndOfLine(lineEnding));
 
-        // A documentation comment carried over from another file ends its lines with XML new-line tokens.
-        var xmlLineBreaks = root.GetAnnotatedNodes(Formatter.Annotation)
-            .SelectMany(node => node.DescendantTokens(descendIntoTrivia: true))
-            .Where(token => token.IsKind(SyntaxKind.XmlTextLiteralNewLineToken) && token.Text != lineEnding)
-            .ToList();
-
-        if (xmlLineBreaks.Count > 0)
-        {
-            root = root.ReplaceTokens(xmlLineBreaks, (original, _) => SyntaxFactory.Token(
-                original.LeadingTrivia, SyntaxKind.XmlTextLiteralNewLineToken, lineEnding, lineEnding, original.TrailingTrivia));
-            document = document.WithSyntaxRoot(root);
-        }
-
-        return document.Project.Solution;
+        return ReferenceEquals(converted, root) ? document.Project.Solution : document.WithSyntaxRoot(converted).Project.Solution;
     }
 
     /// <summary>Puts the code marked to keep its layout back as it was written, re-indented to where it is now.</summary>

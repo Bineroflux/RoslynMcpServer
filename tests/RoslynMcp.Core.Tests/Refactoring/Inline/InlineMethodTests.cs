@@ -425,6 +425,75 @@ public sealed class InlineMethodTests
     }
 
     [Fact]
+    public async Task NullableReferenceTypesOfTheBody_LoseTheirQuestionMark_WhereTheCallSiteHasAnnotationsDisabled()
+    {
+        using var ws = TestWorkspace.Create(
+            ("Lib.cs", Lf("""
+                using System.Collections.Generic;
+
+                namespace Lib;
+
+                public static class Text
+                {
+                    public static void Print(object value, List<string> log)
+                    {
+                        string? text = value as string;
+                        int? length = text?.Length;
+                        var items = new List<string?> { text, (string?)null };
+                        log.Add(text + length + items.Count + Local<int?>(length));
+
+                        static string Local<T>(T? item) => item?.ToString() ?? "-";
+                    }
+
+                    public static T? Empty<T>() => default(T?);
+
+                    public static bool Has<T>(T value) where T : struct => ((T?)value).HasValue;
+                }
+                """)),
+            ("App.cs", Lf("""
+                #nullable disable
+                using System.Collections.Generic;
+
+                namespace App;
+
+                public static class Client
+                {
+                    public static void Run(object o, List<string> log)
+                    {
+                        Lib.Text.Print(o, log);
+                    }
+
+                    public static string Name() => Lib.Text.Empty<string>();
+
+                    public static int Zero() => Lib.Text.Empty<int>();
+
+                    public static bool Has(long value) => Lib.Text.Has(value);
+                }
+                """)));
+
+        var print = await InlineAsync(ws, "Lib.cs", "Print");
+        var empty = await InlineAsync(ws, "Lib.cs", "Empty");
+        var has = await InlineAsync(ws, "Lib.cs", "Has");
+
+        Assert.True(print.Success, print.Error?.Message);
+        Assert.True(empty.Success, empty.Error?.Message);
+        Assert.True(has.Success, has.Error?.Message);
+        var text = ws.ReadFile("App.cs");
+        Assert.Contains("""
+                    string text = o as string;
+                    int? length = text?.Length;
+                    var items = new List<string> { text, (string)null };
+                    log.Add(text + length + items.Count + Local<int?>(length));
+
+                    static string Local<T>(T item) => item?.ToString() ?? "-";
+            """.ReplaceLineEndings("\n"), text);
+        Assert.Contains("public static string Name() => default(string);", text);
+        Assert.Contains("public static int Zero() => default(int);", text);
+        Assert.Contains("public static bool Has(long value) => ((long?)value).HasValue;", text);
+        Assert.Empty(ws.GetDiskCompilationWarningsAndErrors());
+    }
+
+    [Fact]
     public async Task BodyUsingAPrivateMember_IsRefusedWhereItIsInaccessible_AndTheMethodKept()
     {
         using var ws = TestWorkspace.Create(("C.cs", Lf("""

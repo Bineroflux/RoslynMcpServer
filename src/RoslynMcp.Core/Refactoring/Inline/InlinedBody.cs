@@ -474,7 +474,21 @@ internal sealed class InlinedBody
                 return Visit(node.ElementType)?.WithTriviaFrom(node);
             }
 
+            // Where the call site has nullable annotations disabled, a nullable reference type
+            // (or unconstrained type parameter) is written without its ? (CS8632).
+            if (!nullableAnnotations && !IsValueType(node.ElementType))
+                return Visit(node.ElementType)?.WithTriviaFrom(node);
+
             return base.VisitNullableType(node);
+        }
+
+        /// <summary>Whether a type written in the body is a value type once type parameters are substituted.</summary>
+        private bool IsValueType(TypeSyntax type)
+        {
+            if (body.Model.GetTypeInfo(type).Type is not { } symbol)
+                return true;
+
+            return (MemberFamily.Substitute(symbol, typeMap, body.Model.Compilation) ?? symbol).IsValueType;
         }
 
         public override SyntaxToken VisitToken(SyntaxToken token)

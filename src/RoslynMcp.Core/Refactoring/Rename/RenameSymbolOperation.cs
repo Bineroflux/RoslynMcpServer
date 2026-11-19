@@ -1,12 +1,11 @@
-using System.Text.RegularExpressions;
 using Microsoft.CodeAnalysis;
-using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.Rename;
 using RoslynMcp.Contracts.Enums;
 using RoslynMcp.Contracts.Errors;
 using RoslynMcp.Contracts.Models;
 using RoslynMcp.Core.FileSystem;
 using RoslynMcp.Core.Refactoring.Base;
+using RoslynMcp.Core.Refactoring.Utilities;
 using RoslynMcp.Core.Resolution;
 using RoslynMcp.Core.Workspace;
 
@@ -17,10 +16,6 @@ namespace RoslynMcp.Core.Refactoring.Rename;
 /// </summary>
 public sealed class RenameSymbolOperation : RefactoringOperationBase<RenameSymbolParams>
 {
-    private static readonly Regex IdentifierPattern = new(
-        @"^@?[A-Za-z_][A-Za-z0-9_]*$",
-        RegexOptions.Compiled);
-
     private readonly SymbolResolver _symbolResolver;
 
     /// <summary>
@@ -53,11 +48,8 @@ public sealed class RenameSymbolOperation : RefactoringOperationBase<RenameSymbo
         if (!File.Exists(@params.SourceFile))
             throw new RefactoringException(ErrorCodes.SourceFileNotFound, $"Source file not found: {@params.SourceFile}");
 
-        if (!IdentifierPattern.IsMatch(@params.NewName))
-            throw new RefactoringException(ErrorCodes.InvalidNewName, $"'{@params.NewName}' is not a valid C# identifier.");
-
-        if (SyntaxFacts.GetKeywordKind(@params.NewName) != SyntaxKind.None)
-            throw new RefactoringException(ErrorCodes.ReservedKeyword, $"'{@params.NewName}' is a C# reserved keyword.");
+        // The kind of symbol is known only once it is found; ValidateRename checks type names.
+        var newName = IdentifierNames.Validate(@params.NewName, NameKind.Member, "newName", ErrorCodes.InvalidNewName);
 
         if (@params.Line.HasValue && @params.Line.Value < 1)
             throw new RefactoringException(ErrorCodes.InvalidLineNumber, "Line number must be >= 1.");
@@ -65,7 +57,7 @@ public sealed class RenameSymbolOperation : RefactoringOperationBase<RenameSymbo
         if (@params.Column.HasValue && @params.Column.Value < 1)
             throw new RefactoringException(ErrorCodes.InvalidColumnNumber, "Column number must be >= 1.");
 
-        if (@params.SymbolName == @params.NewName)
+        if (IdentifierNames.ValueText(@params.SymbolName) == newName)
             throw new RefactoringException(ErrorCodes.SameLocation, "New name is the same as current name.");
     }
 
@@ -117,7 +109,7 @@ public sealed class RenameSymbolOperation : RefactoringOperationBase<RenameSymbo
             var fileName = Path.GetFileNameWithoutExtension(document.FilePath);
             if (fileName == symbol.Name)
             {
-                var newFileName = @params.NewName + ".cs";
+                var newFileName = IdentifierNames.ValueText(@params.NewName) + ".cs";
                 var newFilePath = Path.Combine(Path.GetDirectoryName(document.FilePath)!, newFileName);
 
                 // A rename that only changes casing (Foo -> foo) targets the very same
@@ -307,6 +299,15 @@ public sealed class RenameSymbolOperation : RefactoringOperationBase<RenameSymbo
 
     private static void ValidateRename(ISymbol symbol, RenameSymbolParams @params)
     {
+        // Roslyn's renamer writes a name verbatim only when it is a reserved keyword, so
+        // `@required` would come out as `required`, which cannot name a type (CS9029).
+        if (symbol is INamedTypeSymbol && IdentifierNames.IsReservedTypeName(IdentifierNames.ValueText(@params.NewName)))
+        {
+            throw new RefactoringException(
+                ErrorCodes.ReservedKeyword,
+                $"newName '{@params.NewName}' cannot name a type here: rename_symbol writes it without '@', where it is a keyword.");
+        }
+
         // Cannot rename constructors directly
         if (symbol is IMethodSymbol method)
         {

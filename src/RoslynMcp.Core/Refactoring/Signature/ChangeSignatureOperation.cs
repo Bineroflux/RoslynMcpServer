@@ -7,6 +7,7 @@ using RoslynMcp.Contracts.Errors;
 using RoslynMcp.Contracts.Models;
 using RoslynMcp.Core.FileSystem;
 using RoslynMcp.Core.Refactoring.Base;
+using RoslynMcp.Core.Refactoring.Utilities;
 using RoslynMcp.Core.Workspace;
 
 namespace RoslynMcp.Core.Refactoring.Signature;
@@ -58,13 +59,17 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
             throw new RefactoringException(ErrorCodes.SourceFileNotFound, $"Source file not found: {@params.SourceFile}");
 
         // Validate parameter changes
-        foreach (var change in @params.Parameters)
+        for (var i = 0; i < @params.Parameters.Count; i++)
         {
+            var change = @params.Parameters[i];
             if (string.IsNullOrWhiteSpace(change.Name))
                 throw new RefactoringException(ErrorCodes.MissingRequiredParam, "Each parameter change requires a name.");
 
             if (change.OriginalName == null && !change.Remove && string.IsNullOrWhiteSpace(change.Type))
                 throw new RefactoringException(ErrorCodes.MissingRequiredParam, "New parameters require a type.");
+
+            if (!change.Remove)
+                IdentifierNames.Validate(change.Name, NameKind.Parameter, $"parameters[{i}].name", ErrorCodes.InvalidNewName);
         }
     }
 
@@ -102,7 +107,7 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
         foreach (var parameter in newParameters.Where(p => p.OriginalIndex.HasValue))
         {
             var index = parameter.OriginalIndex!.Value;
-            if (parameter.Name != originalParams[index].Name)
+            if (IdentifierNames.ValueText(parameter.Name) != originalParams[index].Name)
                 renames[index] = parameter.Name;
         }
 
@@ -220,7 +225,7 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
         {
             if (change.Remove) continue;
 
-            var index = originalParams.FindIndex(p => p.Name == change.OriginalName);
+            var index = originalParams.FindIndex(p => p.Name == IdentifierNames.ValueText(change.OriginalName!));
             if (index < 0)
             {
                 throw new RefactoringException(
@@ -284,13 +289,13 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
             {
                 parameter = original.Parameters[index];
                 if (renames[index] is { } name)
-                    parameter = parameter.WithIdentifier(SyntaxFactory.Identifier(name).WithTriviaFrom(parameter.Identifier));
+                    parameter = parameter.WithIdentifier(IdentifierNames.Token(name).WithTriviaFrom(parameter.Identifier));
                 if (types[newParameter] is { } type)
                     parameter = parameter.WithType(parameter.Type == null ? type : type.WithTriviaFrom(parameter.Type));
             }
             else
             {
-                parameter = SyntaxFactory.Parameter(SyntaxFactory.Identifier(newParameter.Name))
+                parameter = SyntaxFactory.Parameter(IdentifierNames.Token(newParameter.Name))
                     .WithType(types[newParameter]!.WithTrailingTrivia(SyntaxFactory.Space));
                 if (original.Parameters.Count > 0)
                     parameter = parameter.WithLeadingTrivia(original.Parameters[^1].GetLeadingTrivia());
@@ -354,7 +359,7 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
         var renamed = new Dictionary<IParameterSymbol, string>(SymbolEqualityComparer.Default);
         for (var i = 0; i < renames.Count; i++)
         {
-            if (renames[i] is { } name && declared.Parameters[i].Name != name)
+            if (renames[i] is { } name && declared.Parameters[i].Name != IdentifierNames.ValueText(name))
                 renamed[declared.Parameters[i]] = name;
         }
 
@@ -369,7 +374,7 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
                 edits.Add(document, identifier, rewritten =>
                 {
                     var node = (IdentifierNameSyntax)rewritten;
-                    return node.WithIdentifier(SyntaxFactory.Identifier(name).WithTriviaFrom(node.Identifier));
+                    return node.WithIdentifier(IdentifierNames.Token(name).WithTriviaFrom(node.Identifier));
                 });
             }
         }
@@ -464,7 +469,7 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
                 continue; // the parameter is removed
 
             if (argument.NameColon is { } named && renames[index] is { } newName)
-                argument = argument.WithNameColon(named.WithName(IdentifierName(newName).WithTriviaFrom(named.Name)));
+                argument = argument.WithNameColon(named.WithName(IdentifierNames.Name(newName).WithTriviaFrom(named.Name)));
 
             entries.Add(new CallArgument(argument, position, IsNew: false));
         }
@@ -552,15 +557,9 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
     private static ArgumentSyntax WithName(ArgumentSyntax argument, string name) =>
         argument.WithoutLeadingTrivia()
             .WithNameColon(SyntaxFactory.NameColon(
-                IdentifierName(name),
+                IdentifierNames.Name(name),
                 SyntaxFactory.Token(SyntaxKind.ColonToken).WithTrailingTrivia(SyntaxFactory.Space)))
             .WithLeadingTrivia(argument.GetLeadingTrivia());
-
-    /// <summary>An identifier, with <c>@</c> when the name is a keyword.</summary>
-    private static IdentifierNameSyntax IdentifierName(string name) =>
-        SyntaxFactory.IdentifierName(SyntaxFacts.GetKeywordKind(name) != SyntaxKind.None
-            ? SyntaxFactory.VerbatimIdentifier(default, "@" + name, name, default)
-            : SyntaxFactory.Identifier(name));
 
     private sealed record CallArgument(ArgumentSyntax Argument, int Position, bool IsNew);
 

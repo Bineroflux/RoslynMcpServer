@@ -42,8 +42,8 @@ public sealed class EncapsulateFieldOperation : RefactoringOperationBase<Encapsu
         if (!File.Exists(@params.SourceFile))
             throw new RefactoringException(ErrorCodes.SourceFileNotFound, $"Source file not found: {@params.SourceFile}");
 
-        if (@params.PropertyName != null && !IsValidIdentifier(@params.PropertyName))
-            throw new RefactoringException(ErrorCodes.InvalidSymbolName, $"Invalid property name: {@params.PropertyName}");
+        if (@params.PropertyName != null)
+            IdentifierNames.Validate(@params.PropertyName, NameKind.Member, "propertyName", ErrorCodes.InvalidSymbolName);
     }
 
     /// <inheritdoc />
@@ -104,7 +104,7 @@ public sealed class EncapsulateFieldOperation : RefactoringOperationBase<Encapsu
         var containingType = fieldDeclarator.Ancestors().OfType<TypeDeclarationSyntax>().First();
         var existingProperty = containingType.Members
             .OfType<PropertyDeclarationSyntax>()
-            .FirstOrDefault(p => p.Identifier.Text == propertyName);
+            .FirstOrDefault(p => p.Identifier.ValueText == IdentifierNames.ValueText(propertyName));
 
         if (existingProperty != null)
         {
@@ -151,7 +151,7 @@ public sealed class EncapsulateFieldOperation : RefactoringOperationBase<Encapsu
 
         // Rename field if property name would conflict
         string newFieldName = @params.FieldName;
-        if (propertyName.Equals(@params.FieldName, StringComparison.OrdinalIgnoreCase))
+        if (IdentifierNames.ValueText(propertyName).Equals(@params.FieldName, StringComparison.OrdinalIgnoreCase))
         {
             newFieldName = "_" + char.ToLowerInvariant(@params.FieldName[0]) + @params.FieldName.Substring(1);
 
@@ -206,7 +206,7 @@ public sealed class EncapsulateFieldOperation : RefactoringOperationBase<Encapsu
             if (refNode is IdentifierNameSyntax identifier &&
                 identifier.Identifier.Text == @params.FieldName)
             {
-                var newIdentifier = SyntaxFactory.IdentifierName(propertyName)
+                var newIdentifier = IdentifierNames.Name(propertyName)
                     .WithTriviaFrom(identifier);
                 var newRefRoot = refRoot.ReplaceNode(identifier, newIdentifier);
                 newSolution = refDoc.WithSyntaxRoot(newRefRoot).Project.Solution;
@@ -327,12 +327,5 @@ public sealed class EncapsulateFieldOperation : RefactoringOperationBase<Encapsu
         };
 
         return RefactoringResult.PreviewResult(operationId, pendingChanges);
-    }
-
-    private static bool IsValidIdentifier(string name)
-    {
-        if (string.IsNullOrEmpty(name)) return false;
-        if (!char.IsLetter(name[0]) && name[0] != '_') return false;
-        return name.All(c => char.IsLetterOrDigit(c) || c == '_');
     }
 }

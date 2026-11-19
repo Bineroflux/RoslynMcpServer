@@ -1,4 +1,3 @@
-using System.Text.RegularExpressions;
 using System.Xml;
 using System.Xml.Linq;
 using Microsoft.CodeAnalysis;
@@ -49,10 +48,6 @@ namespace RoslynMcp.Core.Refactoring.Rename;
 /// </remarks>
 public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNamespaceParams>
 {
-    private static readonly Regex NamespacePattern = new(
-        @"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$",
-        RegexOptions.Compiled);
-
     /// <summary>
     /// Creates a new rename namespace operation.
     /// </summary>
@@ -70,18 +65,8 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
         if (newName.Length == 0)
             throw new RefactoringException(ErrorCodes.MissingRequiredParam, "newNamespace is required.");
 
-        foreach (var (parameter, value) in new[] { ("oldNamespace", oldName), ("newNamespace", newName) })
-        {
-            if (!NamespacePattern.IsMatch(value))
-            {
-                throw new RefactoringException(
-                    ErrorCodes.InvalidNamespace,
-                    $"{parameter} '{value}' is not a valid namespace name: C# identifiers separated by dots.");
-            }
-
-            if (value.Split('.').FirstOrDefault(s => SyntaxFacts.GetKeywordKind(s) != SyntaxKind.None) is { } keyword)
-                throw new RefactoringException(ErrorCodes.ReservedKeyword, $"{parameter} '{value}' contains the keyword '{keyword}'.");
-        }
+        IdentifierNames.ValidateNamespace(oldName, "oldNamespace");
+        IdentifierNames.ValidateNamespace(newName, "newNamespace");
 
         if (oldName == newName)
             throw new RefactoringException(ErrorCodes.SameLocation, $"The namespace is already named '{newName}'.");

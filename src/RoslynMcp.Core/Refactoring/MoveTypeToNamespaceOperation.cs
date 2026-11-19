@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Text.RegularExpressions;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -21,10 +20,6 @@ namespace RoslynMcp.Core.Refactoring;
 /// </summary>
 public sealed class MoveTypeToNamespaceOperation
 {
-    private static readonly Regex NamespacePattern = new(
-        @"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$",
-        RegexOptions.Compiled);
-
     private readonly WorkspaceContext _context;
     private readonly TypeSymbolResolver _symbolResolver;
     private readonly ReferenceTracker _referenceTracker;
@@ -192,10 +187,7 @@ public sealed class MoveTypeToNamespaceOperation
         if (!File.Exists(@params.SourceFile))
             throw new RefactoringException(ErrorCodes.SourceFileNotFound, $"Source file not found: {@params.SourceFile}");
 
-        if (!NamespacePattern.IsMatch(@params.TargetNamespace))
-            throw new RefactoringException(
-                ErrorCodes.InvalidNamespace,
-                $"Invalid namespace format: {@params.TargetNamespace}. Must be valid C# identifier(s) separated by dots.");
+        IdentifierNames.ValidateNamespace(@params.TargetNamespace, "targetNamespace");
 
         if (@params.Line.HasValue && @params.Line.Value < 1)
             throw new RefactoringException(ErrorCodes.InvalidLineNumber, "Line number must be >= 1.");

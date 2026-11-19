@@ -47,8 +47,7 @@ public sealed class ExtractInterfaceOperation : RefactoringOperationBase<Extract
         if (!File.Exists(@params.SourceFile))
             throw new RefactoringException(ErrorCodes.SourceFileNotFound, $"Source file not found: {@params.SourceFile}");
 
-        if (!IsValidIdentifier(@params.InterfaceName))
-            throw new RefactoringException(ErrorCodes.InvalidSymbolName, $"Invalid interface name: {@params.InterfaceName}");
+        IdentifierNames.Validate(@params.InterfaceName, NameKind.Type, "interfaceName", ErrorCodes.InvalidSymbolName);
 
         if (@params.TargetFile != null)
         {
@@ -104,7 +103,7 @@ public sealed class ExtractInterfaceOperation : RefactoringOperationBase<Extract
 
         // Check if interface name already exists
         var existingInterface = await TypeResolver.FindTypeByNameAsync(
-            $"{typeSymbol.ContainingNamespace}.{@params.InterfaceName}",
+            $"{typeSymbol.ContainingNamespace}.{IdentifierNames.ValueText(@params.InterfaceName)}",
             cancellationToken);
 
         if (existingInterface != null)
@@ -360,12 +359,5 @@ public sealed class ExtractInterfaceOperation : RefactoringOperationBase<Extract
         }
 
         return RefactoringResult.PreviewResult(operationId, pendingChanges);
-    }
-
-    private static bool IsValidIdentifier(string name)
-    {
-        if (string.IsNullOrEmpty(name)) return false;
-        if (!char.IsLetter(name[0]) && name[0] != '_') return false;
-        return name.All(c => char.IsLetterOrDigit(c) || c == '_');
     }
 }

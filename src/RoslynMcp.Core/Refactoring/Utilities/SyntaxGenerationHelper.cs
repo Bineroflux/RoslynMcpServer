@@ -239,7 +239,7 @@ public static class SyntaxGenerationHelper
             accessors.Add(setAccessor);
         }
 
-        return SyntaxFactory.PropertyDeclaration(CreateTypeSyntax(field.Type, nullableAnnotations), propertyName)
+        return SyntaxFactory.PropertyDeclaration(CreateTypeSyntax(field.Type, nullableAnnotations), IdentifierNames.Token(propertyName))
             .WithModifiers(SyntaxFactory.TokenList(SyntaxFactory.Token(SyntaxKind.PublicKeyword)))
             .WithAccessorList(SyntaxFactory.AccessorList(SyntaxFactory.List(accessors)))
             .NormalizeWhitespace();
@@ -275,7 +275,7 @@ public static class SyntaxGenerationHelper
             }
         }
 
-        return SyntaxFactory.InterfaceDeclaration(interfaceName)
+        return SyntaxFactory.InterfaceDeclaration(IdentifierNames.Token(interfaceName))
             .WithModifiers(SyntaxFactory.TokenList(SyntaxFactory.Token(SyntaxKind.PublicKeyword)))
             .WithMembers(SyntaxFactory.List(memberSyntax))
             .NormalizeWhitespace();

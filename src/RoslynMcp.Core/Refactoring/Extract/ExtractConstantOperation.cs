@@ -58,12 +58,9 @@ public sealed class ExtractConstantOperation : RefactoringOperationBase<ExtractC
             (@params.StartLine == @params.EndLine && @params.StartColumn >= @params.EndColumn))
             throw new RefactoringException(ErrorCodes.InvalidSelectionRange, "Selection start must be before end.");
 
-        if (!IsValidIdentifier(@params.ConstantName))
-            throw new RefactoringException(ErrorCodes.InvalidSymbolName, $"Invalid constant name: {@params.ConstantName}");
-
         // "_" is a legal identifier, but a constant named "_" captures every discard in the
         // type: `_ = Log(v)` and `out _` would target the constant.
-        if (@params.ConstantName == "_")
+        if (IdentifierNames.Validate(@params.ConstantName, NameKind.Member, "constantName", ErrorCodes.InvalidSymbolName) == "_")
             throw new RefactoringException(ErrorCodes.InvalidSymbolName, "'_' is not a valid constant name: existing discards (_ = ... / out _) would bind to the new constant.");
 
         if (!ValidVisibilities.Contains(@params.Visibility))
@@ -129,7 +126,7 @@ public sealed class ExtractConstantOperation : RefactoringOperationBase<ExtractC
         var existingMember = containingType.Members
             .OfType<FieldDeclarationSyntax>()
             .SelectMany(f => f.Declaration.Variables)
-            .FirstOrDefault(v => v.Identifier.Text == @params.ConstantName);
+            .FirstOrDefault(v => v.Identifier.ValueText == IdentifierNames.ValueText(@params.ConstantName));
 
         if (existingMember != null)
         {
@@ -163,7 +160,7 @@ public sealed class ExtractConstantOperation : RefactoringOperationBase<ExtractC
         }
 
         // Apply changes
-        var constantRef = SyntaxFactory.IdentifierName(@params.ConstantName);
+        var constantRef = IdentifierNames.Name(@params.ConstantName);
 
         // Replace all matching literals
         var newRoot = root.ReplaceNodes(
@@ -276,7 +273,7 @@ public sealed class ExtractConstantOperation : RefactoringOperationBase<ExtractC
                     .WithAdditionalAnnotations(Simplifier.Annotation)
                     .WithTrailingTrivia(SyntaxFactory.Space))
                 .WithVariables(SyntaxFactory.SingletonSeparatedList(
-                    SyntaxFactory.VariableDeclarator(name)
+                    SyntaxFactory.VariableDeclarator(IdentifierNames.Token(name))
                         .WithInitializer(SyntaxFactory.EqualsValueClause(initializer)))))
             .WithModifiers(SyntaxFactory.TokenList(modifiers))
             .NormalizeWhitespace();
@@ -328,12 +325,5 @@ public sealed class ExtractConstantOperation : RefactoringOperationBase<ExtractC
         };
 
         return RefactoringResult.PreviewResult(operationId, pendingChanges);
-    }
-
-    private static bool IsValidIdentifier(string name)
-    {
-        if (string.IsNullOrEmpty(name)) return false;
-        if (!char.IsLetter(name[0]) && name[0] != '_') return false;
-        return name.All(c => char.IsLetterOrDigit(c) || c == '_');
     }
 }

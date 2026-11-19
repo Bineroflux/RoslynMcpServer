@@ -64,8 +64,7 @@ public sealed class ExtractBaseClassOperation : RefactoringOperationBase<Extract
         if (!File.Exists(@params.SourceFile))
             throw new RefactoringException(ErrorCodes.SourceFileNotFound, $"Source file not found: {@params.SourceFile}");
 
-        if (!IsValidIdentifier(@params.BaseClassName))
-            throw new RefactoringException(ErrorCodes.InvalidSymbolName, $"Invalid base class name: {@params.BaseClassName}");
+        IdentifierNames.Validate(@params.BaseClassName, NameKind.Type, "baseClassName", ErrorCodes.InvalidSymbolName);
 
         if (@params.TargetFile != null)
         {
@@ -122,7 +121,7 @@ public sealed class ExtractBaseClassOperation : RefactoringOperationBase<Extract
 
         // Check if base class name already exists
         var existingType = await TypeResolver.FindTypeByNameAsync(
-            $"{typeSymbol.ContainingNamespace}.{@params.BaseClassName}",
+            $"{typeSymbol.ContainingNamespace}.{IdentifierNames.ValueText(@params.BaseClassName)}",
             cancellationToken);
 
         if (existingType != null)
@@ -299,7 +298,7 @@ public sealed class ExtractBaseClassOperation : RefactoringOperationBase<Extract
             modifiers.Add(SyntaxFactory.Token(SyntaxKind.AbstractKeyword));
         }
 
-        return SeparateMembers(SyntaxFactory.ClassDeclaration(className)
+        return SeparateMembers(SyntaxFactory.ClassDeclaration(IdentifierNames.Token(className))
             .WithModifiers(SyntaxFactory.TokenList(modifiers))
             .WithMembers(SyntaxFactory.List(members))
             .NormalizeWhitespace(), "\r\n");
@@ -407,12 +406,5 @@ public sealed class ExtractBaseClassOperation : RefactoringOperationBase<Extract
         };
 
         return RefactoringResult.PreviewResult(operationId, pendingChanges);
-    }
-
-    private static bool IsValidIdentifier(string name)
-    {
-        if (string.IsNullOrEmpty(name)) return false;
-        if (!char.IsLetter(name[0]) && name[0] != '_') return false;
-        return name.All(c => char.IsLetterOrDigit(c) || c == '_');
     }
 }

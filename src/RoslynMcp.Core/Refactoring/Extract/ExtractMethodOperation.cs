@@ -1,4 +1,3 @@
-using System.Text.RegularExpressions;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -17,10 +16,6 @@ namespace RoslynMcp.Core.Refactoring.Extract;
 /// </summary>
 public sealed class ExtractMethodOperation : RefactoringOperationBase<ExtractMethodParams>
 {
-    private static readonly Regex IdentifierPattern = new(
-        @"^[A-Za-z_][A-Za-z0-9_]*$",
-        RegexOptions.Compiled);
-
     private static readonly HashSet<string> ValidVisibilities = new(StringComparer.OrdinalIgnoreCase)
     {
         "private", "internal", "protected", "public", "private protected", "protected internal"
@@ -52,15 +47,9 @@ public sealed class ExtractMethodOperation : RefactoringOperationBase<ExtractMet
         if (!File.Exists(@params.SourceFile))
             throw new RefactoringException(ErrorCodes.SourceFileNotFound, $"Source file not found: {@params.SourceFile}");
 
-        if (!IdentifierPattern.IsMatch(@params.MethodName))
-            throw new RefactoringException(ErrorCodes.InvalidNewName, $"'{@params.MethodName}' is not a valid method name.");
-
-        if (SyntaxFacts.GetKeywordKind(@params.MethodName) != SyntaxKind.None)
-            throw new RefactoringException(ErrorCodes.ReservedKeyword, $"'{@params.MethodName}' is a C# reserved keyword.");
-
         // "_" is a legal identifier, but a method named "_" captures every discard in the
         // containing type: `_ = Log(7)` and `out _` would bind to the method group.
-        if (@params.MethodName == "_")
+        if (IdentifierNames.Validate(@params.MethodName, NameKind.Member, "methodName", ErrorCodes.InvalidNewName) == "_")
             throw new RefactoringException(ErrorCodes.InvalidNewName, "'_' is not a valid method name: existing discards (_ = ... / out _) would bind to the new method.");
 
         if (@params.StartLine < 1 || @params.EndLine < 1)
@@ -117,6 +106,8 @@ public sealed class ExtractMethodOperation : RefactoringOperationBase<ExtractMet
 
         var containingType = containingMethod.Ancestors().OfType<TypeDeclarationSyntax>().FirstOrDefault()
             ?? throw new RefactoringException(ErrorCodes.InvalidSelection, "Selection must be inside a type.");
+
+        IdentifierNames.CheckNotAwaitInAsync(@params.MethodName, selectedNodes[0], "methodName");
 
         // Analyze data flow
         var dataFlowAnalysis = AnalyzeDataFlow(selectedNodes, semanticModel, cancellationToken);
@@ -623,7 +614,7 @@ public sealed class ExtractMethodOperation : RefactoringOperationBase<ExtractMet
             modifiers.Add(SyntaxFactory.Token(SyntaxKind.AsyncKeyword));
         }
 
-        var method = SyntaxFactory.MethodDeclaration(returnType, @params.MethodName)
+        var method = SyntaxFactory.MethodDeclaration(returnType, IdentifierNames.Token(@params.MethodName))
             .WithModifiers(SyntaxFactory.TokenList(modifiers))
             .WithParameterList(SyntaxFactory.ParameterList(SyntaxFactory.SeparatedList(parameters)))
             .WithBody(body)
@@ -631,7 +622,7 @@ public sealed class ExtractMethodOperation : RefactoringOperationBase<ExtractMet
 
         // Build call expression - wrap in await if method is async
         ExpressionSyntax call = SyntaxFactory.InvocationExpression(
-            SyntaxFactory.IdentifierName(@params.MethodName),
+            IdentifierNames.Name(@params.MethodName),
             SyntaxFactory.ArgumentList(SyntaxFactory.SeparatedList(arguments)));
 
         if (dataFlow.ContainsAwait)

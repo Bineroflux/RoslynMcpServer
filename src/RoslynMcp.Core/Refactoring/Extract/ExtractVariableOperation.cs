@@ -53,12 +53,9 @@ public sealed class ExtractVariableOperation : RefactoringOperationBase<ExtractV
             (@params.StartLine == @params.EndLine && @params.StartColumn >= @params.EndColumn))
             throw new RefactoringException(ErrorCodes.InvalidSelectionRange, "Selection start must be before end.");
 
-        if (!IsValidIdentifier(@params.VariableName))
-            throw new RefactoringException(ErrorCodes.InvalidSymbolName, $"Invalid variable name: {@params.VariableName}");
-
         // "_" is a legal identifier, but a local named "_" captures every later discard in
         // its scope: `_ = Log(v)` and `out _` would assign the new local instead.
-        if (@params.VariableName == "_")
+        if (IdentifierNames.Validate(@params.VariableName, NameKind.Local, "variableName", ErrorCodes.InvalidSymbolName) == "_")
             throw new RefactoringException(ErrorCodes.InvalidSymbolName, "'_' is not a valid variable name: later discards (_ = ... / out _) would bind to the new local.");
     }
 
@@ -120,13 +117,16 @@ public sealed class ExtractVariableOperation : RefactoringOperationBase<ExtractV
                 "Expression must be inside a statement.");
         }
 
+        IdentifierNames.CheckNotAwaitInAsync(@params.VariableName, containingStatement, "variableName");
+
         // Check for existing variable with same name in scope
+        var variableName = IdentifierNames.ValueText(@params.VariableName);
         var containingBlock = containingStatement.Parent as BlockSyntax;
         if (containingBlock != null)
         {
             var existingVar = containingBlock.DescendantNodes()
                 .OfType<VariableDeclaratorSyntax>()
-                .FirstOrDefault(v => v.Identifier.Text == @params.VariableName);
+                .FirstOrDefault(v => v.Identifier.ValueText == variableName);
 
             if (existingVar != null && existingVar.SpanStart < expression.SpanStart)
             {
@@ -152,14 +152,14 @@ public sealed class ExtractVariableOperation : RefactoringOperationBase<ExtractV
         var variableDeclaration = SyntaxFactory.LocalDeclarationStatement(
             SyntaxFactory.VariableDeclaration(typeSyntax.WithTrailingTrivia(SyntaxFactory.Space))
                 .WithVariables(SyntaxFactory.SingletonSeparatedList(
-                    SyntaxFactory.VariableDeclarator(@params.VariableName)
+                    SyntaxFactory.VariableDeclarator(IdentifierNames.Token(@params.VariableName))
                         .WithInitializer(SyntaxFactory.EqualsValueClause(
                             // The reference below keeps the expression's trivia; don't
                             // copy it (and any comments in it) into the declaration too.
                             expression.WithoutTrivia())))));
 
         // Create variable reference
-        var variableRef = SyntaxFactory.IdentifierName(@params.VariableName);
+        var variableRef = IdentifierNames.Name(@params.VariableName);
 
         // If preview mode, return without applying
         if (@params.Preview)
@@ -273,12 +273,5 @@ public sealed class ExtractVariableOperation : RefactoringOperationBase<ExtractV
         };
 
         return RefactoringResult.PreviewResult(operationId, pendingChanges);
-    }
-
-    private static bool IsValidIdentifier(string name)
-    {
-        if (string.IsNullOrEmpty(name)) return false;
-        if (!char.IsLetter(name[0]) && name[0] != '_') return false;
-        return name.All(c => char.IsLetterOrDigit(c) || c == '_');
     }
 }

@@ -1040,7 +1040,7 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
     /// that would bind to something else (<see cref="QualifyEnclosedNamesAsync"/>), simplifies
     /// the names marked for it once every file has its new names, and gives the documents
     /// compiling one file one text with the rewrites of all of them
-    /// (<see cref="LinkedDocuments.MergeRenamesAsync"/>: each line from the document that changed it).
+    /// (<see cref="LinkedDocuments.MergeAsync"/>: each change from the document that made it).
     /// </summary>
     private static async Task<Solution> ApplyAsync(Solution solution, Scan scan, CancellationToken cancellationToken)
     {
@@ -1066,10 +1066,10 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
             result = document.Project.Solution;
         }
 
-        result = await LinkedDocuments.MergeRenamesAsync(solution, result, preferred: null, cancellationToken);
+        result = await LinkedDocuments.MergeAsync(solution, result, preferred: null, cancellationToken);
 
-        // The merge leaves a file alone whose versions differ in their number of lines, which
-        // the rewrite never changes; should it happen anyway, the file gets its first version.
+        // Should the merge leave a file's versions apart (one the solution had no document for),
+        // the file gets its first version.
         foreach (var file in scan.Files.Where(f => f.Versions.Count > 1))
         {
             var text = await result.GetDocument(file.Versions[0].Document.Id)!.GetTextAsync(cancellationToken);

@@ -370,7 +370,7 @@ public sealed class ConvertToAsyncOperation : RefactoringOperationBase<ConvertTo
             new SymbolRenameOptions(RenameOverloads: false, RenameInStrings: false, RenameInComments: false, RenameFile: false),
             newName,
             cancellationToken);
-        renamed = await LinkedDocuments.MergeRenamesAsync(solution, renamed, document.Id, cancellationToken);
+        renamed = await LinkedDocuments.MergeAsync(solution, renamed, document.Id, cancellationToken);
 
         var renamedDocument = renamed.GetDocument(document.Id)!;
         var root = await renamedDocument.GetSyntaxRootAsync(cancellationToken);

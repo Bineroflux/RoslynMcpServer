@@ -17,10 +17,13 @@ namespace RoslynMcp.Core.Refactoring.Signature;
 /// Each member also knows how a type written in the starting member's context reads in its
 /// own context: <c>List&lt;T&gt;</c> for <c>Repository&lt;T&gt;.Get</c> is
 /// <c>List&lt;User&gt;</c> for the override in <c>UserRepository : Repository&lt;User&gt;</c>.
+/// A member of a multi-targeted project is one member with a variant per target framework
+/// (<see cref="FamilyMember.Variants"/>), each of which may be declared in another
+/// <c>#if</c> branch and have relatives of its own.
 /// </remarks>
 internal sealed class MemberFamily
 {
-    private static readonly IEqualityComparer<ITypeParameterSymbol> TypeParameterComparer = SymbolEqualityComparer.Default;
+    private static readonly IEqualityComparer<ITypeParameterSymbol> TypeParameterComparer = TypeParameterIdentity.Instance;
 
     private MemberFamily(IReadOnlyList<FamilyMember> members) => Members = members;
 
@@ -30,14 +33,17 @@ internal sealed class MemberFamily
     /// <summary>Whether <paramref name="symbol"/>, from any compilation of the solution, is a member.</summary>
     public bool Contains(ISymbol symbol) => Members.Any(member => Same(member.Symbol, symbol));
 
-    /// <summary>The references to every member, each location once.</summary>
+    /// <summary>
+    /// The references to every member, each location once; in a file compiled once per target
+    /// framework, once in each framework's document that compiles it.
+    /// </summary>
     public async Task<IReadOnlyList<ReferenceLocation>> FindReferencesAsync(Solution solution, CancellationToken cancellationToken)
     {
         var locations = new List<ReferenceLocation>();
         var seen = new HashSet<(DocumentId, Microsoft.CodeAnalysis.Text.TextSpan)>();
-        foreach (var member in Members)
+        foreach (var variant in Members.SelectMany(m => m.Variants))
         {
-            foreach (var location in (await SymbolFinder.FindReferencesAsync(member.Symbol, solution, cancellationToken))
+            foreach (var location in (await SymbolFinder.FindReferencesAsync(variant, solution, cancellationToken))
                 .SelectMany(r => r.Locations))
             {
                 if (seen.Add((location.Document.Id, location.Location.SourceSpan)))
@@ -59,7 +65,7 @@ internal sealed class MemberFamily
         var documents = new HashSet<DocumentId>(references.Select(r => r.Document.Id));
         foreach (var member in Members)
         {
-            foreach (var declaration in member.Declarations.Concat(member.Symbol.ContainingType.DeclaringSyntaxReferences))
+            foreach (var declaration in member.Declarations.Concat(member.Variants.SelectMany(v => v.ContainingType.DeclaringSyntaxReferences)))
             {
                 if (solution.GetDocument(declaration.SyntaxTree) is { } document)
                     documents.Add(document.Id);
@@ -85,7 +91,7 @@ internal sealed class MemberFamily
         CancellationToken cancellationToken)
     {
         target = Normalize(target);
-        var (maps, unchangeable) = await CollectAsync(target, compilation, solution, cancellationToken);
+        var (maps, variants, unchangeable) = await CollectAsync(target, compilation, solution, cancellationToken);
 
         if (unchangeable.Count > 0)
         {
@@ -96,7 +102,7 @@ internal sealed class MemberFamily
         }
 
         var members = maps
-            .Select(entry => new FamilyMember(entry.Key, Declarations(entry.Key), entry.Value, compilation))
+            .Select(entry => new FamilyMember(entry.Key, variants[entry.Key], entry.Value, compilation))
             .OrderBy(member => member.Declarations[0].SyntaxTree.FilePath, StringComparer.OrdinalIgnoreCase)
             .ThenBy(member => member.Declarations[0].Span.Start)
             .ToList();
@@ -117,15 +123,20 @@ internal sealed class MemberFamily
         CancellationToken cancellationToken)
     {
         target = Normalize(target);
-        var (maps, _) = await CollectAsync(target, compilation, solution, cancellationToken);
+        var (maps, _, _) = await CollectAsync(target, compilation, solution, cancellationToken);
         return maps.Keys.Where(member => !Same(member, target)).ToList();
     }
 
     /// <summary>
-    /// Walks the family from <paramref name="target"/>: every member found, with its type map,
-    /// and the members that cannot be changed (not expanded further).
+    /// Walks the family from <paramref name="target"/>: every member found, with its type map
+    /// and its variants (the member in each target framework compiling it), and the members
+    /// that cannot be changed (not expanded further). The relatives of every variant are
+    /// followed, so an override that only one framework compiles is found too.
     /// </summary>
-    private static async Task<(Dictionary<ISymbol, Dictionary<ITypeParameterSymbol, ITypeSymbol>> Maps, SortedSet<string> Unchangeable)> CollectAsync(
+    private static async Task<(
+        Dictionary<ISymbol, Dictionary<ITypeParameterSymbol, ITypeSymbol>> Maps,
+        Dictionary<ISymbol, IReadOnlyList<ISymbol>> Variants,
+        SortedSet<string> Unchangeable)> CollectAsync(
         ISymbol target,
         Compilation compilation,
         Solution solution,
@@ -135,6 +146,7 @@ internal sealed class MemberFamily
         {
             [target] = VisibleTypeParameters(target).ToDictionary(t => t, t => (ITypeSymbol)t, TypeParameterComparer)
         };
+        var variants = new Dictionary<ISymbol, IReadOnlyList<ISymbol>>(MemberIdentity.Instance);
         var queue = new Queue<ISymbol>([target]);
         var unchangeable = new SortedSet<string>(StringComparer.Ordinal);
 
@@ -147,24 +159,71 @@ internal sealed class MemberFamily
                 continue;
             }
 
-            foreach (var (neighbor, edge) in await RelatedAsync(node, solution, cancellationToken))
+            variants[node] = await VariantsAsync(node, solution, cancellationToken);
+            foreach (var variant in variants[node])
             {
-                if (maps.ContainsKey(neighbor))
-                    continue;
-
-                var map = new Dictionary<ITypeParameterSymbol, ITypeSymbol>(TypeParameterComparer);
-                foreach (var (parameter, type) in maps[node])
+                foreach (var (neighbor, edge) in await RelatedAsync(variant, solution, cancellationToken))
                 {
-                    if (Substitute(type, edge, compilation) is { } mapped)
-                        map[parameter] = mapped;
-                }
+                    if (maps.ContainsKey(neighbor))
+                        continue;
 
-                maps[neighbor] = map;
-                queue.Enqueue(neighbor);
+                    // A variant's type parameters are the node's (TypeParameterIdentity compares
+                    // them across compilations), so the node's map goes through its edges.
+                    var map = new Dictionary<ITypeParameterSymbol, ITypeSymbol>(TypeParameterComparer);
+                    foreach (var (parameter, type) in maps[node])
+                    {
+                        if (Substitute(type, edge, compilation) is { } mapped)
+                            map[parameter] = mapped;
+                    }
+
+                    maps[neighbor] = map;
+                    queue.Enqueue(neighbor);
+                }
             }
         }
 
-        return (maps, unchangeable);
+        return (maps, variants, unchangeable);
+    }
+
+    /// <summary>
+    /// <paramref name="member"/> as each project compiling its files sees it: the member
+    /// itself first, then, in a multi-targeted project, the same declaration in each other
+    /// target framework (declared at the same place, or in another <c>#if</c> branch).
+    /// </summary>
+    private static async Task<IReadOnlyList<ISymbol>> VariantsAsync(ISymbol member, Solution solution, CancellationToken cancellationToken)
+    {
+        var variants = new List<ISymbol> { member };
+        if (member.GetDocumentationCommentId() is not { } id)
+            return variants;
+
+        var own = new HashSet<ProjectId>();
+        var others = new HashSet<ProjectId>();
+        foreach (var declaration in Declarations(member))
+        {
+            if (solution.GetDocument(declaration.SyntaxTree) is not { FilePath: { } path } document)
+                continue;
+
+            own.Add(document.Project.Id);
+            others.UnionWith(solution.GetDocumentIdsWithFilePath(path).Select(linked => linked.ProjectId));
+        }
+
+        others.ExceptWith(own);
+        foreach (var project in others.Select(solution.GetProject).OfType<Project>())
+        {
+            if (await project.GetCompilationAsync(cancellationToken) is not { } compilation)
+                continue;
+
+            foreach (var candidate in DocumentationCommentId.GetSymbolsForDeclarationId(id, compilation))
+            {
+                if (candidate.Kind == member.Kind &&
+                    SymbolEqualityComparer.Default.Equals(candidate.ContainingAssembly, compilation.Assembly))
+                {
+                    variants.Add(Normalize(candidate));
+                }
+            }
+        }
+
+        return variants;
     }
 
     /// <summary>
@@ -466,7 +525,7 @@ internal sealed class MemberFamily
     }
 
     /// <summary>The declarations of <paramref name="member"/>, both parts of a partial member included.</summary>
-    private static IReadOnlyList<SyntaxReference> Declarations(ISymbol member)
+    internal static IReadOnlyList<SyntaxReference> Declarations(ISymbol member)
     {
         ISymbol? implementationPart = member switch
         {
@@ -550,6 +609,35 @@ internal sealed class MemberFamily
                 : SymbolEqualityComparer.Default.GetHashCode(Normalize(symbol));
     }
 
+    /// <summary>
+    /// Equality of type parameters across compilations: the same symbol, or the type parameter
+    /// at the same position of the same declaration (in each target framework of a
+    /// multi-targeted project).
+    /// </summary>
+    private sealed class TypeParameterIdentity : IEqualityComparer<ITypeParameterSymbol>
+    {
+        public static readonly TypeParameterIdentity Instance = new();
+
+        public bool Equals(ITypeParameterSymbol? left, ITypeParameterSymbol? right)
+        {
+            if (SymbolEqualityComparer.Default.Equals(left, right))
+                return true;
+
+            return left != null && right != null &&
+                left.Ordinal == right.Ordinal &&
+                left.TypeParameterKind == right.TypeParameterKind &&
+                left.Name == right.Name &&
+                Owner(left) is { } leftOwner && Owner(right) is { } rightOwner &&
+                MemberIdentity.Instance.Equals(leftOwner, rightOwner);
+        }
+
+        public int GetHashCode(ITypeParameterSymbol parameter) =>
+            HashCode.Combine(parameter.Ordinal, parameter.TypeParameterKind, StringComparer.Ordinal.GetHashCode(parameter.Name));
+
+        private static ISymbol? Owner(ITypeParameterSymbol parameter) =>
+            (ISymbol?)parameter.DeclaringMethod ?? parameter.DeclaringType;
+    }
+
     private static ISymbol? Overridden(ISymbol member) => member switch
     {
         IMethodSymbol method => method.OverriddenMethod,
@@ -584,12 +672,13 @@ internal sealed class FamilyMember
 
     internal FamilyMember(
         ISymbol symbol,
-        IReadOnlyList<SyntaxReference> declarations,
+        IReadOnlyList<ISymbol> variants,
         IReadOnlyDictionary<ITypeParameterSymbol, ITypeSymbol> typeMap,
         Compilation compilation)
     {
         Symbol = symbol;
-        Declarations = declarations;
+        Variants = variants;
+        Declarations = variants.SelectMany(MemberFamily.Declarations).ToList();
         _typeMap = typeMap;
         _compilation = compilation;
     }
@@ -597,7 +686,16 @@ internal sealed class FamilyMember
     /// <summary>The member (the defining part of a partial member).</summary>
     public ISymbol Symbol { get; }
 
-    /// <summary>Its declarations: one, or both parts of a partial member.</summary>
+    /// <summary>
+    /// The member in each target framework that compiles it, <see cref="Symbol"/> first: one,
+    /// or one per framework of a multi-targeted project.
+    /// </summary>
+    public IReadOnlyList<ISymbol> Variants { get; }
+
+    /// <summary>
+    /// Its declarations: one, or both parts of a partial member, in the document of each
+    /// target framework that compiles it.
+    /// </summary>
     public IReadOnlyList<SyntaxReference> Declarations { get; }
 
     /// <summary>

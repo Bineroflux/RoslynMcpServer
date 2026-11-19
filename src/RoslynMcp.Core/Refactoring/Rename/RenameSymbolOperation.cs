@@ -96,7 +96,7 @@ public sealed class RenameSymbolOperation : RefactoringOperationBase<RenameSymbo
             options,
             @params.NewName,
             cancellationToken);
-        newSolution = await LinkedDocuments.MergeRenamesAsync(Context.Solution, newSolution, document.Id, cancellationToken);
+        newSolution = await LinkedDocuments.MergeAsync(Context.Solution, newSolution, document.Id, cancellationToken);
 
         // Handle file rename for types. The document is repointed at its new path
         // *before* the commit, so the commit writes the renamed source straight to the

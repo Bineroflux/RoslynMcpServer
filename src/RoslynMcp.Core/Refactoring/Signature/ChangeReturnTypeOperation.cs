@@ -5,6 +5,7 @@ using RoslynMcp.Contracts.Errors;
 using RoslynMcp.Contracts.Models;
 using RoslynMcp.Core.FileSystem;
 using RoslynMcp.Core.Refactoring.Base;
+using RoslynMcp.Core.Refactoring.Utilities;
 using RoslynMcp.Core.Workspace;
 
 namespace RoslynMcp.Core.Refactoring.Signature;
@@ -14,6 +15,7 @@ namespace RoslynMcp.Core.Refactoring.Signature;
 /// override / implementation family (see <see cref="MemberFamily"/>). Only the declarations
 /// change: return statements, bodies and callers are left alone, and the compiler errors that
 /// this causes, in any project that compiles or depends on what changed, are reported as warnings.
+/// A file compiled once per target framework gets the declarations of every framework changed.
 /// </summary>
 /// <remarks>
 /// <c>void</c> is allowed in both directions for methods (a method that now returns a value
@@ -65,29 +67,26 @@ public sealed class ChangeReturnTypeOperation : RefactoringOperationBase<ChangeR
         ChangeReturnTypeParams @params,
         CancellationToken cancellationToken)
     {
-        var document = GetDocumentOrThrow(@params.SourceFile);
-        var root = await document.GetSyntaxRootAsync(cancellationToken);
-        var semanticModel = await document.GetSemanticModelAsync(cancellationToken);
-        if (root == null || semanticModel == null)
-            throw new RefactoringException(ErrorCodes.RoslynError, "Could not parse file.");
-
         var name = @params.MemberName.Trim();
         var isIndexer = name is "this" or "this[]";
-        var declaration = SignatureSyntax.SelectDeclaration(
-            root.DescendantNodes().OfType<MemberDeclarationSyntax>()
+        var (document, declaration) = await SignatureSyntax.SelectDeclarationAsync(
+            GetDocumentOrThrow(@params.SourceFile),
+            root => root.DescendantNodes().OfType<MemberDeclarationSyntax>()
                 .Where(m => m switch
                 {
                     MethodDeclarationSyntax method => method.Identifier.Text == name,
                     PropertyDeclarationSyntax property => property.Identifier.Text == name,
                     IndexerDeclarationSyntax => isIndexer,
                     _ => false
-                })
-                .ToList(),
+                }),
             "member",
             name,
             @params.Line,
             Identifier,
-            ErrorCodes.MemberNotFound);
+            ErrorCodes.MemberNotFound,
+            cancellationToken);
+        var semanticModel = await document.GetSemanticModelAsync(cancellationToken)
+            ?? throw new RefactoringException(ErrorCodes.RoslynError, "Could not parse file.");
 
         var symbol = semanticModel.GetDeclaredSymbol(declaration, cancellationToken)
             ?? throw new RefactoringException(ErrorCodes.RoslynError, "Could not resolve the member.");
@@ -124,7 +123,9 @@ public sealed class ChangeReturnTypeOperation : RefactoringOperationBase<ChangeR
         var family = await MemberFamily.FindAsync(symbol, semanticModel.Compilation, solution, cancellationToken);
         var edits = new SyntaxEdits();
         var declarations = new List<(Document Document, SyntaxNode Declaration, TypeSyntax OldType, SyntaxAnnotation Annotation)>();
+        var places = new SourcePlaces();
 
+        // Each declaration is changed in the document of every target framework compiling it.
         foreach (var member in family.Members)
         {
             foreach (var reference in member.Declarations)
@@ -145,13 +146,18 @@ public sealed class ChangeReturnTypeOperation : RefactoringOperationBase<ChangeR
                     .WithAdditionalAnnotations(annotation);
 
                 edits.Add(declaringDocument.Id, oldType, _ => written);
-                declarations.Add((declaringDocument, node, oldType, annotation));
+                if (places.Add(declaringDocument, node.Span))
+                    declarations.Add((declaringDocument, node, oldType, annotation));
             }
         }
 
         var affected = family.AffectedDocuments(solution, await family.FindReferencesAsync(solution, cancellationToken));
-        var newSolution = await edits.ApplyAsync(solution, cancellationToken);
-        var warnings = await IntroducedErrors.FindInProjectsAsync(solution, newSolution, affected, cancellationToken);
+        var applied = await edits.ApplyAsync(solution, cancellationToken);
+        var conflicts = new List<string>();
+        var newSolution = await LinkedDocuments.MergeAsync(solution, applied, document.Id, cancellationToken, conflicts);
+        var warnings = MergeWarnings(
+            conflicts.Count == 0 ? null : conflicts,
+            await IntroducedErrors.FindInProjectsAsync(solution, newSolution, affected, cancellationToken) ?? []);
 
         if (@params.Preview)
         {
@@ -161,7 +167,7 @@ public sealed class ChangeReturnTypeOperation : RefactoringOperationBase<ChangeR
                 Success = true,
                 OperationId = operationId,
                 Preview = true,
-                PendingChanges = await CreatePendingChangesAsync(newSolution, declarations, cancellationToken),
+                PendingChanges = await CreatePendingChangesAsync(applied, declarations, cancellationToken),
                 Warnings = warnings
             };
         }

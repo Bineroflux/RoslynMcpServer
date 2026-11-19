@@ -1,7 +1,9 @@
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using Microsoft.CodeAnalysis.Text;
 using RoslynMcp.Contracts.Errors;
+using RoslynMcp.Core.FileSystem;
 using RoslynMcp.Core.Refactoring.Utilities;
 
 namespace RoslynMcp.Core.Refactoring.Signature;
@@ -53,6 +55,54 @@ internal static class SignatureSyntax
     private static int StartLine(SyntaxNode node) => node.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
 
     /// <summary>
+    /// The declaration <see cref="SelectDeclaration"/> picks in <paramref name="first"/>, or,
+    /// when it has none, in the first other document of its file (another target framework,
+    /// for a member declared in an <c>#if</c> branch only that one compiles), with its document.
+    /// </summary>
+    /// <param name="first">The document the request names.</param>
+    /// <param name="candidates">The declarations with the requested name in a document's syntax root.</param>
+    /// <param name="kind">As for <see cref="SelectDeclaration"/>.</param>
+    /// <param name="name">As for <see cref="SelectDeclaration"/>.</param>
+    /// <param name="line">As for <see cref="SelectDeclaration"/>.</param>
+    /// <param name="identifier">As for <see cref="SelectDeclaration"/>.</param>
+    /// <param name="notFoundCode">As for <see cref="SelectDeclaration"/>.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    public static async Task<(Document Document, TNode Declaration)> SelectDeclarationAsync<TNode>(
+        Document first,
+        Func<SyntaxNode, IEnumerable<TNode>> candidates,
+        string kind,
+        string name,
+        int? line,
+        Func<TNode, SyntaxToken> identifier,
+        string notFoundCode,
+        CancellationToken cancellationToken)
+        where TNode : SyntaxNode
+    {
+        var solution = first.Project.Solution;
+        var documents = first.FilePath == null
+            ? [first]
+            : solution.GetDocumentIdsWithFilePath(first.FilePath).Where(id => id != first.Id).Select(solution.GetDocument).OfType<Document>().Prepend(first);
+
+        RefactoringException? notFound = null;
+        foreach (var document in documents)
+        {
+            if (await document.GetSyntaxRootAsync(cancellationToken) is not { } root)
+                continue;
+
+            try
+            {
+                return (document, SelectDeclaration(candidates(root).ToList(), kind, name, line, identifier, notFoundCode));
+            }
+            catch (RefactoringException ex) when (ex.ErrorCode == notFoundCode)
+            {
+                notFound ??= ex;
+            }
+        }
+
+        throw notFound ?? new RefactoringException(ErrorCodes.RoslynError, "Could not parse file.");
+    }
+
+    /// <summary>
     /// The type <paramref name="text"/> names at <paramref name="position"/>, or null when it
     /// does not parse as a type or does not resolve to one there.
     /// </summary>
@@ -99,6 +149,29 @@ internal static class SignatureSyntax
             "parameter that has no counterpart there. Start from the member whose type parameters it uses.");
 
         return SyntaxGenerationHelper.CreateTypeSyntax(translated, model.GetNullableContext(position).AnnotationsEnabled());
+    }
+}
+
+/// <summary>
+/// Places in source files, each counted once although a file that several projects compile
+/// (one per target framework) has a document, and so a reference or declaration, in each.
+/// </summary>
+internal sealed class SourcePlaces
+{
+    private readonly Dictionary<string, (DocumentId First, HashSet<TextSpan> Spans)> _files = new(PathResolver.PathComparer);
+
+    /// <summary>Adds a place; false when it was added before, through any document of its file.</summary>
+    public bool Add(Document document, TextSpan span) => File(document).Spans.Add(span);
+
+    /// <summary>The first document of <paramref name="document"/>'s file this was given.</summary>
+    public DocumentId FirstDocument(Document document) => File(document).First;
+
+    private (DocumentId First, HashSet<TextSpan> Spans) File(Document document)
+    {
+        var key = document.FilePath is { } path ? PathResolver.NormalizePath(path) : document.Id.Id.ToString();
+        if (!_files.TryGetValue(key, out var file))
+            _files[key] = file = (document.Id, []);
+        return file;
     }
 }
 

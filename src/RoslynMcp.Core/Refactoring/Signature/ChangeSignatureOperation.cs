@@ -28,12 +28,14 @@ namespace RoslynMcp.Core.Refactoring.Signature;
 /// arguments at the calls); otherwise each member keeps its own name. A kept parameter keeps its
 /// own type, default value, modifiers and attributes unless the request changes them. The
 /// compiler errors the change leaves, in any project that compiles or depends on what changed,
-/// are reported as warnings.
+/// are reported as warnings. A file compiled once per target framework is changed in each
+/// framework's document (its own <c>#if</c> branches) and gets the changes of all of them.
 /// </remarks>
 public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSignatureParams>
 {
     private const string ParameterListAnnotationKind = "RoslynMcp.ChangeSignature.ParameterList";
-    private const string PlaceholderAnnotationKind = "RoslynMcp.ChangeSignature.Placeholder";
+    private const string PlaceholderPrefix = "/* TODO: ";
+    private const string PlaceholderSuffix = " */";
 
     /// <summary>
     /// Creates a new change signature operation.
@@ -96,22 +98,17 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
         ChangeSignatureParams @params,
         CancellationToken cancellationToken)
     {
-        var document = GetDocumentOrThrow(@params.SourceFile);
-        var root = await document.GetSyntaxRootAsync(cancellationToken);
-        var semanticModel = await document.GetSemanticModelAsync(cancellationToken);
-
-        if (root == null || semanticModel == null)
-        {
-            throw new RefactoringException(ErrorCodes.RoslynError, "Could not parse file.");
-        }
-
-        var methodDecl = SignatureSyntax.SelectDeclaration(
-            root.DescendantNodes().OfType<MethodDeclarationSyntax>().Where(m => m.Identifier.Text == @params.MethodName).ToList(),
+        var (document, methodDecl) = await SignatureSyntax.SelectDeclarationAsync(
+            GetDocumentOrThrow(@params.SourceFile),
+            root => root.DescendantNodes().OfType<MethodDeclarationSyntax>().Where(m => m.Identifier.Text == @params.MethodName),
             "method",
             @params.MethodName,
             @params.Line,
             m => m.Identifier,
-            ErrorCodes.MethodNotFound);
+            ErrorCodes.MethodNotFound,
+            cancellationToken);
+        var semanticModel = await document.GetSemanticModelAsync(cancellationToken)
+            ?? throw new RefactoringException(ErrorCodes.RoslynError, "Could not parse file.");
 
         var methodSymbol = semanticModel.GetDeclaredSymbol(methodDecl, cancellationToken)
             ?? throw new RefactoringException(ErrorCodes.RoslynError, "Could not resolve method symbol.");
@@ -141,7 +138,10 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
         var family = await MemberFamily.FindAsync(methodSymbol, semanticModel.Compilation, solution, cancellationToken);
         var edits = new SyntaxEdits();
         var declarations = new List<(Document Document, MethodDeclarationSyntax Declaration, SyntaxAnnotation Annotation, IMethodSymbol Symbol)>();
+        var places = new SourcePlaces();
 
+        // Each declaration is changed in the document of every target framework compiling it, so
+        // the uses of a renamed parameter in each framework's #if branches are renamed too.
         foreach (var member in family.Members)
         {
             foreach (var reference in member.Declarations)
@@ -176,28 +176,39 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
                 edits.Add(declaringDocument.Id, declaration.ParameterList, rewritten =>
                     BuildParameterList((ParameterListSyntax)rewritten, newParameters, renames, types, isExplicit)
                         .WithAdditionalAnnotations(annotation));
-                declarations.Add((declaringDocument, declaration, annotation, declared));
+                if (places.Add(declaringDocument, declaration.Span))
+                    declarations.Add((declaringDocument, declaration, annotation, declared));
 
                 AddParameterRenames(edits, declaringDocument.Id, declaration, model, declared, renames, cancellationToken);
             }
         }
 
+        // A call that several target frameworks compile is rewritten in each one's document and
+        // counted once, for the file's first document.
         var references = await family.FindReferencesAsync(solution, cancellationToken);
         var callSites = new Dictionary<DocumentId, int>();
         foreach (var location in references.Where(l => !l.IsImplicit))
         {
-            if (await TryAddCallSiteAsync(edits, location, family, newParameters, renames, cancellationToken))
-                callSites[location.Document.Id] = callSites.GetValueOrDefault(location.Document.Id) + 1;
+            if (await TryAddCallSiteAsync(edits, location, family, newParameters, renames, cancellationToken) &&
+                places.Add(location.Document, location.Location.SourceSpan))
+            {
+                var file = places.FirstDocument(location.Document);
+                callSites[file] = callSites.GetValueOrDefault(file) + 1;
+            }
         }
 
-        var newSolution = await edits.ApplyAsync(solution, cancellationToken);
+        // Each target framework's document of a file has the edits of its own #if branches; the
+        // file gets them all.
+        var applied = await edits.ApplyAsync(solution, cancellationToken);
+        var conflicts = new List<string>();
+        var newSolution = await LinkedDocuments.MergeAsync(solution, applied, document.Id, cancellationToken, conflicts);
 
         // What only a person can fix: method groups converted to delegates, a removed parameter
         // the body still uses, the TODO placeholders passed for parameters without a default value.
         var errors = await IntroducedErrors.FindInProjectsAsync(
             solution, newSolution, family.AffectedDocuments(solution, references), cancellationToken);
-        var placeholders = await FindPlaceholdersAsync(newSolution, callSites.Keys, cancellationToken);
-        var warnings = errors == null && placeholders.Count == 0 ? null : (errors ?? []).Concat(placeholders).ToList();
+        var placeholders = await FindPlaceholdersAsync(solution, newSolution, callSites.Keys, cancellationToken);
+        var warnings = conflicts.Concat(errors ?? []).Concat(placeholders).ToList();
 
         if (@params.Preview)
         {
@@ -207,8 +218,8 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
                 Success = true,
                 OperationId = operationId,
                 Preview = true,
-                PendingChanges = await CreatePendingChangesAsync(newSolution, declarations, callSites, cancellationToken),
-                Warnings = warnings
+                PendingChanges = await CreatePendingChangesAsync(applied, declarations, callSites, cancellationToken),
+                Warnings = warnings.Count == 0 ? null : warnings
             };
         }
 
@@ -232,7 +243,7 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
                 Kind = Contracts.Enums.SymbolKind.Method
             },
             ReferencesUpdated = callSites.Values.Sum(),
-            Warnings = warnings
+            Warnings = warnings.Count == 0 ? null : warnings
         };
     }
 
@@ -936,8 +947,7 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
                 ? SyntaxFactory.Argument(SyntaxFactory.ParseExpression(parameter.NewDefault))
                 : parameter.OriginalIndex is { } kept && oldDefaults.TryGetValue(kept, out var oldDefault)
                     ? SyntaxFactory.Argument(oldDefault)
-                    : SyntaxFactory.Argument(SyntaxFactory.ParseExpression($"default /* TODO: {NameAt(position)} */"))
-                        .WithAdditionalAnnotations(new SyntaxAnnotation(PlaceholderAnnotationKind, NameAt(position)));
+                    : SyntaxFactory.Argument(SyntaxFactory.ParseExpression($"default {PlaceholderPrefix}{NameAt(position)}{PlaceholderSuffix}"));
             var inPositionPrefix = entries.TakeWhile((e, i) => e.Argument.NameColon == null && e.Position == i).Count();
             entries.Insert(position <= inPositionPrefix ? position : entries.Count, new CallArgument(argument, position, IsNew: true));
         }
@@ -948,6 +958,12 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
         for (var i = 0; i < entries.Count; i++)
         {
             var (argument, position, isNew) = entries[i];
+
+            // A new argument is laid out like the call's last one (its own line, indented, in
+            // a call that puts each argument on a line), or like the first when it comes first.
+            if (isNew && original.Arguments.Count > 0)
+                argument = argument.WithLeadingTrivia(original.Arguments[i == 0 ? 0 : ^1].GetLeadingTrivia());
+
             var expandedParams = (i > 0 && entries[i - 1].Position == position) ||
                 (i + 1 < entries.Count && entries[i + 1].Position == position);
             var inPosition = position == i || (i > 0 && entries[i - 1].Position == position);
@@ -967,23 +983,29 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
         return original.WithArguments(SyntaxFactory.SeparatedList(arguments, Separators(original.Arguments, arguments.Count)));
     }
 
-    /// <summary>The <c>TODO</c> placeholders the calls now pass, as <c>path(line,column): TODO: ...</c>.</summary>
+    /// <summary>
+    /// The <c>TODO</c> placeholders the calls now pass, as <c>path(line,column): TODO: ...</c>:
+    /// the <c>default /* TODO: name */</c> arguments of each file that it did not have before.
+    /// They are found by their text, in the document of every target framework (a file compiled
+    /// for several is merged into new text, with placeholders in each one's <c>#if</c> branches).
+    /// </summary>
     private static async Task<List<string>> FindPlaceholdersAsync(
-        Solution solution,
+        Solution before,
+        Solution after,
         IEnumerable<DocumentId> documents,
         CancellationToken cancellationToken)
     {
         var placeholders = new List<(string Path, int Line, int Column, string Text)>();
         foreach (var id in documents)
         {
-            if (await solution.GetDocument(id)!.GetSyntaxRootAsync(cancellationToken) is not { } root)
-                continue;
-
-            foreach (var argument in root.GetAnnotatedNodes(PlaceholderAnnotationKind))
+            var existing = (await PlaceholdersAsync(before, id, cancellationToken)).Values.Select(p => p.Name).ToList();
+            foreach (var (argument, name) in (await PlaceholdersAsync(after, id, cancellationToken)).Values.OrderBy(p => p.Argument.SpanStart))
             {
+                if (existing.Remove(name))
+                    continue;
+
                 var span = argument.GetLocation().GetLineSpan();
                 var (line, column) = (span.StartLinePosition.Line + 1, span.StartLinePosition.Character + 1);
-                var name = argument.GetAnnotations(PlaceholderAnnotationKind).First().Data;
                 placeholders.Add((span.Path, line, column,
                     $"{span.Path}({line},{column}): TODO: replace the placeholder 'default' passed for parameter '{name}'"));
             }
@@ -995,6 +1017,40 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
             .ThenBy(p => p.Column)
             .Select(p => p.Text)
             .ToList();
+    }
+
+    /// <summary>
+    /// The placeholder arguments in the file of document <paramref name="id"/>, by position,
+    /// in the documents of all its target frameworks; none when the solution lacks the document.
+    /// </summary>
+    private static async Task<Dictionary<int, (ArgumentSyntax Argument, string Name)>> PlaceholdersAsync(
+        Solution solution,
+        DocumentId id,
+        CancellationToken cancellationToken)
+    {
+        var found = new Dictionary<int, (ArgumentSyntax, string)>();
+        if (solution.GetDocument(id) is not { } document)
+            return found;
+
+        var ids = document.FilePath == null ? [id] : solution.GetDocumentIdsWithFilePath(document.FilePath);
+        foreach (var linked in ids)
+        {
+            if (await solution.GetDocument(linked)!.GetSyntaxRootAsync(cancellationToken) is not { } root)
+                continue;
+
+            foreach (var argument in root.DescendantNodes().OfType<ArgumentSyntax>())
+            {
+                if (argument.Expression is LiteralExpressionSyntax { RawKind: (int)SyntaxKind.DefaultLiteralExpression } literal &&
+                    literal.Token.TrailingTrivia.FirstOrDefault(t => t.IsKind(SyntaxKind.MultiLineCommentTrivia)).ToString() is var comment &&
+                    comment.StartsWith(PlaceholderPrefix, StringComparison.Ordinal) &&
+                    comment.EndsWith(PlaceholderSuffix, StringComparison.Ordinal))
+                {
+                    found.TryAdd(argument.SpanStart, (argument, comment[PlaceholderPrefix.Length..^PlaceholderSuffix.Length]));
+                }
+            }
+        }
+
+        return found;
     }
 
     private static ArgumentSyntax WithName(ArgumentSyntax argument, string name) =>

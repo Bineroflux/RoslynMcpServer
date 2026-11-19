@@ -34,10 +34,11 @@ public sealed class ChangeSignatureCallSiteTests
         using var ws = TestWorkspace.Create(("Pair.cs", Pairs));
         var before = Run(ws, "App.Pair", "Use");
 
-        var result = await ChangeAsync(ws, "Pair.cs", "Make", Keep("a"), Keep("b"), Add("c", "int", "0"));
+        // Without a default value the new parameter has to be passed: a placeholder, by name.
+        var result = await ChangeAsync(ws, "Pair.cs", "Make", new ParameterChange { Name = "c", Type = "int" });
 
         Assert.True(result.Success, result.Error?.Message);
-        Assert.Contains("public static string Use() => Make(b: Next(), a: Next(), c: 0);", ws.ReadFile("Pair.cs"));
+        Assert.Contains("public static string Use() => Make(b: Next(), a: Next(), c: default /* TODO: c */);", ws.ReadFile("Pair.cs"));
         Assert.Equal("2,1", before);
         Assert.Equal(before, Run(ws, "App.Pair", "Use"));
     }
@@ -62,7 +63,7 @@ public sealed class ChangeSignatureCallSiteTests
         using var ws = TestWorkspace.Create(("Triple.cs", source));
 
         var result = await ChangeAsync(ws, "Triple.cs", "Make",
-            Keep("a"), new ParameterChange { OriginalName = "c", Name = "last" });
+            Remove("b"), new ParameterChange { OriginalName = "c", Name = "last" });
 
         Assert.True(result.Success, result.Error?.Message);
         var text = ws.ReadFile("Triple.cs");
@@ -132,10 +133,11 @@ public sealed class ChangeSignatureCallSiteTests
     {
         using var ws = TestWorkspace.Create(("Measure.cs", Measures));
 
-        var result = await ChangeAsync(ws, "Measure.cs", "Measure", line: 7, Keep("a"), Keep("b"), Add("c", "int", "0"));
+        var result = await ChangeAsync(ws, "Measure.cs", "Measure", line: 7, Add("c", "int", "0"));
 
         Assert.True(result.Success, result.Error?.Message);
-        Assert.Contains("measure.Measure(1, 2, 0)", ws.ReadFile("Measure.cs"));
+        Assert.Contains("double Measure(int a, int b, int c = 0);", ws.ReadFile("Measure.cs"));
+        Assert.Contains("measure.Measure(1, 2)", ws.ReadFile("Measure.cs"));
         var warning = Assert.Single(result.Warnings!);
         Assert.Contains("Measure.cs(17,", warning);
         Assert.Contains("error CS0123", warning);
@@ -147,7 +149,7 @@ public sealed class ChangeSignatureCallSiteTests
     {
         using var ws = TestWorkspace.Create(("Measure.cs", Measures));
 
-        var result = await ChangeAsync(ws, "Measure.cs", "Measure", line: 7, preview: true, Keep("a"));
+        var result = await ChangeAsync(ws, "Measure.cs", "Measure", line: 7, preview: true, Remove("b"));
 
         Assert.True(result.Preview);
         Assert.Equal(Measures, ws.ReadFile("Measure.cs"));
@@ -197,6 +199,8 @@ public sealed class ChangeSignatureCallSiteTests
             TestContext.Current.CancellationToken);
 
     private static ParameterChange Keep(string name) => new() { OriginalName = name, Name = name };
+
+    private static ParameterChange Remove(string name) => new() { OriginalName = name, Remove = true };
 
     private static ParameterChange Add(string name, string type, string defaultValue) =>
         new() { Name = name, Type = type, DefaultValue = defaultValue };

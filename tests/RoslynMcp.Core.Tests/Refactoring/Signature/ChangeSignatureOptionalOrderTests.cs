@@ -50,8 +50,7 @@ public sealed class ChangeSignatureOptionalOrderTests
         using var ws = TestWorkspace.Create(("Calc.cs", Source));
 
         var result = await ChangeAsync(ws, "Sum",
-            new() { OriginalName = "b", Name = "b" },
-            new() { OriginalName = "a", Name = "a", DefaultValue = "0" });
+            new ParameterChange { OriginalName = "a", DefaultValue = "0", NewPosition = 1 });
 
         Assert.True(result.Success, result.Error?.Message);
         Assert.Contains("public int Sum(int b, int a = 0) => a + b;", ws.ReadFile("Calc.cs"));

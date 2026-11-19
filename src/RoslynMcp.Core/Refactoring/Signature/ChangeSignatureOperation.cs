@@ -18,12 +18,14 @@ namespace RoslynMcp.Core.Refactoring.Signature;
 /// updates the calls to all of them.
 /// </summary>
 /// <remarks>
-/// Parameters correspond by position across the family, since an override may name them
-/// differently. A rename in the request renames the parameter at that position in every member
-/// (and its uses in the body and named arguments at the calls); otherwise each member keeps its
-/// own name. A kept parameter keeps its own type, modifiers and attributes unless the request
-/// gives a type. The compiler errors the change leaves in the affected documents are reported
-/// as warnings.
+/// The request lists changes: a parameter it does not list stays, in its relative order; an
+/// entry with <c>originalName</c> renames, retypes, gives a default value to, moves or removes
+/// that parameter, and an entry without one adds a parameter. Parameters correspond by position
+/// across the family, since an override may name them differently. A rename in the request
+/// renames the parameter at that position in every member (and its uses in the body and named
+/// arguments at the calls); otherwise each member keeps its own name. A kept parameter keeps its
+/// own type, default value, modifiers and attributes unless the request changes them. The
+/// compiler errors the change leaves in the affected documents are reported as warnings.
 /// </remarks>
 public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSignatureParams>
 {
@@ -62,16 +64,28 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
         for (var i = 0; i < @params.Parameters.Count; i++)
         {
             var change = @params.Parameters[i];
-            if (string.IsNullOrWhiteSpace(change.Name))
-                throw new RefactoringException(ErrorCodes.MissingRequiredParam, "Each parameter change requires a name.");
+            if (IsNew(change))
+            {
+                if (change.Remove)
+                    throw new RefactoringException(ErrorCodes.MissingRequiredParam, $"parameters[{i}] removes a parameter but names none: give its originalName.");
 
-            if (change.OriginalName == null && !change.Remove && string.IsNullOrWhiteSpace(change.Type))
-                throw new RefactoringException(ErrorCodes.MissingRequiredParam, "New parameters require a type.");
+                if (string.IsNullOrWhiteSpace(change.Name))
+                    throw new RefactoringException(ErrorCodes.MissingRequiredParam, $"parameters[{i}] adds a parameter (it has no originalName), which needs a name.");
 
-            if (!change.Remove)
+                if (string.IsNullOrWhiteSpace(change.Type))
+                    throw new RefactoringException(ErrorCodes.MissingRequiredParam, $"parameters[{i}] adds a parameter (it has no originalName), which needs a type.");
+            }
+
+            if (change.NewPosition < 0)
+                throw new RefactoringException(ErrorCodes.InvalidParameterPosition, $"parameters[{i}].newPosition must be 0 or more.");
+
+            if (change.Name != null && !change.Remove)
                 IdentifierNames.Validate(change.Name, NameKind.Parameter, $"parameters[{i}].name", ErrorCodes.InvalidNewName);
         }
     }
+
+    /// <summary>Whether an entry adds a parameter: it names no existing one.</summary>
+    private static bool IsNew(ParameterChange change) => string.IsNullOrWhiteSpace(change.OriginalName);
 
     /// <inheritdoc />
     protected override async Task<RefactoringResult> ExecuteCoreAsync(
@@ -100,7 +114,13 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
             ?? throw new RefactoringException(ErrorCodes.RoslynError, "Could not resolve method symbol.");
 
         var originalParams = methodSymbol.Parameters.ToList();
-        var newParameters = BuildNewParameterList(originalParams, @params.Parameters);
+
+        // Types the request writes, bound where the method is so each member can be given the
+        // same type. A type that does not resolve is written as given, everywhere.
+        var typePosition = methodDecl.ParameterList.OpenParenToken.Span.End;
+        ITypeSymbol? Bind(string type) => SignatureSyntax.BindType(semanticModel, typePosition, type);
+
+        var newParameters = BuildNewParameterList(methodDecl, originalParams, @params.Parameters, Bind);
         CheckOptionalParametersLast(newParameters, originalParams);
 
         // A rename applies to the parameter at that position in every member of the family.
@@ -112,12 +132,7 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
                 renames[index] = parameter.Name;
         }
 
-        // Types the request writes, bound where the method is so each member can be given the
-        // same type. A type that does not resolve is written as given, everywhere.
-        var typePosition = methodDecl.ParameterList.OpenParenToken.Span.End;
-        var boundTypes = newParameters.ToDictionary(
-            p => p,
-            p => p.Type == null ? null : SignatureSyntax.BindType(semanticModel, typePosition, p.Type));
+        var boundTypes = newParameters.ToDictionary(p => p, p => p.Type == null ? null : Bind(p.Type));
 
         var solution = Context.Solution;
         var family = await MemberFamily.FindAsync(methodSymbol, semanticModel.Compilation, solution, cancellationToken);
@@ -142,6 +157,8 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
                         ErrorCodes.RoslynError,
                         $"Could not match the parameters of '{member.Symbol.ToDisplayString()}' to those of '{methodSymbol.ToDisplayString()}'.");
                 }
+
+                CheckNamesInMember(declaration, model, declared, newParameters, renames, cancellationToken);
 
                 var types = newParameters.ToDictionary(
                     p => p,
@@ -215,64 +232,175 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
         };
     }
 
+    /// <summary>
+    /// The new parameter list: the method's parameters with the request's changes, then the new
+    /// ones. A parameter with a newPosition goes there; the others keep their order in the
+    /// remaining places, so a parameter the request does not move keeps its place among them and
+    /// a new one without a position goes at the end.
+    /// </summary>
+    /// <param name="declaration">The method's declaration.</param>
+    /// <param name="originalParams">The method's parameters.</param>
+    /// <param name="changes">The request's entries.</param>
+    /// <param name="bindType">Binds a type the request writes where the method is.</param>
     private static List<NewParameter> BuildNewParameterList(
+        MethodDeclarationSyntax declaration,
         List<IParameterSymbol> originalParams,
-        IReadOnlyList<ParameterChange> changes)
+        IReadOnlyList<ParameterChange> changes,
+        Func<string, ITypeSymbol?> bindType)
     {
-        var result = new List<NewParameter>();
-
-        // First pass: handle existing parameters and removals
-        foreach (var change in changes.Where(c => c.OriginalName != null))
+        // The entry that changes each parameter.
+        var entries = new int?[originalParams.Count];
+        var added = new List<NewParameter>();
+        for (var i = 0; i < changes.Count; i++)
         {
-            if (change.Remove) continue;
+            var change = changes[i];
+            if (IsNew(change))
+            {
+                added.Add(new NewParameter
+                {
+                    Name = change.Name!,
+                    Type = change.Type,
+                    DefaultValue = change.DefaultValue,
+                    Position = change.NewPosition,
+                    Entry = i
+                });
+                continue;
+            }
 
-            var index = originalParams.FindIndex(p => p.Name == IdentifierNames.ValueText(change.OriginalName!));
+            var name = IdentifierNames.ValueText(change.OriginalName!);
+            var index = originalParams.FindIndex(p => p.Name == name);
             if (index < 0)
             {
                 throw new RefactoringException(
                     ErrorCodes.ParameterNotFound,
-                    $"Parameter '{change.OriginalName}' not found in method.");
+                    $"parameters[{i}].originalName: the method has no parameter '{change.OriginalName}'. " +
+                    $"Its parameters: {(originalParams.Count == 0 ? "none" : string.Join(", ", originalParams.Select(p => p.Name)))}.");
             }
 
-            result.Add(new NewParameter
+            if (entries[index] is { } first)
             {
-                Name = change.Name,
-                Type = change.Type,
-                DefaultValue = change.DefaultValue,
-                Position = change.NewPosition,
-                OriginalIndex = index
+                throw new RefactoringException(
+                    ErrorCodes.InvalidParameterValue,
+                    $"Parameter '{name}' is listed twice, in parameters[{first}] and parameters[{i}]. Give each parameter one entry.");
+            }
+
+            entries[index] = i;
+            if (change.Remove)
+                CheckRemoval(change, i, originalParams[index], declaration.ParameterList.Parameters[index], bindType);
+        }
+
+        var parameters = new List<NewParameter>();
+        for (var index = 0; index < originalParams.Count; index++)
+        {
+            var change = entries[index] is { } entry ? changes[entry] : null;
+            if (change?.Remove == true)
+                continue;
+
+            parameters.Add(new NewParameter
+            {
+                Name = change?.Name ?? declaration.ParameterList.Parameters[index].Identifier.Text,
+                Type = change?.Type,
+                DefaultValue = change?.DefaultValue,
+                Position = change?.NewPosition,
+                OriginalIndex = index,
+                Entry = entries[index]
             });
         }
 
-        // Second pass: add new parameters
-        foreach (var change in changes.Where(c => c.OriginalName == null && !c.Remove))
-        {
-            result.Add(new NewParameter
-            {
-                Name = change.Name,
-                Type = change.Type!,
-                DefaultValue = change.DefaultValue,
-                Position = change.NewPosition,
-                OriginalIndex = null
-            });
-        }
+        parameters.AddRange(added);
+        var result = PlaceParameters(parameters);
 
-        // Sort by position
-        if (result.Any(p => p.Position.HasValue))
+        var duplicate = result.GroupBy(p => IdentifierNames.ValueText(p.Name)).FirstOrDefault(g => g.Count() > 1);
+        if (duplicate != null)
         {
-            result = result
-                .OrderBy(p => p.Position ?? int.MaxValue)
-                .ThenBy(p => result.IndexOf(p))
-                .ToList();
+            string Describe(NewParameter p) => p.OriginalIndex is { } index
+                ? p.Entry is { } entry && IdentifierNames.ValueText(p.Name) != originalParams[index].Name
+                    ? $"'{originalParams[index].Name}', renamed in parameters[{entry}]"
+                    : $"'{originalParams[index].Name}'"
+                : $"the new parameter of parameters[{p.Entry}]";
+
+            throw new RefactoringException(
+                ErrorCodes.NameConflictScope,
+                $"Two parameters would be named '{duplicate.Key}': {string.Join(" and ", duplicate.Select(Describe))}. Give them different names.");
         }
 
         return result;
     }
 
     /// <summary>
+    /// Puts each parameter with a position there and fills the other places with the rest, in
+    /// their order. Refuses a position outside the new list and two parameters at one position.
+    /// </summary>
+    private static List<NewParameter> PlaceParameters(List<NewParameter> parameters)
+    {
+        var slots = new NewParameter?[parameters.Count];
+        foreach (var parameter in parameters.Where(p => p.Position.HasValue))
+        {
+            var position = parameter.Position!.Value;
+            if (position >= parameters.Count)
+            {
+                throw new RefactoringException(
+                    ErrorCodes.InvalidParameterPosition,
+                    $"parameters[{parameter.Entry}].newPosition {position} is outside the new parameter list, which has " +
+                    $"{parameters.Count} parameter{(parameters.Count == 1 ? "" : "s")} (positions 0 to {parameters.Count - 1}).");
+            }
+
+            if (slots[position] is { } taken)
+            {
+                throw new RefactoringException(
+                    ErrorCodes.InvalidParameterPosition,
+                    $"parameters[{taken.Entry}] and parameters[{parameter.Entry}] both ask for newPosition {position}.");
+            }
+
+            slots[position] = parameter;
+        }
+
+        using var rest = parameters.Where(p => !p.Position.HasValue).GetEnumerator();
+        for (var i = 0; i < slots.Length; i++)
+        {
+            if (slots[i] == null && rest.MoveNext())
+                slots[i] = rest.Current;
+        }
+
+        return slots.Select(p => p!).ToList();
+    }
+
+    /// <summary>
+    /// Refuses an entry that removes a parameter and also changes it: its other fields must be
+    /// absent or equal to what the parameter has.
+    /// </summary>
+    private static void CheckRemoval(
+        ParameterChange change,
+        int entry,
+        IParameterSymbol parameter,
+        ParameterSyntax syntax,
+        Func<string, ITypeSymbol?> bindType)
+    {
+        static string Compact(string text) => new(text.Where(c => !char.IsWhiteSpace(c)).ToArray());
+
+        var changed = new List<string>();
+        if (change.Name != null && IdentifierNames.ValueText(change.Name) != parameter.Name)
+            changed.Add($"the name '{change.Name}'");
+        if (change.Type != null && !SymbolEqualityComparer.Default.Equals(bindType(change.Type), parameter.Type))
+            changed.Add($"the type '{change.Type}'");
+        if (change.DefaultValue != null && Compact(change.DefaultValue) != Compact(syntax.Default?.Value.ToString() ?? ""))
+            changed.Add($"the defaultValue '{change.DefaultValue}'");
+        if (change.NewPosition != null)
+            changed.Add("a newPosition");
+
+        if (changed.Count > 0)
+        {
+            throw new RefactoringException(
+                ErrorCodes.InvalidParameterValue,
+                $"parameters[{entry}] removes '{parameter.Name}' but also gives it {string.Join(" and ", changed)}. " +
+                "An entry that removes a parameter changes nothing else: leave the other fields out.");
+        }
+    }
+
+    /// <summary>
     /// Refuses a parameter list in which a parameter without a default value follows one with a
     /// default value (CS1737). Only a <c>params</c> array may follow, as the last parameter. A
-    /// parameter has the default value the request gives it.
+    /// parameter has the default value the request gives it, or else the one it has.
     /// </summary>
     private static void CheckOptionalParametersLast(IReadOnlyList<NewParameter> parameters, IReadOnlyList<IParameterSymbol> originalParams)
     {
@@ -280,7 +408,10 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
         for (var i = 0; i < parameters.Count; i++)
         {
             var parameter = parameters[i];
-            if (!string.IsNullOrEmpty(parameter.DefaultValue))
+            var hasDefault = parameter.KeepsDefault
+                ? parameter.OriginalIndex is { } kept && originalParams[kept].HasExplicitDefaultValue
+                : parameter.NewDefault != null;
+            if (hasDefault)
             {
                 optional ??= parameter;
                 continue;
@@ -299,10 +430,137 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
     }
 
     /// <summary>
+    /// Refuses a rename that would clash in one member of the family: two of its parameters
+    /// would get the same name, or the new name is already used in its body (a local, a
+    /// parameter of a lambda or local function, a range or pattern variable, a local function,
+    /// a type parameter, or a simple name such as a field the body reads), so a use of the
+    /// parameter, or of that other symbol, would bind to the wrong one.
+    /// </summary>
+    private static void CheckNamesInMember(
+        MethodDeclarationSyntax declaration,
+        SemanticModel model,
+        IMethodSymbol declared,
+        IReadOnlyList<NewParameter> newParameters,
+        IReadOnlyList<string?> renames,
+        CancellationToken cancellationToken)
+    {
+        var names = newParameters.Select(p => IdentifierNames.ValueText(p.OriginalIndex is { } index
+            ? renames[index] ?? declared.Parameters[index].Name
+            : p.Name));
+        if (names.GroupBy(n => n).FirstOrDefault(g => g.Count() > 1) is { } duplicate)
+        {
+            throw new RefactoringException(
+                ErrorCodes.NameConflictScope,
+                $"Two parameters of '{declared.ToDisplayString()}' would be named '{duplicate.Key}' (its parameters, matched by " +
+                $"position: {string.Join(", ", declared.Parameters.Select(p => p.Name))}). Choose another name.");
+        }
+
+        var body = (SyntaxNode?)declaration.Body ?? declaration.ExpressionBody;
+        for (var i = 0; i < renames.Count; i++)
+        {
+            if (renames[i] is not { } newName || IdentifierNames.ValueText(newName) == declared.Parameters[i].Name)
+                continue;
+
+            var name = IdentifierNames.ValueText(newName);
+            var parameter = declared.Parameters[i];
+            var clash = declared.TypeParameters.Any(t => t.Name == name)
+                ? $"the method has a type parameter '{name}'"
+                : body == null ? null : FindNameInBody(body, model, parameter, name, cancellationToken);
+
+            if (clash != null)
+            {
+                throw new RefactoringException(
+                    ErrorCodes.NameConflictScope,
+                    $"Cannot rename parameter '{parameter.Name}' of '{declared.ToDisplayString()}' to '{name}': {clash}. Choose another name.");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Where <paramref name="body"/> declares <paramref name="name"/>, or uses it as a simple
+    /// name for something declared outside the method other than its parameters (whose new
+    /// names are checked against each other); null when it does neither.
+    /// </summary>
+    private static string? FindNameInBody(
+        SyntaxNode body,
+        SemanticModel model,
+        IParameterSymbol parameter,
+        string name,
+        CancellationToken cancellationToken)
+    {
+        static int Line(SyntaxNode node) => node.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
+
+        foreach (var node in body.DescendantNodesAndSelf())
+        {
+            var declaredHere = node switch
+            {
+                VariableDeclaratorSyntax or SingleVariableDesignationSyntax or ParameterSyntax or ForEachStatementSyntax
+                    or CatchDeclarationSyntax or LocalFunctionStatementSyntax or TypeParameterSyntax or QueryClauseSyntax
+                    or QueryContinuationSyntax => model.GetDeclaredSymbol(node, cancellationToken),
+                _ => null
+            };
+            if (declaredHere?.Name == name)
+            {
+                var what = declaredHere switch
+                {
+                    ILocalSymbol => "a local",
+                    IParameterSymbol => "a lambda or local function parameter",
+                    IRangeVariableSymbol => "a query range variable",
+                    IMethodSymbol => "a local function",
+                    ITypeParameterSymbol => "a type parameter",
+                    _ => "a symbol"
+                };
+                return $"the body declares {what} '{name}' (line {Line(node)})";
+            }
+
+            if (node is IdentifierNameSyntax identifier && identifier.Identifier.ValueText == name && IsSimpleNameLookup(identifier) &&
+                model.GetSymbolInfo(identifier, cancellationToken).Symbol is { } used &&
+                !(used is IParameterSymbol && SymbolEqualityComparer.Default.Equals(used.ContainingSymbol, parameter.ContainingSymbol)) &&
+                !IsDeclaredInside(used, body))
+            {
+                var what = used switch
+                {
+                    IFieldSymbol => "field",
+                    IPropertySymbol => "property",
+                    IMethodSymbol => "method",
+                    IEventSymbol => "event",
+                    INamespaceSymbol => "namespace",
+                    ITypeSymbol => "type",
+                    _ => "symbol"
+                };
+                return $"the body uses the {what} '{used.ToDisplayString()}' by that name (line {Line(identifier)}), which would then mean the parameter";
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>Whether <paramref name="symbol"/> is declared inside <paramref name="body"/> (reported where it is declared).</summary>
+    private static bool IsDeclaredInside(ISymbol symbol, SyntaxNode body) =>
+        symbol.DeclaringSyntaxReferences.Any(r => r.SyntaxTree == body.SyntaxTree && body.Span.Contains(r.Span));
+
+    /// <summary>
+    /// Whether <paramref name="identifier"/> is looked up as a simple name in its scope (so a
+    /// parameter of that name would hide what it means now), rather than as a member of
+    /// something, an argument or member name, or a type.
+    /// </summary>
+    private static bool IsSimpleNameLookup(IdentifierNameSyntax identifier) => identifier.Parent switch
+    {
+        MemberAccessExpressionSyntax access when access.Name == identifier => false,
+        MemberBindingExpressionSyntax => false,
+        QualifiedNameSyntax qualified when qualified.Right == identifier => false,
+        AliasQualifiedNameSyntax alias when alias.Name == identifier => false,
+        NameColonSyntax or NameEqualsSyntax => false,
+        AssignmentExpressionSyntax assignment when assignment.Left == identifier &&
+            (assignment.Parent.IsKind(SyntaxKind.ObjectInitializerExpression) || assignment.Parent.IsKind(SyntaxKind.WithInitializerExpression)) => false,
+        _ => !identifier.IsVar && !SyntaxFacts.IsInTypeOnlyContext(identifier)
+    };
+
+    /// <summary>
     /// The new parameter list of one family member. A kept parameter keeps its own declaration
-    /// (name, type, modifiers, attributes) except for what the request changes; its default
-    /// value is the request's, as before. An explicit interface implementation gets no default
-    /// values, which would have no effect there (CS1066).
+    /// (name, type, default value, modifiers, attributes) except for what the request changes.
+    /// An explicit interface implementation gets no new default values, which would have no
+    /// effect there (CS1066).
     /// </summary>
     private static ParameterListSyntax BuildParameterList(
         ParameterListSyntax original,
@@ -331,15 +589,25 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
                     parameter = parameter.WithLeadingTrivia(original.Parameters[^1].GetLeadingTrivia());
             }
 
-            parameters.Add(WithDefault(parameter, isExplicitImplementation ? null : newParameter.DefaultValue));
+            var defaultValue = newParameter.OriginalIndex.HasValue && newParameter.KeepsDefault
+                ? null
+                : isExplicitImplementation ? "" : newParameter.NewDefault ?? "";
+            parameters.Add(WithDefault(parameter, defaultValue));
         }
 
         return original.WithParameters(SyntaxFactory.SeparatedList(parameters, Separators(original.Parameters, parameters.Count)));
     }
 
+    /// <summary>
+    /// <paramref name="parameter"/> with <paramref name="defaultValue"/>: null keeps its default
+    /// value (or none), an empty string removes it.
+    /// </summary>
     private static ParameterSyntax WithDefault(ParameterSyntax parameter, string? defaultValue)
     {
-        if (string.IsNullOrEmpty(defaultValue))
+        if (defaultValue == null)
+            return parameter;
+
+        if (defaultValue.Length == 0)
         {
             return parameter.Default == null
                 ? parameter
@@ -448,28 +716,37 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
         var parameters = invoked.Parameters;
         var original = invocation.ArgumentList;
 
+        // A new parameter with a default value is left out, unless an argument after it cannot
+        // be passed by name then (an expanded params argument): such a call passes the default.
+        var passNewOptional = BuildArgumentList(original, parameters, offset, newParameters, renames, passNewOptional: false) == null;
+        var rewrittenHere = BuildArgumentList(original, parameters, offset, newParameters, renames, passNewOptional);
+        if (rewrittenHere == null || rewrittenHere.IsEquivalentTo(original))
+            return false; // nothing to change, or a call it cannot rewrite
+
         return edits.Add(location.Document.Id, original, rewritten =>
-            BuildArgumentList((ArgumentListSyntax)rewritten, parameters, offset, newParameters, renames) ?? rewritten);
+            BuildArgumentList((ArgumentListSyntax)rewritten, parameters, offset, newParameters, renames, passNewOptional) ?? rewritten);
     }
 
     /// <summary>
     /// The new arguments of one call. The call keeps its own argument order, so its arguments
     /// are evaluated as before: an argument of a removed parameter is dropped in place, a named
     /// argument is renamed in place, and only positional arguments move, to the new positions
-    /// of their parameters. A parameter the call does not pass and has to (a new one, or one
-    /// that lost its default value) gets the request's default value or a <c>TODO</c>
-    /// placeholder: positional where every argument before it is positional and in position,
-    /// otherwise named at the end. From the first argument out of position on, every argument
-    /// is named (CS8323). Null when the call cannot be rewritten (an argument names no
-    /// parameter, the receiver of an extension-form call moves, or an expanded <c>params</c>
-    /// argument would need a name).
+    /// of their parameters. A new parameter with a default value is left out (unless
+    /// <paramref name="passNewOptional"/>), so the arguments after it are named. A parameter the
+    /// call does not pass and has to (a new one without a default value, or one that lost its
+    /// default value) gets a <c>TODO</c> placeholder: positional where every argument before it
+    /// is positional and in position, otherwise named at the end. From the first argument out of
+    /// position on, every argument is named (CS8323). Null when the call cannot be rewritten (an
+    /// argument names no parameter, the receiver of an extension-form call moves, or an expanded
+    /// <c>params</c> argument would need a name).
     /// </summary>
     private static ArgumentListSyntax? BuildArgumentList(
         ArgumentListSyntax original,
         IReadOnlyList<IParameterSymbol> parameters,
         int offset,
         IReadOnlyList<NewParameter> newParameters,
-        IReadOnlyList<string?> renames)
+        IReadOnlyList<string?> renames,
+        bool passNewOptional)
     {
         // A call in extension form passes the `this` parameter as the receiver, which has to stay first.
         if (offset > 0 && newParameters.FirstOrDefault()?.OriginalIndex != 0)
@@ -515,16 +792,22 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
         for (var position = 0; position < callParameters.Count; position++)
         {
             var parameter = callParameters[position];
-            if (parameter.OriginalIndex is { } index &&
-                (passed.Contains(index) || !string.IsNullOrEmpty(parameter.DefaultValue) || parameters[index - offset].IsParams))
+            if (parameter.OriginalIndex is { } index)
             {
-                continue; // passed, or still optional
+                var declared = parameters[index - offset];
+                var optional = parameter.KeepsDefault ? declared.IsOptional : parameter.NewDefault != null;
+                if (passed.Contains(index) || optional || declared.IsParams)
+                    continue; // passed, or still optional
+            }
+            else if (parameter.NewDefault != null && !passNewOptional)
+            {
+                continue; // a new optional parameter
             }
 
-            var argument = string.IsNullOrEmpty(parameter.DefaultValue)
+            var argument = parameter.NewDefault == null
                 ? SyntaxFactory.Argument(SyntaxFactory.ParseExpression($"default /* TODO: {NameAt(position)} */"))
                     .WithAdditionalAnnotations(new SyntaxAnnotation(PlaceholderAnnotationKind, NameAt(position)))
-                : SyntaxFactory.Argument(SyntaxFactory.ParseExpression(parameter.DefaultValue));
+                : SyntaxFactory.Argument(SyntaxFactory.ParseExpression(parameter.NewDefault));
             var inPositionPrefix = entries.TakeWhile((e, i) => e.Argument.NameColon == null && e.Position == i).Count();
             entries.Insert(position <= inPositionPrefix ? position : entries.Count, new CallArgument(argument, position, IsNew: true));
         }
@@ -637,15 +920,31 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
 
     private sealed class NewParameter
     {
+        /// <summary>The name the request gives, or the parameter's own.</summary>
         public required string Name { get; init; }
 
         /// <summary>The type the request gives, or null to keep each member's own.</summary>
         public string? Type { get; init; }
 
+        /// <summary>
+        /// The default value the request gives: null keeps the parameter's own (a new one has
+        /// none), blank removes it.
+        /// </summary>
         public string? DefaultValue { get; init; }
+
+        /// <summary>The position the request gives in the new list, or null.</summary>
         public int? Position { get; init; }
 
         /// <summary>The position the parameter had, or null for a new one.</summary>
         public int? OriginalIndex { get; init; }
+
+        /// <summary>The index of the request entry that lists the parameter, or null when none does.</summary>
+        public int? Entry { get; init; }
+
+        /// <summary>Whether each member keeps the parameter's own default value (or lack of one).</summary>
+        public bool KeepsDefault => DefaultValue == null;
+
+        /// <summary>The default value the request gives, null when it gives none or removes it.</summary>
+        public string? NewDefault => string.IsNullOrWhiteSpace(DefaultValue) ? null : DefaultValue;
     }
 }

@@ -61,12 +61,12 @@ public sealed class ChangeSignatureFamilyTests
         """;
 
     [Fact]
-    public async Task AddedParameter_ReachesEveryMemberAndCall_AcrossProjects()
+    public async Task AddedOptionalParameter_ReachesEveryMember_AndTheCallsLeaveItOut()
     {
         using var ws = CreateShapes();
+        var appBefore = File.ReadAllText(ws.PathOf("App", "Circle.cs"));
 
-        var result = await ChangeAsync(ws, "Area", line: 10, sourceProject: "Lib",
-            Keep("scale"), Add("rounding", "int", "0"));
+        var result = await ChangeAsync(ws, "Area", line: 10, sourceProject: "Lib", Add("rounding", "int", "0"));
 
         Assert.True(result.Success, result.Error?.Message);
         var lib = File.ReadAllText(ws.PathOf("Lib", "Shapes.cs"));
@@ -76,10 +76,32 @@ public sealed class ChangeSignatureFamilyTests
         Assert.Contains("public override double Area(double factor, int rounding = 0) =>", lib);
         // An explicit implementation gets no default value (CS1066).
         Assert.Contains("double IShape.Area(double scale, int rounding) => scale;", lib);
-        Assert.Contains("Area(scale: scale, rounding: 0) * 2", lib);
-        Assert.Contains("public override double Area(double factor, int rounding = 0) => base.Area(factor, 0) + base.Area(factor: 1, rounding: 0);", app);
-        Assert.Contains("shape.Area(2, 0) + square.Area(factor: 3, rounding: 0) + circle.Area(4, 0)", app);
+        Assert.Contains("Area(scale: scale) * 2", lib);
+        Assert.Equal(appBefore.Replace("Area(double factor)", "Area(double factor, int rounding = 0)"), app);
+        Assert.Equal(0, result.ReferencesUpdated);
+        Assert.Null(result.Warnings);
+        Assert.Empty(ws.GetDiskCompilationErrors());
+    }
+
+    [Fact]
+    public async Task AddedRequiredParameter_ReachesEveryMemberAndCall_AcrossProjects()
+    {
+        using var ws = CreateShapes();
+
+        var result = await ChangeAsync(ws, "Area", line: 10, sourceProject: "Lib", new ParameterChange { Name = "rounding", Type = "int" });
+
+        Assert.True(result.Success, result.Error?.Message);
+        var lib = File.ReadAllText(ws.PathOf("Lib", "Shapes.cs"));
+        var app = File.ReadAllText(ws.PathOf("App", "Circle.cs"));
+        Assert.Contains("public override double Area(double factor, int rounding) =>", lib);
+        Assert.Contains("double IShape.Area(double scale, int rounding) => scale;", lib);
+        Assert.Contains("Area(scale: scale, rounding: default /* TODO: rounding */) * 2", lib);
+        Assert.Contains("base.Area(factor, default /* TODO: rounding */) + base.Area(factor: 1, rounding: default /* TODO: rounding */)", app);
+        Assert.Contains(
+            "shape.Area(2, default /* TODO: rounding */) + square.Area(factor: 3, rounding: default /* TODO: rounding */) + circle.Area(4, default /* TODO: rounding */)",
+            app);
         Assert.Equal(6, result.ReferencesUpdated);
+        Assert.Equal(6, result.Warnings!.Count);
         Assert.Empty(ws.GetDiskCompilationErrors());
     }
 
@@ -88,14 +110,13 @@ public sealed class ChangeSignatureFamilyTests
     {
         using var ws = CreateShapes();
 
-        var result = await ChangeAsync(ws, "Area", line: 7, sourceProject: "App",
-            Keep("factor"), Add("unit", "string", "\"m\""));
+        var result = await ChangeAsync(ws, "Area", line: 7, sourceProject: "App", Add("unit", "string", "\"m\""));
 
         Assert.True(result.Success, result.Error?.Message);
         var lib = File.ReadAllText(ws.PathOf("Lib", "Shapes.cs"));
         Assert.Contains("    double Area(double scale, string unit = \"m\");", lib);
         Assert.Contains("double IShape.Area(double scale, string unit) => scale;", lib);
-        Assert.Contains("Area(scale: scale, unit: \"m\") * 2", lib);
+        Assert.Contains("Area(scale: scale) * 2", lib);
         Assert.Empty(ws.GetDiskCompilationErrors());
     }
 
@@ -125,13 +146,13 @@ public sealed class ChangeSignatureFamilyTests
         using var ws = CreateShapes();
 
         var result = await ChangeAsync(ws, "Area", line: 10, sourceProject: "Lib",
-            Keep("scale"), Add("label", "string?", "null"));
+            Keep("scale"), new ParameterChange { Name = "label", Type = "string?" });
 
         Assert.True(result.Success, result.Error?.Message);
         var lib = File.ReadAllText(ws.PathOf("Lib", "Shapes.cs"));
         var app = File.ReadAllText(ws.PathOf("App", "Circle.cs"));
-        Assert.Contains("public override double Area(double factor, string? label = null) => Side * Side * factor;", lib);
-        Assert.Contains("square.Area(factor: 3, label: null)", app);
+        Assert.Contains("public override double Area(double factor, string? label) => Side * Side * factor;", lib);
+        Assert.Contains("square.Area(factor: 3, label: default /* TODO: label */)", app);
         Assert.Empty(ws.GetDiskCompilationErrors());
     }
 
@@ -142,14 +163,14 @@ public sealed class ChangeSignatureFamilyTests
         var before = File.ReadAllText(ws.PathOf("Lib", "Shapes.cs"));
 
         var result = await ChangeAsync(ws, "Area", line: 10, sourceProject: "Lib", preview: true,
-            Keep("scale"), Add("rounding", "int", "0"));
+            new ParameterChange { Name = "rounding", Type = "int" });
 
         Assert.True(result.Success, result.Error?.Message);
         Assert.True(result.Preview);
         Assert.Equal(before, File.ReadAllText(ws.PathOf("Lib", "Shapes.cs")));
         var declarations = result.PendingChanges!.Where(c => c.Description.StartsWith("Change the parameters", StringComparison.Ordinal)).ToList();
         Assert.Equal(5, declarations.Count);
-        Assert.Contains(declarations, c => c.BeforeSnippet == "Area(double factor)" && c.AfterSnippet == "Area(double factor, int rounding = 0)");
+        Assert.Contains(declarations, c => c.BeforeSnippet == "Area(double factor)" && c.AfterSnippet == "Area(double factor, int rounding)");
         Assert.Contains(result.PendingChanges!, c => c.Description == "Update 1 call site" && c.File == ws.PathOf("Lib", "Shapes.cs"));
         Assert.Contains(result.PendingChanges!, c => c.Description == "Update 5 call sites" && c.File == ws.PathOf("App", "Circle.cs"));
     }
@@ -335,7 +356,7 @@ public sealed class ChangeSignatureFamilyTests
         Assert.True(result.Success, result.Error?.Message);
         var text = ws.ReadFile("Counter.cs");
         Assert.Contains("public partial int Count(int start, int step = 1);", text);
-        Assert.Contains("public partial int Count(int start, int step = 1) => start <= 0 ? 0 : 1 + Count(start - 1, 1);", text);
+        Assert.Contains("public partial int Count(int start, int step = 1) => start <= 0 ? 0 : 1 + Count(start - 1);", text);
         Assert.Empty(ws.GetDiskCompilationErrors());
     }
 
@@ -371,7 +392,9 @@ public sealed class ChangeSignatureFamilyTests
         Assert.True(result.Success, result.Error?.Message);
         var text = ws.ReadFile("Text.cs");
         Assert.Contains("public static string Join(this string separator, bool trim = false, params string[] parts)", text);
-        Assert.Contains("\",\".Join(false, \"a\", \"b\") + Join(\"-\", false, \"c\") + \";\".Join(false)", text);
+        // Several expanded params arguments cannot be named, so that call passes the new default;
+        // a single one can.
+        Assert.Contains("\",\".Join(false, \"a\", \"b\") + Join(\"-\", parts: \"c\") + \";\".Join()", text);
         Assert.Empty(ws.GetDiskCompilationErrors());
     }
 
@@ -405,8 +428,7 @@ public sealed class ChangeSignatureFamilyTests
 
         Assert.True(result.Success, result.Error?.Message);
         var expected = source
-            .Replace("string body)", "string body,\r\n        string? cc = null)")
-            .Replace("Send(\"a\", \"b\")", "Send(\"a\", \"b\", null)");
+            .Replace("string body)", "string body,\r\n        string? cc = null)");
         Assert.Equal(expected, ws.ReadFile("Mailer.cs"));
     }
 

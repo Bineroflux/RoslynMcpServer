@@ -29,12 +29,14 @@ public sealed class ChangeSignatureTool : IToolHandler
 
     /// <inheritdoc />
     public string Description =>
-        "Add, remove, rename or reorder method parameters and update all call sites. The change also applies to the " +
-        "members the method overrides or implements and to its overrides and implementations, matching parameters by " +
-        "position. Calls keep their argument order. Compiler errors left behind (e.g. a method group converted to a " +
-        "delegate, a removed parameter the body still uses) and the TODO placeholders passed for parameters without a " +
+        "Add, remove, rename, retype or reorder method parameters and update all call sites. 'parameters' lists only " +
+        "the changes: parameters it does not list stay, in their order. The change also applies to the members the " +
+        "method overrides or implements and to its overrides and implementations, matching parameters by position. " +
+        "Calls keep their argument order; a new parameter with a default value is left out of them (later positional " +
+        "arguments are then passed by name). Compiler errors left behind (e.g. a method group converted to a delegate, " +
+        "a removed parameter the body still uses) and the TODO placeholders passed for new parameters without a " +
         "default are listed in 'warnings'. Refused when a member of that family is declared in metadata (e.g. an " +
-        "override of object.ToString).";
+        "override of object.ToString), or when a new name is already used in a member's body or parameter list.";
 
     /// <inheritdoc />
     public object InputSchema => new
@@ -74,39 +76,39 @@ public sealed class ChangeSignatureTool : IToolHandler
                         originalName = new
                         {
                             type = "string",
-                            description = "Original parameter name (null for new parameters)"
+                            description = "The parameter to change or remove, as the method names it. Leave out to add a new parameter."
                         },
                         name = new
                         {
                             type = "string",
-                            description = "New parameter name"
+                            description = "New name (renames the parameter in every member of the family, in their bodies and in named arguments), or the new parameter's name (required then). Leave out to keep the name."
                         },
                         type = new
                         {
                             type = "string",
-                            description = "Parameter type (required for new parameters)"
+                            description = "New type, or the new parameter's type (required then). Leave out to keep the type."
                         },
                         defaultValue = new
                         {
                             type = "string",
-                            description = "Default value for the parameter"
+                            description = "Default value as a C# expression. For an existing parameter, leave out to keep its default and give \"\" to remove it. A new parameter with a default is left out of existing calls; one without gets a 'default /* TODO */' placeholder in them (listed in warnings)."
                         },
                         newPosition = new
                         {
                             type = "integer",
-                            description = "New position in parameter list (0-based)"
+                            description = "0-based position in the new parameter list. Leave out to keep the parameter's place among the parameters that do not move; a new parameter then goes at the end. Positions must lie within the new list and differ.",
+                            minimum = 0
                         },
                         remove = new
                         {
                             type = "boolean",
-                            description = "If true, removes this parameter",
+                            description = "Remove the parameter named by originalName; the other fields must then be left out (or equal the parameter's).",
                             @default = false
                         }
                     },
-                    required = new[] { "name" },
                     additionalProperties = false
                 },
-                description = "Parameter changes to apply"
+                description = "The changes, one entry per parameter to change, remove or add. Parameters not listed stay as they are, in their relative order. An entry with originalName changes that parameter; one without adds a parameter (name and type required)."
             },
             preview = new
             {
@@ -147,7 +149,7 @@ public sealed class ChangeSignatureTool : IToolHandler
                 Parameters = args.Parameters?.Select(p => new ParameterChange
                 {
                     OriginalName = p.OriginalName,
-                    Name = p.Name ?? "",
+                    Name = p.Name,
                     Type = p.Type,
                     DefaultValue = p.DefaultValue,
                     NewPosition = p.NewPosition,

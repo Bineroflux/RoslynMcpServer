@@ -49,7 +49,10 @@ public sealed class GetDiagnosticsParams
     /// CA analyzers, the IDE code-style analyzers when the project sets
     /// <c>EnforceCodeStyleInBuild</c>, and those of package references), with the severities and
     /// suppressions the build applies. Much slower. Default: false (compiler, source-generator,
-    /// Razor and RMCP diagnostics only).
+    /// Razor and RMCP diagnostics only). The failures of the analyzers it wants (AD0001 for one
+    /// that threw, RMCP0003 for analyzers that could not be listed or run, RMCP0001 for a
+    /// reference of such a project that could not be loaded) mean the result is incomplete:
+    /// they are listed first, ahead of <see cref="MaxResults"/>, and pass every filter.
     /// </summary>
     public bool? IncludeAnalyzers { get; init; }
 }

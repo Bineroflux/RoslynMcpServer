@@ -452,6 +452,16 @@ public sealed class MSBuildWorkspaceProvider : IWorkspaceProvider, IDisposable
             projectName, name, e.ErrorCode, detail, typeof(Compilation).Assembly.GetName().Version);
     }
 
+    /// <summary>How <see cref="BuildAnalyzerLoadFailureMessage"/>'s messages start.</summary>
+    private const string AnalyzerLoadFailurePrefix = "Analyzer/source generator '";
+
+    /// <summary>
+    /// Whether a generator load issue says that an analyzer reference could not be loaded
+    /// (<see cref="BuildAnalyzerLoadFailureMessage"/>), so its analyzers are missing too.
+    /// </summary>
+    internal static bool IsAnalyzerLoadFailure(string issue) =>
+        issue.StartsWith(AnalyzerLoadFailurePrefix, StringComparison.Ordinal);
+
     /// <summary>
     /// Builds the human-readable explanation for a failed analyzer/generator load.
     /// </summary>
@@ -473,7 +483,7 @@ public sealed class MSBuildWorkspaceProvider : IWorkspaceProvider, IDisposable
             // explanation has to be written here. This is the one the user can act on:
             // the SDK moved ahead of the server's Roslyn.
             return
-                $"Analyzer/source generator '{analyzerName}' could not be loaded for project '{projectName}': " +
+                $"{AnalyzerLoadFailurePrefix}{analyzerName}' could not be loaded for project '{projectName}': " +
                 $"it targets a newer Roslyn than this server hosts ({hostRoslynVersion}). " +
                 "Everything it contributes is missing — for the Razor generator that means no RZ " +
                 "diagnostics for .razor/.cshtml and no CS diagnostics from @code blocks. " +
@@ -482,7 +492,7 @@ public sealed class MSBuildWorkspaceProvider : IWorkspaceProvider, IDisposable
         }
 
         return
-            $"Analyzer/source generator '{analyzerName}' could not be loaded for project '{projectName}' " +
+            $"{AnalyzerLoadFailurePrefix}{analyzerName}' could not be loaded for project '{projectName}' " +
             $"({errorCode}): {detail ?? errorCode.ToString()}. " +
             "Its diagnostics and generated code will be missing.";
     }

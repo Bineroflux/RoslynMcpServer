@@ -6,6 +6,7 @@ using RoslynMcp.Contracts.Errors;
 using RoslynMcp.Contracts.Models;
 using RoslynMcp.Core.Query;
 using RoslynMcp.Core.Refactoring;
+using RoslynMcp.Core.Workspace;
 using Xunit;
 
 namespace RoslynMcp.Core.Tests.Query;
@@ -261,13 +262,123 @@ public sealed class GetDiagnosticsAnalyzerTests
             s => s.AddAnalyzerReference(project.Id, new UnlistableAnalyzerReference()), TestContext.Current.CancellationToken);
 
         var result = await GetAsync(ws, new GetDiagnosticsParams { IncludeAnalyzers = true });
-        var errorsOnly = await GetAsync(ws, new GetDiagnosticsParams { IncludeAnalyzers = true, SeverityFilter = "Error" });
+        var filtered = await GetAsync(ws, new GetDiagnosticsParams
+        {
+            IncludeAnalyzers = true,
+            SeverityFilter = "Error",
+            DiagnosticIds = ["TEST0001"],
+            ExcludeDiagnosticIds = ["RMCP0003"],
+            MessageFilter = "no such text"
+        });
 
         var failure = Assert.Single(result.Diagnostics, d => d.Id == "RMCP0003");
         Assert.Contains("'TestProject'", failure.Message);
         Assert.Contains("unlistable", failure.Message);
         Assert.Contains(result.Diagnostics, d => d.Id == "CS0168");
-        Assert.Empty(errorsOnly.Diagnostics);
+        Assert.Equal(["RMCP0003"], filtered.Diagnostics.Select(d => d.Id));
+    }
+
+    [Fact]
+    public async Task AD0001_OfAnAnalyzerThatRan_PassesEveryFilter()
+    {
+        using var ws = await CreateAsync(RaiseToWarning, new MethodAnalyzer(), new ThrowingAnalyzer());
+
+        var wanted = await GetAsync(ws, new GetDiagnosticsParams
+        {
+            IncludeAnalyzers = true,
+            DiagnosticIds = ["TEST0004"],
+            ExcludeDiagnosticIds = ["AD0001"],
+            MessageFilter = "no such text",
+            SeverityFilter = "Error",
+            SourceFile = ws.PathOf("B.cs")
+        });
+        var notWanted = await GetAsync(ws, new GetDiagnosticsParams { IncludeAnalyzers = true, DiagnosticIds = ["TEST0001"] });
+
+        // The throwing analyzer reports TEST0004, so it ran for the first call (on B.cs only: one
+        // type, one AD0001) and not for the second.
+        var crash = Assert.Single(wanted.Diagnostics);
+        Assert.Equal("AD0001", crash.Id);
+        Assert.Contains(nameof(ThrowingAnalyzer), crash.Message);
+        Assert.Equal(["TEST0001 First", "TEST0001 Second"], notWanted.Diagnostics.Select(Describe).Order(StringComparer.Ordinal));
+    }
+
+    [Fact]
+    public async Task AnalyzerFailures_ComeFirst_AndCountTowardMaxResults()
+    {
+        using var ws = await CreateAsync(RaiseToWarning, new MethodAnalyzer(), new ThrowingAnalyzer());
+
+        var result = await GetAsync(ws, new GetDiagnosticsParams { IncludeAnalyzers = true, MaxResults = 2 });
+
+        // Two AD0001 (one per type), then CS0168 and the two TEST0001.
+        Assert.Equal(["AD0001", "AD0001"], result.Diagnostics.Select(d => d.Id));
+        Assert.Equal(5, result.TotalCount);
+        Assert.True(result.Truncated);
+    }
+
+    [Fact]
+    public async Task AnalyzerLoadFailure_OfAProjectWhoseAnalyzersRan_PassesEveryFilter()
+    {
+        string[] issues =
+        [
+            MSBuildWorkspaceProvider.BuildAnalyzerLoadFailureMessage(
+                "App", "AppAnalyzers", AnalyzerLoadFailureEventArgs.FailureErrorCode.UnableToLoadAnalyzer, "boom", null),
+            MSBuildWorkspaceProvider.BuildAnalyzerLoadFailureMessage(
+                "Lib", "LibAnalyzers", AnalyzerLoadFailureEventArgs.FailureErrorCode.UnableToLoadAnalyzer, "boom", null),
+            "RazorSourceGenerator failed to load for project 'App' (unresolved analyzer reference: razor.dll). " +
+            ".razor / .cshtml diagnostics will not appear.",
+        ];
+        using var ws = TestWorkspace.CreateSolution(
+            [
+                new TestWorkspace.ProjectSpec("App", [("A.cs", ASource)]),
+                new TestWorkspace.ProjectSpec("Lib", [("B.cs", BSource.Replace("namespace App;", "namespace Lib;"))]),
+            ],
+            issues);
+        var filters = new GetDiagnosticsParams
+        {
+            DiagnosticIds = ["CA1822"],
+            MessageFilter = "no such text",
+            SeverityFilter = "Error"
+        };
+
+        var whole = await GetAsync(ws, With(filters, includeAnalyzers: true));
+        var withoutAnalyzers = await GetAsync(ws, filters);
+        var lib = await GetAsync(ws, With(filters, includeAnalyzers: true, projectPath: ws.ProjectPathOf("Lib")));
+        var appFile = await GetAsync(ws, With(filters, includeAnalyzers: true, sourceFile: ws.PathOf("App", "A.cs")));
+
+        Assert.Equal(["AppAnalyzers", "LibAnalyzers"], whole.Diagnostics.Select(LoadFailureName));
+        Assert.All(whole.Diagnostics, d => Assert.Equal("RMCP0001", d.Id));
+        Assert.Empty(withoutAnalyzers.Diagnostics);
+        Assert.Equal(["LibAnalyzers"], lib.Diagnostics.Select(LoadFailureName));
+        Assert.Equal(["AppAnalyzers"], appFile.Diagnostics.Select(LoadFailureName));
+
+        static GetDiagnosticsParams With(
+            GetDiagnosticsParams p, bool includeAnalyzers, string? projectPath = null, string? sourceFile = null) =>
+            new()
+            {
+                DiagnosticIds = p.DiagnosticIds,
+                MessageFilter = p.MessageFilter,
+                SeverityFilter = p.SeverityFilter,
+                IncludeAnalyzers = includeAnalyzers,
+                ProjectPath = projectPath,
+                SourceFile = sourceFile
+            };
+
+        static string LoadFailureName(DiagnosticInfo d) => d.Message.Split('\'')[1];
+    }
+
+    [Fact]
+    public async Task ProjectThatCannotBeCompiled_ReportsRMCP0003_WhateverTheFilters()
+    {
+        using var ws = await CreateAsync(RaiseToWarning);
+        var project = ws.Context.Solution.Projects.Single();
+        await ws.Context.UpdateSolutionInWriterAsync(
+            s => s.AddAnalyzerReference(project.Id, new GeneratorThrowingAnalyzerReference()), TestContext.Current.CancellationToken);
+
+        var result = await GetAsync(ws, new GetDiagnosticsParams { IncludeAnalyzers = true, DiagnosticIds = ["TEST0001"], SeverityFilter = "Error" });
+
+        var failure = Assert.Single(result.Diagnostics);
+        Assert.Equal("RMCP0003", failure.Id);
+        Assert.Contains("could not be compiled", failure.Message);
     }
 
     [Fact]
@@ -446,6 +557,21 @@ public sealed class GetDiagnosticsAnalyzerTests
     }
 
 #pragma warning restore RS1036, RS1038, RS1041, RS2008
+
+    /// <summary>An analyzer reference whose generators can't be listed, which fails the compilation.</summary>
+    private sealed class GeneratorThrowingAnalyzerReference : AnalyzerReference
+    {
+        public override string FullPath => "generators.dll";
+        public override string Display => "generators";
+        public override object Id => "generators-id";
+
+        public override ImmutableArray<DiagnosticAnalyzer> GetAnalyzersForAllLanguages() => [];
+        public override ImmutableArray<DiagnosticAnalyzer> GetAnalyzers(string language) => [];
+        public override ImmutableArray<ISourceGenerator> GetGeneratorsForAllLanguages()
+            => throw new InvalidOperationException("generator boom");
+        public override ImmutableArray<ISourceGenerator> GetGenerators(string language)
+            => throw new InvalidOperationException("generator boom");
+    }
 
     /// <summary>An analyzer reference whose analyzers can't be listed.</summary>
     private sealed class UnlistableAnalyzerReference : AnalyzerReference

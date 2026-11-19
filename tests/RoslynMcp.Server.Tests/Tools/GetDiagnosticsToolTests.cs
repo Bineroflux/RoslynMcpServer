@@ -111,6 +111,7 @@ public class GetDiagnosticsToolTests
         Assert.Contains("SLOW", includeAnalyzers);
         Assert.Contains("EnforceCodeStyleInBuild", includeAnalyzers);
         Assert.Contains("default: false", includeAnalyzers);
+        Assert.Contains("listed first and no filter drops them", includeAnalyzers);
         Assert.Contains("includeAnalyzers", properties.GetProperty("diagnosticIds").GetProperty("description").GetString());
     }
 

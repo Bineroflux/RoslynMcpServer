@@ -326,6 +326,21 @@ public sealed class RenameNamespaceTests
     }
 
     [Fact]
+    public async Task NamesThatAnEnclosingNamespaceFromAReferenceProvided_AreQualified()
+    {
+        using var ws = TestWorkspace.Create(
+            ("Tools.cs", "namespace System.Tools\n{\n    public class Clock { public Version? V; public DateTime At; public int Size() => Text.Encoding.UTF8.GetByteCount(\"x\"); }\n}\n"));
+
+        var result = await RenameAsync(ws, "System.Tools", "Acme.Tools");
+
+        Assert.True(result.Success, result.Error?.Message);
+        Assert.Equal(
+            "namespace Acme.Tools\n{\n    public class Clock { public System.Version? V; public System.DateTime At; public int Size() => System.Text.Encoding.UTF8.GetByteCount(\"x\"); }\n}\n",
+            ws.ReadFile("Tools.cs"));
+        Assert.Empty(ws.GetDiskCompilationErrors());
+    }
+
+    [Fact]
     public async Task NamesThatAnExistingTargetNamespaceWouldShadow_AreQualified()
     {
         using var ws = TestWorkspace.Create(

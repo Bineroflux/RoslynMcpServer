@@ -233,6 +233,14 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
             if (FindNamespace(compilation.GlobalNamespace, rename.New) != null)
                 rename.NewExists = true;
 
+            // What a simple name inside a renamed declaration can find in the namespaces that
+            // enclose it before or after the rename (but not in both, like the global one).
+            foreach (var enclosing in rename.EnclosingNamespaces)
+            {
+                foreach (var member in FindNamespace(compilation.GlobalNamespace, enclosing)?.GetMembers() ?? [])
+                    rename.EnclosingMemberNames.Add(member.Name);
+            }
+
             if (FindNamespace(compilation.GlobalNamespace, rename.Old) is { } oldNamespace)
             {
                 foreach (var ns in Namespaces(oldNamespace))
@@ -577,7 +585,9 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
     /// through the enclosing namespace; renamed to <c>Other.New</c>, they would find nothing, or
     /// an <c>Other.Helper</c>. <see cref="QualifyEnclosedNamesAsync"/> qualifies those that no
     /// longer bind to the same symbol. Names the rewrite replaces, and the parts of a name right of
-    /// its first, are left out.
+    /// its first, are left out, and so is any name not spelled like a member of the namespaces the
+    /// rename changes around them (<see cref="NamespaceRename.EnclosingMemberNames"/>), which
+    /// spares binding every identifier of the renamed files.
     /// </summary>
     private static async Task CollectEnclosedNamesAsync(NamespaceRename rename, DocumentRewrite version, CancellationToken cancellationToken)
     {
@@ -588,7 +598,10 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
         {
             foreach (var name in block.DescendantNodes(descendIntoTrivia: true).OfType<SimpleNameSyntax>())
             {
-                if (!StartsAName(name) ||
+                var text = name.Identifier.ValueText;
+                if (!(rename.EnclosingMemberNames.Contains(text) ||
+                      (name.Parent is AttributeSyntax && rename.EnclosingMemberNames.Contains(text + "Attribute"))) ||
+                    !StartsAName(name) ||
                     name.Ancestors().OfType<BaseNamespaceDeclarationSyntax>().Any(ns => ns.Name.Span.Contains(name.Span)) ||
                     name.AncestorsAndSelf().Any(version.Replacements.ContainsKey) ||
                     BoundNamespaceOrType(model, name, cancellationToken) is not { } symbol)
@@ -1171,6 +1184,23 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
         /// the old parent's, or into a namespace that already has members of its own.
         /// </summary>
         public bool ChangesLookup => NewExists || Parent(Old) != Parent(New);
+
+        /// <summary>
+        /// The namespaces whose members a name inside a renamed declaration finds only before
+        /// the rename or only after it: those enclosing the old name, those enclosing the new
+        /// one, and the new namespace itself (which may have members of its own).
+        /// </summary>
+        public IEnumerable<string> EnclosingNamespaces =>
+            Prefixes(OldSegments).Concat(Prefixes(NewSegments)).Append(New).Distinct(StringComparer.Ordinal);
+
+        /// <summary>
+        /// The names of the types and namespaces in <see cref="EnclosingNamespaces"/>: only a
+        /// simple name spelled like one of them can bind differently after the rename.
+        /// </summary>
+        public HashSet<string> EnclosingMemberNames { get; } = new(StringComparer.Ordinal);
+
+        private static IEnumerable<string> Prefixes(string[] segments) =>
+            Enumerable.Range(1, segments.Length - 1).Select(length => string.Join('.', segments.Take(length)));
 
         private static string Parent(string ns) => ns.LastIndexOf('.') is var dot and >= 0 ? ns[..dot] : "";
     }

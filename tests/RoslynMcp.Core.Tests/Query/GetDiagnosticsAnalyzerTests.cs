@@ -367,6 +367,59 @@ public sealed class GetDiagnosticsAnalyzerTests
     }
 
     [Fact]
+    public async Task UnresolvedAnalyzerReference_OfAProjectWhoseAnalyzersRun_IsRMCP0003_WhateverTheFilters()
+    {
+        var projects = new[]
+        {
+            new TestWorkspace.ProjectSpec("App", [("A.cs", ASource)]),
+            new TestWorkspace.ProjectSpec("Lib", [("B.cs", BSource.Replace("namespace App;", "namespace Lib;"))]),
+        };
+        var unresolved = new Dictionary<string, string[]>
+        {
+            ["App"] = [@"C:\missing\App.Analyzers.dll"],
+            ["Lib"] = [@"C:\missing\Lib.Analyzers.dll"],
+        };
+        using var ws = TestWorkspace.CreateSolution(projects, generatorLoadIssues: null, unresolved);
+        using var plain = TestWorkspace.CreateSolution(projects, generatorLoadIssues: null);
+        var filters = new GetDiagnosticsParams
+        {
+            IncludeAnalyzers = true,
+            DiagnosticIds = ["CA1822"],
+            ExcludeDiagnosticIds = ["RMCP0003"],
+            MessageFilter = "no such text",
+            SeverityFilter = "Error"
+        };
+
+        var whole = await GetAsync(ws, filters);
+        var lib = await GetAsync(ws, new GetDiagnosticsParams { IncludeAnalyzers = true, ProjectPath = ws.ProjectPathOf("Lib") });
+        var appFile = await GetAsync(ws, new GetDiagnosticsParams { IncludeAnalyzers = true, SourceFile = ws.PathOf("App", "A.cs") });
+
+        Assert.Equal(
+            [
+                @"Analyzer reference 'C:\missing\App.Analyzers.dll' of project 'App' could not be resolved (the file does not exist), " +
+                "so its analyzers did not run; the result may be incomplete.",
+                @"Analyzer reference 'C:\missing\Lib.Analyzers.dll' of project 'Lib' could not be resolved (the file does not exist), " +
+                "so its analyzers did not run; the result may be incomplete.",
+            ],
+            whole.Diagnostics.Select(d => d.Message));
+        Assert.All(whole.Diagnostics, d => Assert.Equal("RMCP0003", d.Id));
+        Assert.Equal(["RMCP0003"], lib.Diagnostics.Select(d => d.Id));
+        Assert.Contains("Lib.Analyzers.dll", lib.Diagnostics[0].Message);
+        Assert.Equal("RMCP0003", appFile.Diagnostics[0].Id);
+        Assert.Contains("App.Analyzers.dll", appFile.Diagnostics[0].Message);
+        Assert.DoesNotContain(appFile.Diagnostics, d => d.Message.Contains("Lib.Analyzers.dll"));
+
+        // Without includeAnalyzers nothing changes.
+        foreach (var severity in new[] { "Warning", "All" })
+        {
+            var with = await GetAsync(ws, new GetDiagnosticsParams { SeverityFilter = severity });
+            var without = await GetAsync(plain, new GetDiagnosticsParams { SeverityFilter = severity });
+            Assert.Equal(without.Diagnostics.Select(d => (d.Id, d.Message, d.Line)), with.Diagnostics.Select(d => (d.Id, d.Message, d.Line)));
+            Assert.DoesNotContain(with.Diagnostics, d => d.Id.StartsWith("RMCP", StringComparison.Ordinal));
+        }
+    }
+
+    [Fact]
     public async Task ProjectThatCannotBeCompiled_ReportsRMCP0003_WhateverTheFilters()
     {
         using var ws = await CreateAsync(RaiseToWarning);

@@ -99,6 +99,13 @@ public sealed class WorkspaceContext : IDisposable
     /// </summary>
     public IReadOnlyCollection<WorkspaceDiagnostic> LoadDiagnostics => _s.LoadDiagnostics;
 
+    /// <summary>
+    /// The analyzer references of <paramref name="projectId"/> that Roslyn could not resolve
+    /// and the load removed (their analyzers and generators never run); empty for most projects.
+    /// </summary>
+    internal IReadOnlyList<UnresolvedAnalyzerReferenceInfo> UnresolvedAnalyzerReferencesOf(ProjectId projectId) =>
+        _s.UnresolvedAnalyzerReferences.TryGetValue(projectId, out var references) ? references : [];
+
     internal WorkspaceContext(
         Microsoft.CodeAnalysis.Workspace workspace,
         Solution solution,
@@ -109,7 +116,8 @@ public sealed class WorkspaceContext : IDisposable
         IReadOnlyDictionary<string, string>? msbuildProperties = null,
         FileBasedProgramInfo? fileBasedProgram = null,
         IReadOnlyCollection<WorkspaceDiagnostic>? loadDiagnostics = null,
-        IReadOnlyDictionary<ProjectId, Encoding>? declaredEncodings = null)
+        IReadOnlyDictionary<ProjectId, Encoding>? declaredEncodings = null,
+        IReadOnlyDictionary<ProjectId, IReadOnlyList<UnresolvedAnalyzerReferenceInfo>>? unresolvedAnalyzerReferences = null)
     {
         _s = new Session(
             workspace,
@@ -122,7 +130,9 @@ public sealed class WorkspaceContext : IDisposable
                 ?? ImmutableDictionary<string, string>.Empty,
             fileBasedProgram,
             loadDiagnostics ?? Array.Empty<WorkspaceDiagnostic>(),
-            declaredEncodings?.ToImmutableDictionary() ?? ImmutableDictionary<ProjectId, Encoding>.Empty);
+            declaredEncodings?.ToImmutableDictionary() ?? ImmutableDictionary<ProjectId, Encoding>.Empty,
+            unresolvedAnalyzerReferences?.ToImmutableDictionary()
+                ?? ImmutableDictionary<ProjectId, IReadOnlyList<UnresolvedAnalyzerReferenceInfo>>.Empty);
     }
 
     /// <summary>A handle on the session of a cached workspace, holding one operation lease.</summary>
@@ -148,7 +158,8 @@ public sealed class WorkspaceContext : IDisposable
         ImmutableDictionary<string, string> msbuildProperties,
         FileBasedProgramInfo? fileBasedProgram,
         IReadOnlyCollection<WorkspaceDiagnostic> loadDiagnostics,
-        ImmutableDictionary<ProjectId, Encoding> declaredEncodings)
+        ImmutableDictionary<ProjectId, Encoding> declaredEncodings,
+        ImmutableDictionary<ProjectId, IReadOnlyList<UnresolvedAnalyzerReferenceInfo>> unresolvedAnalyzerReferences)
     {
         public readonly Microsoft.CodeAnalysis.Workspace Workspace = workspace;
 
@@ -161,6 +172,8 @@ public sealed class WorkspaceContext : IDisposable
         public readonly string LoadedPath = loadedPath;
         public readonly IFileWriter FileWriter = fileWriter;
         public readonly IReadOnlyList<string> GeneratorLoadIssues = generatorLoadIssues;
+        public readonly ImmutableDictionary<ProjectId, IReadOnlyList<UnresolvedAnalyzerReferenceInfo>> UnresolvedAnalyzerReferences =
+            unresolvedAnalyzerReferences;
         public readonly IReadOnlyCollection<WorkspaceDiagnostic> LoadDiagnostics = loadDiagnostics;
         public readonly IDisposable? AnalyzerAssemblyLoader = analyzerAssemblyLoader;
         public readonly IReadOnlyList<AnalyzerFileStamp> AnalyzerStamps = CaptureMutableAnalyzerStamps(solution);

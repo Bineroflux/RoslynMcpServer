@@ -84,7 +84,7 @@ public sealed class GetDiagnosticsTool : IToolHandler
             includeAnalyzers = new
             {
                 type = "boolean",
-                description = "Also run each project's analyzers as the build does (default: false): the .NET CA analyzers of SDK projects, the IDE code-style analyzers only if the project sets EnforceCodeStyleInBuild, and analyzers from packages; severities from .editorconfig/global config, suppressions applied. SLOW: seconds per project even when warm. Narrow it with projectPath, a .cs sourceFile (most analyzers then run on that file only) or diagnosticIds. An analyzer that throws shows up as AD0001, analyzers that can't be loaded or run as RMCP0001/RMCP0003; these mean the result is incomplete, so they are listed first and no filter drops them."
+                description = "Also run each project's analyzers as the build does (default: false): the .NET CA analyzers of SDK projects, the IDE code-style analyzers only if the project sets EnforceCodeStyleInBuild, and analyzers from packages; severities from .editorconfig/global config, suppressions applied. SLOW: seconds per project even when warm. Narrow it with projectPath, a .cs sourceFile (most analyzers then run on that file only) or diagnosticIds. An analyzer that throws shows up as AD0001, analyzers that can't be resolved, loaded or run as RMCP0001/RMCP0003; these mean the result is incomplete, so they are listed first and no filter drops them."
             }
         },
         additionalProperties = false

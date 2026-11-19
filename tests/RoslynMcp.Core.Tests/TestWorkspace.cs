@@ -166,8 +166,14 @@ internal sealed class TestWorkspace : IDisposable
     /// <inheritdoc cref="CreateSolution(ProjectSpec[])"/>
     /// <param name="projects">The projects.</param>
     /// <param name="generatorLoadIssues">What the workspace reports as generator load issues.</param>
+    /// <param name="unresolvedAnalyzerReferences">
+    /// By project name, the paths of analyzer references the load could not resolve (and removed),
+    /// for every target framework of the project.
+    /// </param>
     public static TestWorkspace CreateSolution(
-        IReadOnlyList<ProjectSpec> projects, IReadOnlyList<string>? generatorLoadIssues)
+        IReadOnlyList<ProjectSpec> projects,
+        IReadOnlyList<string>? generatorLoadIssues,
+        IReadOnlyDictionary<string, string[]>? unresolvedAnalyzerReferences = null)
     {
         var directory = Path.Combine(Path.GetTempPath(), $"RoslynMcpServer.TestWorkspace-{Guid.NewGuid():N}");
         System.IO.Directory.CreateDirectory(directory);
@@ -238,7 +244,15 @@ internal sealed class TestWorkspace : IDisposable
             }
         }
 
-        var context = new WorkspaceContext(workspace, solution, directory, generatorLoadIssues: generatorLoadIssues);
+        var unresolved = (unresolvedAnalyzerReferences ?? new Dictionary<string, string[]>())
+            .SelectMany(entry => instances[entry.Key].Select(id => (Id: id, Paths: entry.Value)))
+            .ToDictionary(
+                e => e.Id,
+                e => (IReadOnlyList<UnresolvedAnalyzerReferenceInfo>)e.Paths
+                    .Select(path => new UnresolvedAnalyzerReferenceInfo(path, "the file does not exist"))
+                    .ToList());
+        var context = new WorkspaceContext(
+            workspace, solution, directory, generatorLoadIssues: generatorLoadIssues, unresolvedAnalyzerReferences: unresolved);
         return new TestWorkspace(directory, context, references);
     }
 

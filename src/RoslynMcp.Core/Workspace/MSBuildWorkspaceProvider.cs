@@ -259,7 +259,8 @@ public sealed class MSBuildWorkspaceProvider : IWorkspaceProvider, IDisposable
         // restore artifact gone). Several internal switches don't have a case
         // for them and throw "Unexpected value 'UnresolvedAnalyzerReference'".
         var generatorIssues = new List<string>();
-        solution = StripUnresolvedAnalyzerReferences(solution, generatorIssues);
+        var unresolvedAnalyzerReferences = new Dictionary<ProjectId, IReadOnlyList<UnresolvedAnalyzerReferenceInfo>>();
+        solution = StripUnresolvedAnalyzerReferences(solution, generatorIssues, unresolvedAnalyzerReferences);
 
         // Re-wrap analyzer/source-generator references so their assemblies load from
         // shadow copies instead of the build output. This is what lets a concurrent
@@ -304,14 +305,17 @@ public sealed class MSBuildWorkspaceProvider : IWorkspaceProvider, IDisposable
             msbuildProperties: properties,
             fileBasedProgram: fileBasedProgram,
             loadDiagnostics: diagnostics,
-            declaredEncodings: declaredEncodings);
+            declaredEncodings: declaredEncodings,
+            unresolvedAnalyzerReferences: unresolvedAnalyzerReferences);
     }
 
     /// <summary>
     /// Returns a solution where every project's analyzer reference list has any
     /// <see cref="UnresolvedAnalyzerReference"/> entries removed. Records any stripped
     /// references that look like known source generators (currently: Razor) into
-    /// <paramref name="generatorIssues"/> so callers can surface them.
+    /// <paramref name="generatorIssues"/> so callers can surface them, and every stripped
+    /// reference, with the reason, into <paramref name="unresolved"/> by project
+    /// (<c>get_diagnostics</c> reports those only when it runs the project's analyzers).
     /// </summary>
     /// <remarks>
     /// The cleaned solution is returned as the in-memory snapshot only; it is
@@ -320,8 +324,10 @@ public sealed class MSBuildWorkspaceProvider : IWorkspaceProvider, IDisposable
     /// would rewrite the user's project files. Every operation reads through
     /// <see cref="WorkspaceContext.Solution"/>, so the held snapshot is authoritative.
     /// </remarks>
-    private Solution StripUnresolvedAnalyzerReferences(
-        Solution solution, List<string> generatorIssues)
+    internal Solution StripUnresolvedAnalyzerReferences(
+        Solution solution,
+        List<string> generatorIssues,
+        Dictionary<ProjectId, IReadOnlyList<UnresolvedAnalyzerReferenceInfo>> unresolved)
     {
         foreach (var projectId in solution.ProjectIds)
         {
@@ -330,18 +336,28 @@ public sealed class MSBuildWorkspaceProvider : IWorkspaceProvider, IDisposable
 
             var keep = new List<AnalyzerReference>(project.AnalyzerReferences.Count);
             var razorRemovedPaths = new List<string>();
+            var removedReferences = new List<UnresolvedAnalyzerReferenceInfo>();
             foreach (var reference in project.AnalyzerReferences)
             {
                 if (reference is UnresolvedAnalyzerReference)
                 {
+                    var path = reference.FullPath ?? reference.Display ?? "<unknown>";
                     if (LooksLikeRazorGenerator(reference))
-                        razorRemovedPaths.Add(reference.FullPath ?? reference.Display ?? "<unknown>");
+                        razorRemovedPaths.Add(path);
+
+                    // Roslyn keeps the path as the project wrote it, which may be relative to the project.
+                    var absolutePath = AbsoluteToProject(project, reference.FullPath);
+                    removedReferences.Add(new UnresolvedAnalyzerReferenceInfo(
+                        absolutePath ?? path,
+                        File.Exists(absolutePath) ? "Roslyn could not resolve the file" : "the file does not exist"));
                     continue;
                 }
                 keep.Add(reference);
             }
             var removed = project.AnalyzerReferences.Count - keep.Count;
             if (removed == 0) continue;
+
+            unresolved[projectId] = removedReferences;
 
             LogCallback?.Invoke(
                 $"Stripping {removed} unresolved analyzer reference(s) from project '{project.Name}'.");
@@ -360,6 +376,22 @@ public sealed class MSBuildWorkspaceProvider : IWorkspaceProvider, IDisposable
         }
 
         return solution;
+    }
+
+    /// <summary>
+    /// <paramref name="path"/> made absolute against the directory of <paramref name="project"/>'s
+    /// file; null when there is no path or the project has no file to resolve a relative one by.
+    /// </summary>
+    private static string? AbsoluteToProject(Project project, string? path)
+    {
+        if (string.IsNullOrEmpty(path))
+            return null;
+
+        if (Path.IsPathRooted(path))
+            return path;
+
+        var projectDirectory = Path.GetDirectoryName(project.FilePath);
+        return string.IsNullOrEmpty(projectDirectory) ? null : Path.GetFullPath(Path.Combine(projectDirectory, path));
     }
 
     private static bool LooksLikeRazorGenerator(AnalyzerReference reference)

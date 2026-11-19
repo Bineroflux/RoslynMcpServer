@@ -143,7 +143,20 @@ public sealed class GetDiagnosticsOperation : QueryOperationBase<GetDiagnosticsP
 
             var analyzersWanted = @params.IncludeAnalyzers == true && WantsAnalyzers(project, normalizedSourceFile);
             if (analyzersWanted)
+            {
                 analyzedProjects.Add(project);
+
+                // The load removed the analyzer references Roslyn couldn't resolve; whether they
+                // hold an analyzer for a wanted ID can't be known.
+                foreach (var unresolved in Context.UnresolvedAnalyzerReferencesOf(project.Id))
+                {
+                    AddAnalyzerFailureMessage(
+                        diagnostics,
+                        project,
+                        $"Analyzer reference '{unresolved.Path}' of project '{project.Name}' could not be resolved " +
+                        $"({unresolved.Reason}), so its analyzers did not run; the result may be incomplete.");
+                }
+            }
 
             if (compilation is null)
             {
@@ -349,11 +362,17 @@ public sealed class GetDiagnosticsOperation : QueryOperationBase<GetDiagnosticsP
     /// (RMCP0003). It means the result is incomplete, so no filter drops it.
     /// </summary>
     private static void AddAnalyzerFailure(DiagnosticCollector diagnostics, Project project, string failure) =>
+        AddAnalyzerFailureMessage(
+            diagnostics,
+            project,
+            $"Analyzers failed while processing project '{project.Name}': {failure}. Their diagnostics will be missing.");
+
+    /// <inheritdoc cref="AddAnalyzerFailure"/>
+    private static void AddAnalyzerFailureMessage(DiagnosticCollector diagnostics, Project project, string message) =>
         diagnostics.Add(new DiagnosticInfo
         {
             Id = "RMCP0003",
-            Message = $"Analyzers failed while processing project '{project.Name}': {failure}. " +
-                      "Their diagnostics will be missing.",
+            Message = message,
             Severity = DiagnosticSeverity.Info.ToString(),
             Category = "RoslynMcp.Workspace",
             File = null,

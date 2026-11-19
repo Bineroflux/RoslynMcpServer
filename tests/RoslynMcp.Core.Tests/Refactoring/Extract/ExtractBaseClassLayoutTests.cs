@@ -87,7 +87,9 @@ public sealed class ExtractBaseClassLayoutTests
         var result = await ExtractAsync(ws, targetFile: ws.PathOf("ShapeBase.cs"));
 
         Assert.True(result.Success, result.Error?.Message);
-        Assert.Contains("""
+        Assert.Equal("""
+            namespace App;
+
             public class ShapeBase
             {
                 protected int a;
@@ -103,6 +105,7 @@ public sealed class ExtractBaseClassLayoutTests
                     return a+1; // sum
                 }
             }
+
             """.ReplaceLineEndings("\n"), File.ReadAllText(ws.PathOf("ShapeBase.cs")).ReplaceLineEndings("\n"));
         Assert.Empty(ws.GetDiskCompilationErrors());
     }

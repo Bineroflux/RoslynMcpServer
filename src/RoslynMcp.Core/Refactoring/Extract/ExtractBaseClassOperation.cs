@@ -365,6 +365,16 @@ public sealed class ExtractBaseClassOperation : RefactoringOperationBase<Extract
         var normalizedClass = compilationUnit.DescendantNodes().OfType<ClassDeclarationSyntax>().First();
         compilationUnit = compilationUnit.ReplaceNode(normalizedClass, SeparateMembers(normalizedClass, lineEnding));
 
+        // A blank line after the usings and the namespace line, and a line break at the end of
+        // the file, which NormalizeWhitespace leaves out.
+        var lineBreak = SyntaxFactory.EndOfLine(lineEnding);
+        var blankLineAfter = compilationUnit.Usings.Select(u => u.GetLastToken()).TakeLast(1)
+            .Concat(compilationUnit.Members.OfType<FileScopedNamespaceDeclarationSyntax>().Select(n => n.SemicolonToken))
+            .ToList();
+        compilationUnit = compilationUnit.ReplaceTokens(blankLineAfter, (_, token) => token.WithTrailingTrivia(lineBreak, lineBreak));
+        compilationUnit = compilationUnit.ReplaceToken(
+            compilationUnit.GetLastToken(), compilationUnit.GetLastToken().WithTrailingTrivia(lineBreak));
+
         return newDoc.WithSyntaxRoot(compilationUnit).Project.Solution;
     }
 

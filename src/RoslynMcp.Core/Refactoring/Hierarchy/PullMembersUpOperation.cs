@@ -240,7 +240,7 @@ public sealed class PullMembersUpOperation : RefactoringOperationBase<PullMember
         }
 
         affected = affected.Distinct().ToList();
-        var warnings = notes.Concat(await IntroducedErrors.FindAsync(solution, newSolution, affected, cancellationToken) ?? []).ToList();
+        var warnings = notes.Concat(await IntroducedErrors.FindInProjectsAsync(solution, newSolution, affected, cancellationToken) ?? []).ToList();
 
         if (@params.Preview)
         {

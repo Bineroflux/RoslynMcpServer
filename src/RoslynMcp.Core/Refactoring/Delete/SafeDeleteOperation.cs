@@ -638,7 +638,7 @@ public sealed class SafeDeleteOperation : RefactoringOperationBase<SafeDeletePar
         }
 
         // The deletion removes lines, so the errors below it move; they are matched without their line.
-        var errors = await IntroducedErrors.FindAsync(before, after, documents, cancellationToken, matchLines: false);
+        var errors = await IntroducedErrors.FindInProjectsAsync(before, after, documents, cancellationToken, matchLines: false);
         var warnings = (errors ?? []).Concat(notes).ToList();
         return warnings.Count == 0 ? null : warnings;
     }

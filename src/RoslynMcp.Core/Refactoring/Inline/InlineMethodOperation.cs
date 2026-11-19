@@ -194,7 +194,10 @@ public sealed class InlineMethodOperation : RefactoringOperationBase<InlineMetho
         if (deleteMethod && !deletes)
             warnings.Add(await KeptReasonAsync(method, model.Compilation, solution, others.Count + calls.Count - plans.Count, cancellationToken));
         warnings.AddRange(layoutNotes);
-        warnings.AddRange(await IntroducedErrors.FindAsync(solution, newSolution, edited, cancellationToken) ?? []);
+        // Deleting the method can break code anywhere that sees it; inlining calls only where they were.
+        warnings.AddRange((deletes
+            ? await IntroducedErrors.FindInProjectsAsync(solution, newSolution, edited, cancellationToken)
+            : await IntroducedErrors.FindAsync(solution, newSolution, edited, cancellationToken)) ?? []);
 
         if (@params.Preview)
         {

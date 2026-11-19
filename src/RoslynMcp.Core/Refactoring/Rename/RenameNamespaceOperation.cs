@@ -131,9 +131,13 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
         affected.UnionWith(await DocumentsMentioningAsync(newSolution, vanished, cancellationToken));
         foreach (var projectId in scan.ProjectsWithGenerated.Concat(projectsWithUsings))
             affected.UnionWith(solution.GetProject(projectId)?.DocumentIds ?? []);
-        warnings.AddRange(await IntroducedErrors.FindAsync(solution, newSolution, affected, cancellationToken) ?? []);
-        warnings.AddRange(await IntroducedErrors.FindInGeneratedAsync(
-            solution, newSolution, razor.Projects, RazorNamespaceDirectives.IsRazorFile, cancellationToken) ?? []);
+        warnings.AddRange(await IntroducedErrors.FindInProjectsAsync(solution, newSolution, affected, cancellationToken) ?? []);
+        foreach (var error in await IntroducedErrors.FindInGeneratedAsync(
+            solution, newSolution, razor.Projects, RazorNamespaceDirectives.IsRazorFile, cancellationToken) ?? [])
+        {
+            if (!warnings.Contains(error))
+                warnings.Add(error);
+        }
 
         var references = scan.Files.Sum(f => f.References) + razor.Files.Sum(f => f.Directives);
         if (@params.Preview)

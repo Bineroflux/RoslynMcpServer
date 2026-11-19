@@ -8,6 +8,7 @@ using RoslynMcp.Contracts.Errors;
 using RoslynMcp.Contracts.Models;
 using RoslynMcp.Core.FileSystem;
 using RoslynMcp.Core.Refactoring.Base;
+using RoslynMcp.Core.Refactoring.Signature;
 using RoslynMcp.Core.Refactoring.Utilities;
 using RoslynMcp.Core.Resolution;
 using RoslynMcp.Core.Workspace;
@@ -181,6 +182,15 @@ public sealed class ExtractInterfaceOperation : RefactoringOperationBase<Extract
         }
 
         newSolution = await GeneratedCodeFormatter.FormatAsync(newSolution, document, cancellationToken);
+
+        // The errors the interface leaves: a type that now implements it can break code in any
+        // project that sees it; an interface on its own only its own file.
+        var edited = newSolution.GetChanges(document.Project.Solution).GetProjectChanges()
+            .SelectMany(p => p.GetChangedDocuments(onlyGetDocumentsWithTextChanges: true).Concat(p.GetAddedDocuments()))
+            .ToList();
+        AddWarnings((@params.AddInterfaceToType
+            ? await IntroducedErrors.FindInProjectsAsync(document.Project.Solution, newSolution, edited, cancellationToken)
+            : await IntroducedErrors.FindAsync(document.Project.Solution, newSolution, edited, cancellationToken)) ?? []);
 
         // If preview mode, return without applying
         if (@params.Preview)

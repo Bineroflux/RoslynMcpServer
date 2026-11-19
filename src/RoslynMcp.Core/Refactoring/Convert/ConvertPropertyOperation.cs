@@ -373,7 +373,7 @@ public sealed class ConvertPropertyOperation : RefactoringOperationBase<ConvertP
         newSolution = newSolution.WithDocumentText(fieldDocument.Id, DeclarationRemoval.Remove(
             text, DeclarationRemoval.Spans(text, fieldRoot!.GetAnnotatedNodes(RemovedFieldAnnotationKind))));
 
-        warnings.AddRange(await IntroducedErrors.FindAsync(
+        warnings.AddRange(await IntroducedErrors.FindInProjectsAsync(
             solution, newSolution, edits.Documents.Append(fieldDocument.Id).Distinct().ToList(), cancellationToken, matchLines: false) ?? []);
 
         if (@params.Preview)

@@ -150,6 +150,9 @@ public sealed class GeneratedReferenceTests
         Assert.Contains("public static int Number", ws.ReadFile("Api.cs"));
         AssertRazorUnchanged(ws, "@Api.Count");
         Assert.Contains(result.Warnings!, w => w.StartsWith($"{ws.PathOf("Widget.razor")}(2,6): the use of 'Count' is in code generated from this file and was not changed to 'Number'", StringComparison.Ordinal));
+        // The field is private now: the generated use no longer compiles, which is reported too.
+        Assert.Contains(result.Warnings!, w => w.StartsWith($"{ws.PathOf("Widget.razor")}(2,6): error CS0122", StringComparison.Ordinal));
+        WarningAssert.AreTheCompilerErrors(ws, result.Warnings);
     }
 
     [Fact]
@@ -165,6 +168,9 @@ public sealed class GeneratedReferenceTests
         Assert.Contains("public static int Total { get; set; }", ws.ReadFile("Api.cs"));
         AssertRazorUnchanged(ws, "@Api._total");
         Assert.Contains(result.Warnings!, w => w.StartsWith($"{ws.PathOf("Widget.razor")}(2,6): the use of '_total' is in code generated from this file and was not changed to 'Total'", StringComparison.Ordinal));
+        // The field is gone: the generated use no longer compiles, which is reported too.
+        Assert.Contains(result.Warnings!, w => w.StartsWith($"{ws.PathOf("Widget.razor")}(2,6): error CS0117", StringComparison.Ordinal));
+        WarningAssert.AreTheCompilerErrors(ws, result.Warnings);
     }
 
     [Fact]

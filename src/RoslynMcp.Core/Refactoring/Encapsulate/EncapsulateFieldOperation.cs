@@ -233,7 +233,7 @@ public sealed class EncapsulateFieldOperation : RefactoringOperationBase<Encapsu
         }
 
         var newSolution = await edits.ApplyAsync(solution, cancellationToken);
-        warnings.AddRange(await IntroducedErrors.FindAsync(solution, newSolution, edits.Documents, cancellationToken, matchLines: false) ?? []);
+        warnings.AddRange(await IntroducedErrors.FindInProjectsAsync(solution, newSolution, edits.Documents, cancellationToken, matchLines: false) ?? []);
 
         if (@params.Preview)
         {

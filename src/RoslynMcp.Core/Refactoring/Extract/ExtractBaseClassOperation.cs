@@ -296,8 +296,9 @@ public sealed class ExtractBaseClassOperation : RefactoringOperationBase<Extract
     }
 
     /// <summary>
-    /// The compiler errors the extraction introduces in the type's file, the new base class's file
-    /// and the files referencing the moved members.
+    /// The compiler errors the extraction introduces in the projects compiling the type's file,
+    /// the new base class's file and the files referencing the moved members, and in the projects
+    /// depending on them: the type has another base class now.
     /// </summary>
     private static async Task<IReadOnlyList<string>?> FindWarningsAsync(
         Solution before,
@@ -316,7 +317,7 @@ public sealed class ExtractBaseClassOperation : RefactoringOperationBase<Extract
                 documents.UnionWith(reference.Locations.Select(l => l.Document.Id));
         }
 
-        return await IntroducedErrors.FindAsync(before, after, documents, cancellationToken);
+        return await IntroducedErrors.FindInProjectsAsync(before, after, documents, cancellationToken);
     }
 
     private static ClassDeclarationSyntax GenerateBaseClass(

@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -6,6 +5,7 @@ using RoslynMcp.Contracts.Enums;
 using RoslynMcp.Contracts.Errors;
 using RoslynMcp.Contracts.Models;
 using RoslynMcp.Core.FileSystem;
+using RoslynMcp.Core.Refactoring.Base;
 using RoslynMcp.Core.Refactoring.Utilities;
 using RoslynMcp.Core.Resolution;
 using RoslynMcp.Core.Workspace;
@@ -16,128 +16,70 @@ namespace RoslynMcp.Core.Refactoring;
 /// Moves a type declaration to a different file.
 /// Handles file creation, using directive updates, and reference preservation.
 /// </summary>
-public sealed class MoveTypeToFileOperation
+public sealed class MoveTypeToFileOperation : RefactoringOperationBase<MoveTypeToFileParams>
 {
-    private readonly WorkspaceContext _context;
-    private readonly TypeSymbolResolver _symbolResolver;
-    private readonly ReferenceTracker _referenceTracker;
-
     /// <summary>
     /// Creates a new move type to file operation.
     /// </summary>
     /// <param name="context">Workspace context.</param>
-    public MoveTypeToFileOperation(WorkspaceContext context)
+    public MoveTypeToFileOperation(WorkspaceContext context) : base(context)
     {
-        _context = context;
-        _symbolResolver = context.CreateSymbolResolver();
-        _referenceTracker = context.CreateReferenceTracker();
     }
 
-    /// <summary>
-    /// Executes the move operation. Runs as the workspace's single writer
-    /// (<see cref="WorkspaceContext.RunWriterAsync{T}"/>), from resolving the type to the commit.
-    /// </summary>
-    /// <param name="params">Operation parameters.</param>
-    /// <param name="cancellationToken">Cancellation token.</param>
-    /// <returns>Refactoring result.</returns>
-    public async Task<RefactoringResult> ExecuteAsync(
-        MoveTypeToFileParams @params,
-        CancellationToken cancellationToken = default)
-    {
-        try
-        {
-            return await _context.RunWriterAsync(ct => ExecuteCoreAsync(@params, ct), cancellationToken);
-        }
-        catch (OperationCanceledException)
-        {
-            // Cancelled while waiting for another refactoring of this workspace to finish.
-            throw new RefactoringException(ErrorCodes.Timeout, "Operation was cancelled.");
-        }
-    }
-
-    private async Task<RefactoringResult> ExecuteCoreAsync(
+    /// <inheritdoc />
+    protected override async Task<RefactoringResult> ExecuteCoreAsync(
+        Guid operationId,
         MoveTypeToFileParams @params,
         CancellationToken cancellationToken)
     {
-        var operationId = Guid.NewGuid();
-        var stopwatch = Stopwatch.StartNew();
+        // Resolve symbol
+        var resolution = await TypeResolver.FindTypeInFileAsync(
+            @params.SourceFile,
+            @params.SymbolName,
+            @params.Line,
+            cancellationToken);
 
-        try
+        // Validate target
+        await ValidateTargetAsync(@params, resolution, cancellationToken);
+
+        // Find all references
+        var references = await ReferenceTracker.FindAllReferencesAsync(
+            resolution.Symbol,
+            cancellationToken);
+
+        // Compute changes
+        var (newSolution, changeInfo) = await ComputeChangesAsync(
+            @params,
+            resolution,
+            references,
+            cancellationToken);
+
+        // If preview mode, return without applying
+        if (@params.Preview)
         {
-            // Validate inputs
-            ValidateInputs(@params);
-
-            // Resolve symbol
-            var resolution = await _symbolResolver.FindTypeInFileAsync(
-                @params.SourceFile,
-                @params.SymbolName,
-                @params.Line,
-                cancellationToken);
-
-            // Validate target
-            await ValidateTargetAsync(@params, resolution, cancellationToken);
-
-            // Find all references
-            var references = await _referenceTracker.FindAllReferencesAsync(
-                resolution.Symbol,
-                cancellationToken);
-
-            // Compute changes
-            var (newSolution, changeInfo) = await ComputeChangesAsync(
-                @params,
-                resolution,
-                references,
-                cancellationToken);
-
-            // If preview mode, return without applying
-            if (@params.Preview)
-            {
-                return CreatePreviewResult(operationId, changeInfo, resolution);
-            }
-
-            // Commit changes; a new target file takes the encoding of the file the type comes from.
-            var commitResult = await _context.CommitChangesAsync(
-                newSolution, resolution.Document.FilePath, cancellationToken);
-
-            if (!commitResult.Success)
-            {
-                throw new RefactoringException(
-                    ErrorCodes.FilesystemError,
-                    $"Failed to write files: {commitResult.Error}");
-            }
-
-            stopwatch.Stop();
-
-            return new RefactoringResult
-            {
-                Success = true,
-                OperationId = operationId,
-                Changes = new FileChanges
-                {
-                    FilesModified = commitResult.FilesModified,
-                    FilesCreated = commitResult.FilesCreated,
-                    FilesDeleted = commitResult.FilesDeleted
-                },
-                Symbol = CreateSymbolInfo(resolution, @params.TargetFile),
-                ReferencesUpdated = references.TotalReferenceCount,
-                ExecutionTimeMs = stopwatch.ElapsedMilliseconds,
-                Warnings = commitResult.Warnings.Count > 0 ? commitResult.Warnings : null
-            };
+            return CreatePreviewResult(operationId, changeInfo, resolution);
         }
-        catch (RefactoringException)
+
+        // Commit changes; a new target file takes the encoding of the file the type comes from.
+        var commitResult = await CommitChangesAsync(newSolution, resolution.Document.FilePath, cancellationToken);
+
+        return new RefactoringResult
         {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            throw new RefactoringException(
-                ErrorCodes.RoslynError,
-                $"Unexpected error: {ex.Message}",
-                ex);
-        }
+            Success = true,
+            OperationId = operationId,
+            Changes = new FileChanges
+            {
+                FilesModified = commitResult.FilesModified,
+                FilesCreated = commitResult.FilesCreated,
+                FilesDeleted = commitResult.FilesDeleted
+            },
+            Symbol = CreateSymbolInfo(resolution, @params.TargetFile),
+            ReferencesUpdated = references.TotalReferenceCount
+        };
     }
 
-    private void ValidateInputs(MoveTypeToFileParams @params)
+    /// <inheritdoc />
+    protected override void ValidateParams(MoveTypeToFileParams @params)
     {
         if (string.IsNullOrWhiteSpace(@params.SourceFile))
             throw new RefactoringException(ErrorCodes.MissingRequiredParam, "sourceFile is required.");
@@ -176,7 +118,7 @@ public sealed class MoveTypeToFileOperation
         SymbolResolutionResult resolution,
         CancellationToken cancellationToken)
     {
-        var targetDoc = _context.GetDocumentByPath(@params.TargetFile);
+        var targetDoc = Context.GetDocumentByPath(@params.TargetFile);
 
         if (targetDoc == null && !@params.CreateTargetFile)
         {
@@ -213,7 +155,7 @@ public sealed class MoveTypeToFileOperation
         ReferenceSearchResult references,
         CancellationToken cancellationToken)
     {
-        var solution = _context.Solution;
+        var solution = Context.Solution;
         var sourceDoc = resolution.Document;
         var sourceRoot = await sourceDoc.GetSyntaxRootAsync(cancellationToken);
 
@@ -234,7 +176,7 @@ public sealed class MoveTypeToFileOperation
         var targetContent = CreateTargetFileContent(typeNode, namespaceName, usings, lineEnding);
 
         // Check if target document exists
-        var targetDoc = _context.GetDocumentByPath(@params.TargetFile);
+        var targetDoc = Context.GetDocumentByPath(@params.TargetFile);
 
         if (targetDoc != null)
         {

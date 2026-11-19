@@ -108,9 +108,23 @@ public abstract class RefactoringOperationBase<TParams> : IRefactoringOperation<
     /// <param name="newSolution">Solution with changes.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>Commit result.</returns>
-    protected async Task<CommitResult> CommitChangesAsync(Solution newSolution, CancellationToken cancellationToken)
+    protected Task<CommitResult> CommitChangesAsync(Solution newSolution, CancellationToken cancellationToken) =>
+        CommitChangesAsync(newSolution, newFilesEncodingFrom: null, cancellationToken);
+
+    /// <summary>
+    /// Commits solution changes to the filesystem; a file the commit creates takes the
+    /// encoding of <paramref name="newFilesEncodingFrom"/> (see
+    /// <see cref="WorkspaceContext.CommitChangesAsync(Solution, string?, CancellationToken)"/>).
+    /// The commit's warnings are added to the operation's result.
+    /// </summary>
+    /// <param name="newSolution">Solution with changes.</param>
+    /// <param name="newFilesEncodingFrom">Existing file whose encoding added documents take.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>Commit result.</returns>
+    protected async Task<CommitResult> CommitChangesAsync(
+        Solution newSolution, string? newFilesEncodingFrom, CancellationToken cancellationToken)
     {
-        var result = await Context.CommitChangesAsync(newSolution, cancellationToken);
+        var result = await Context.CommitChangesAsync(newSolution, newFilesEncodingFrom, cancellationToken);
         if (!result.Success)
         {
             throw new RefactoringException(

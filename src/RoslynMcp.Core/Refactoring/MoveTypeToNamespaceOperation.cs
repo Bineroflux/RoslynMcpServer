@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -7,6 +6,7 @@ using RoslynMcp.Contracts.Enums;
 using RoslynMcp.Contracts.Errors;
 using RoslynMcp.Contracts.Models;
 using RoslynMcp.Core.FileSystem;
+using RoslynMcp.Core.Refactoring.Base;
 using RoslynMcp.Core.Refactoring.Utilities;
 using RoslynMcp.Core.Resolution;
 using RoslynMcp.Core.Workspace;
@@ -18,156 +18,99 @@ namespace RoslynMcp.Core.Refactoring;
 /// <c>updateFileLocation</c> moves its file into the matching folder when that is safe
 /// (see <see cref="NamespaceFolderMove.Plan(Document, SyntaxNode, string, Solution)"/>).
 /// </summary>
-public sealed class MoveTypeToNamespaceOperation
+public sealed class MoveTypeToNamespaceOperation : RefactoringOperationBase<MoveTypeToNamespaceParams>
 {
-    private readonly WorkspaceContext _context;
-    private readonly TypeSymbolResolver _symbolResolver;
-    private readonly ReferenceTracker _referenceTracker;
-
     /// <summary>
     /// Creates a new move type to namespace operation.
     /// </summary>
     /// <param name="context">Workspace context.</param>
-    public MoveTypeToNamespaceOperation(WorkspaceContext context)
+    public MoveTypeToNamespaceOperation(WorkspaceContext context) : base(context)
     {
-        _context = context;
-        _symbolResolver = context.CreateSymbolResolver();
-        _referenceTracker = context.CreateReferenceTracker();
     }
 
-    /// <summary>
-    /// Executes the namespace move operation. Runs as the workspace's single writer
-    /// (<see cref="WorkspaceContext.RunWriterAsync{T}"/>), from resolving the type to the commit.
-    /// </summary>
-    /// <param name="params">Operation parameters.</param>
-    /// <param name="cancellationToken">Cancellation token.</param>
-    /// <returns>Refactoring result.</returns>
-    public async Task<RefactoringResult> ExecuteAsync(
-        MoveTypeToNamespaceParams @params,
-        CancellationToken cancellationToken = default)
-    {
-        try
-        {
-            return await _context.RunWriterAsync(ct => ExecuteCoreAsync(@params, ct), cancellationToken);
-        }
-        catch (OperationCanceledException)
-        {
-            // Cancelled while waiting for another refactoring of this workspace to finish.
-            throw new RefactoringException(ErrorCodes.Timeout, "Operation was cancelled.");
-        }
-    }
-
-    private async Task<RefactoringResult> ExecuteCoreAsync(
+    /// <inheritdoc />
+    protected override async Task<RefactoringResult> ExecuteCoreAsync(
+        Guid operationId,
         MoveTypeToNamespaceParams @params,
         CancellationToken cancellationToken)
     {
-        var operationId = Guid.NewGuid();
-        var stopwatch = Stopwatch.StartNew();
+        // Resolve symbol
+        var resolution = await TypeResolver.FindTypeInFileAsync(
+            @params.SourceFile,
+            @params.SymbolName,
+            @params.Line,
+            cancellationToken);
 
-        try
+        // Validate namespace change
+        await ValidateNamespaceChangeAsync(@params, resolution, cancellationToken);
+
+        // Find all references
+        var references = await ReferenceTracker.FindAllReferencesAsync(
+            resolution.Symbol,
+            cancellationToken);
+
+        // Compute changes
+        var (newSolution, changeStats) = await ComputeChangesAsync(
+            @params,
+            resolution,
+            references,
+            cancellationToken);
+
+        var move = @params.UpdateFileLocation
+            ? NamespaceFolderMove.Plan(resolution.Document, resolution.Declaration, @params.TargetNamespace, Context.Solution)
+            : null;
+
+        // If preview mode, return without applying
+        if (@params.Preview)
         {
-            // Validate inputs
-            ValidateInputs(@params);
-
-            // Resolve symbol
-            var resolution = await _symbolResolver.FindTypeInFileAsync(
-                @params.SourceFile,
-                @params.SymbolName,
-                @params.Line,
-                cancellationToken);
-
-            // Validate namespace change
-            await ValidateNamespaceChangeAsync(@params, resolution, cancellationToken);
-
-            // Find all references
-            var references = await _referenceTracker.FindAllReferencesAsync(
-                resolution.Symbol,
-                cancellationToken);
-
-            // Compute changes
-            var (newSolution, changeStats) = await ComputeChangesAsync(
-                @params,
-                resolution,
-                references,
-                cancellationToken);
-
-            var move = @params.UpdateFileLocation
-                ? NamespaceFolderMove.Plan(resolution.Document, resolution.Declaration, @params.TargetNamespace, _context.Solution)
-                : null;
-
-            // If preview mode, return without applying
-            if (@params.Preview)
-            {
-                return CreatePreviewResult(operationId, @params, resolution, changeStats, move);
-            }
-
-            // Commit changes. The namespace change is written in place, so the file keeps its
-            // encoding; the move below is a plain file system move.
-            var commitResult = await _context.CommitChangesAsync(newSolution, cancellationToken);
-
-            if (!commitResult.Success)
-            {
-                throw new RefactoringException(
-                    ErrorCodes.FilesystemError,
-                    $"Failed to write files: {commitResult.Error}");
-            }
-
-            var sourcePath = resolution.Document.FilePath!;
-            var filesModified = commitResult.FilesModified.ToList();
-            var filesCreated = commitResult.FilesCreated.ToList();
-            var filesDeleted = commitResult.FilesDeleted.ToList();
-            var warning = FileNotMovedWarning(move?.SkipReason);
-            string? movedTo = null;
-            if (move?.TargetPath != null)
-            {
-                var outcome = (await NamespaceFolderMove.MoveAsync(
-                    _context, [new PlannedMove(resolution.Document.Project.FilePath!, sourcePath, move)], cancellationToken))[0];
-                (movedTo, var problem) = (outcome.MovedTo, outcome.Problem);
-                warning = problem == null ? null : RefactoringError.Create("PARTIAL_SUCCESS", problem);
-            }
-
-            if (movedTo != null)
-            {
-                filesModified.RemoveAll(f => PathResolver.PathsEqual(f, sourcePath));
-                filesCreated.Add(movedTo);
-                filesDeleted.Add(sourcePath);
-            }
-
-            stopwatch.Stop();
-
-            return new RefactoringResult
-            {
-                Success = true,
-                OperationId = operationId,
-                Changes = new FileChanges
-                {
-                    FilesModified = filesModified,
-                    FilesCreated = filesCreated,
-                    FilesDeleted = filesDeleted
-                },
-                Symbol = CreateSymbolInfo(resolution, @params.TargetNamespace, movedTo),
-                ReferencesUpdated = references.TotalReferenceCount,
-                UsingDirectivesAdded = changeStats.UsingsAdded,
-                UsingDirectivesRemoved = changeStats.UsingsRemoved,
-                ExecutionTimeMs = stopwatch.ElapsedMilliseconds,
-                Error = warning,
-                Warnings = commitResult.Warnings.Count > 0 ? commitResult.Warnings : null
-            };
+            return CreatePreviewResult(operationId, @params, resolution, changeStats, move);
         }
-        catch (RefactoringException)
+
+        // Commit changes. The namespace change is written in place, so the file keeps its
+        // encoding; the move below is a plain file system move.
+        var commitResult = await CommitChangesAsync(newSolution, cancellationToken);
+
+        var sourcePath = resolution.Document.FilePath!;
+        var filesModified = commitResult.FilesModified.ToList();
+        var filesCreated = commitResult.FilesCreated.ToList();
+        var filesDeleted = commitResult.FilesDeleted.ToList();
+        var warning = FileNotMovedWarning(move?.SkipReason);
+        string? movedTo = null;
+        if (move?.TargetPath != null)
         {
-            throw;
+            var outcome = (await NamespaceFolderMove.MoveAsync(
+                Context, [new PlannedMove(resolution.Document.Project.FilePath!, sourcePath, move)], cancellationToken))[0];
+            (movedTo, var problem) = (outcome.MovedTo, outcome.Problem);
+            warning = problem == null ? null : RefactoringError.Create("PARTIAL_SUCCESS", problem);
         }
-        catch (Exception ex)
+
+        if (movedTo != null)
         {
-            throw new RefactoringException(
-                ErrorCodes.RoslynError,
-                $"Unexpected error: {ex.Message}",
-                ex);
+            filesModified.RemoveAll(f => PathResolver.PathsEqual(f, sourcePath));
+            filesCreated.Add(movedTo);
+            filesDeleted.Add(sourcePath);
         }
+
+        return new RefactoringResult
+        {
+            Success = true,
+            OperationId = operationId,
+            Changes = new FileChanges
+            {
+                FilesModified = filesModified,
+                FilesCreated = filesCreated,
+                FilesDeleted = filesDeleted
+            },
+            Symbol = CreateSymbolInfo(resolution, @params.TargetNamespace, movedTo),
+            ReferencesUpdated = references.TotalReferenceCount,
+            UsingDirectivesAdded = changeStats.UsingsAdded,
+            UsingDirectivesRemoved = changeStats.UsingsRemoved,
+            Error = warning
+        };
     }
 
-    private void ValidateInputs(MoveTypeToNamespaceParams @params)
+    /// <inheritdoc />
+    protected override void ValidateParams(MoveTypeToNamespaceParams @params)
     {
         if (string.IsNullOrWhiteSpace(@params.SourceFile))
             throw new RefactoringException(ErrorCodes.MissingRequiredParam, "sourceFile is required.");
@@ -208,7 +151,7 @@ public sealed class MoveTypeToNamespaceOperation
         }
 
         // Check for name collision in target namespace
-        var targetType = await _symbolResolver.FindTypeByNameAsync(
+        var targetType = await TypeResolver.FindTypeByNameAsync(
             $"{@params.TargetNamespace}.{resolution.Symbol.Name}",
             cancellationToken);
 
@@ -227,7 +170,7 @@ public sealed class MoveTypeToNamespaceOperation
         ReferenceSearchResult references,
         CancellationToken cancellationToken)
     {
-        var solution = _context.Solution;
+        var solution = Context.Solution;
         var oldNamespace = resolution.Symbol.ContainingNamespace.ToDisplayString();
         var newNamespace = @params.TargetNamespace;
         var stats = new ChangeStats();

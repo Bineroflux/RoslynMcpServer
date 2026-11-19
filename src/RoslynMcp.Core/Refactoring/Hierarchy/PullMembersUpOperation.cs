@@ -37,7 +37,8 @@ namespace RoslynMcp.Core.Refactoring.Hierarchy;
 /// would change who can call them.
 /// </para>
 /// <para>
-/// Usings the moved code needs are added to the target's file. Compiler errors introduced in the
+/// The members go into the target's part in <c>targetFile</c>, or else its first part in a file
+/// that isn't generated. Usings the moved code needs are added to that file. Compiler errors introduced in the
 /// files of the target, the type, the target's other derived types or implementers (members they
 /// now hide or lack) are returned as warnings, with notes on changed accessibility.
 /// </para>
@@ -77,6 +78,15 @@ public sealed class PullMembersUpOperation : RefactoringOperationBase<PullMember
 
         if (@params.Line is < 1)
             throw new RefactoringException(ErrorCodes.InvalidLineNumber, "line must be >= 1.");
+
+        if (@params.TargetFile != null)
+        {
+            if (!PathResolver.IsAbsolutePath(@params.TargetFile))
+                throw new RefactoringException(ErrorCodes.InvalidTargetPath, "targetFile must be an absolute path.");
+
+            if (!PathResolver.IsValidCSharpFilePath(@params.TargetFile))
+                throw new RefactoringException(ErrorCodes.InvalidTargetPath, PathResolver.GetCSharpFileRejectionReason(@params.TargetFile, "targetFile"));
+        }
     }
 
     /// <inheritdoc />
@@ -103,7 +113,7 @@ public sealed class PullMembersUpOperation : RefactoringOperationBase<PullMember
 
         var solution = Context.Solution;
         var (target, view) = ResolveTarget(type, @params.TargetType);
-        var (targetDocument, targetDeclaration) = TargetDeclaration(target, solution, cancellationToken);
+        var (targetDocument, targetDeclaration) = TargetDeclaration(target, solution, @params.TargetFile, cancellationToken);
         var targetModel = await targetDocument.GetSemanticModelAsync(cancellationToken)
             ?? throw new RefactoringException(ErrorCodes.RoslynError, "Could not analyze the target's file.");
         var isInterface = target.TypeKind == TypeKind.Interface;
@@ -281,14 +291,39 @@ public sealed class PullMembersUpOperation : RefactoringOperationBase<PullMember
         };
     }
 
-    /// <summary>The target's declaration to add the members to: its first part in a source file that isn't generated.</summary>
-    private static (Document Document, TypeDeclarationSyntax Declaration) TargetDeclaration(INamedTypeSymbol target, Solution solution, CancellationToken cancellationToken)
+    /// <summary>
+    /// The target's declaration to add the members to: its part in <paramref name="targetFile"/>
+    /// when given (refused when the file has none, or is generated), else its first part in a
+    /// source file that isn't generated.
+    /// </summary>
+    private static (Document Document, TypeDeclarationSyntax Declaration) TargetDeclaration(
+        INamedTypeSymbol target,
+        Solution solution,
+        string? targetFile,
+        CancellationToken cancellationToken)
     {
         if (target.DeclaringSyntaxReferences.Length == 0)
         {
             throw new RefactoringException(
                 ErrorCodes.BaseClassNotFound,
                 $"'{target.ToDisplayString()}' is declared in {target.ContainingAssembly?.Name ?? "metadata"}, not in source.");
+        }
+
+        if (targetFile != null)
+        {
+            foreach (var reference in target.DeclaringSyntaxReferences.Where(r => PathResolver.PathsEqual(r.SyntaxTree.FilePath, targetFile)))
+            {
+                if (GeneratedCode.IsGenerated(reference.SyntaxTree, cancellationToken))
+                    throw new RefactoringException(ErrorCodes.InvalidTargetPath, $"targetFile '{targetFile}' is generated code, which the build overwrites.");
+
+                if (solution.GetDocument(reference.SyntaxTree) is { } document && reference.GetSyntax(cancellationToken) is TypeDeclarationSyntax declaration)
+                    return (document, declaration);
+            }
+
+            var files = target.DeclaringSyntaxReferences.Select(r => r.SyntaxTree.FilePath).Distinct(PathResolver.PathComparer);
+            throw new RefactoringException(
+                ErrorCodes.InvalidTargetPath,
+                $"targetFile '{targetFile}' declares no part of '{target.ToDisplayString()}', which is declared in {string.Join(", ", files)}.");
         }
 
         foreach (var reference in target.DeclaringSyntaxReferences)

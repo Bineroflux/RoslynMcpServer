@@ -28,6 +28,7 @@ public sealed class PullMembersUpToolTests
     [Theory]
     [InlineData("line", "integer")]
     [InlineData("targetType", "string")]
+    [InlineData("targetFile", "string")]
     [InlineData("makeAbstract", "boolean")]
     [InlineData("preview", "boolean")]
     public void Definition_HasOptionalArguments(string name, string type)

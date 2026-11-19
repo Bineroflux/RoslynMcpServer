@@ -30,7 +30,8 @@ public sealed class PullMembersUpTool : IToolHandler
     /// <inheritdoc />
     public string Description =>
         "Move members of a type into its base class, or add their signatures to an interface it implements " +
-        "(targetType). Declarations move with their doc comments and attributes; private members become protected. " +
+        "(targetType), into the part of a partial target in targetFile or else its first part. Declarations move with " +
+        "their doc comments and attributes; private members become protected. " +
         "With makeAbstract, methods, properties, indexers and events are declared abstract in the base class (made " +
         "abstract if nothing instantiates it) and stay in the type as overrides. Refused when a member uses members " +
         "that stay behind (they are listed), when the target already declares it, or when its types can't be written " +
@@ -76,6 +77,11 @@ public sealed class PullMembersUpTool : IToolHandler
                 type = "string",
                 description = "Where the members go: the direct base class (default) or the name of an interface the type implements"
             },
+            targetFile = new
+            {
+                type = "string",
+                description = "Absolute path of the file whose part of a partial target gets the members (default: its first part in a file that isn't generated)"
+            },
             makeAbstract = new
             {
                 type = "boolean",
@@ -114,6 +120,7 @@ public sealed class PullMembersUpTool : IToolHandler
                 Members = args.Members ?? [],
                 Line = args.Line,
                 TargetType = args.TargetType,
+                TargetFile = args.TargetFile,
                 MakeAbstract = args.MakeAbstract ?? false,
                 Preview = args.Preview ?? false
             };
@@ -147,6 +154,7 @@ public sealed class PullMembersUpTool : IToolHandler
         public List<string>? Members { get; init; }
         public int? Line { get; init; }
         public string? TargetType { get; init; }
+        public string? TargetFile { get; init; }
         public bool? MakeAbstract { get; init; }
         public bool? Preview { get; init; }
     }

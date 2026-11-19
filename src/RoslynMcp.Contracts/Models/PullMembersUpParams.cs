@@ -33,6 +33,12 @@ public sealed class PullMembersUpParams
     public string? TargetType { get; init; }
 
     /// <summary>
+    /// Absolute path of the file whose part of a partial target the members go into. Default: the
+    /// target's first part in a file that isn't generated.
+    /// </summary>
+    public string? TargetFile { get; init; }
+
+    /// <summary>
     /// For a base class: declare methods, properties, events and indexers there as abstract and keep
     /// the implementations as overrides. Default: false.
     /// </summary>

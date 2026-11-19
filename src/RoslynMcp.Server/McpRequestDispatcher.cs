@@ -178,7 +178,7 @@ public sealed class McpRequestDispatcher
         }
 
         // Refused like a missing argument, as a tool error the caller can correct the call from.
-        if (ToolArguments.Check(handler.Name, _toolRegistry.GetInputSchema(handler.Name), callParams.Arguments) is { } invalid)
+        if (ToolArguments.Check(handler.Name, _toolRegistry.GetInputSchema(handler.Name), callParams.Arguments, out var arguments) is { } invalid)
         {
             FileLogger.LogWarning($"Refused arguments of {handler.Name}: {invalid.Content[0].Text}");
             return McpResponse.Success(request.Id, invalid);
@@ -193,7 +193,7 @@ public sealed class McpRequestDispatcher
         try
         {
             FileLogger.Log($"Executing tool: {callParams.Name}");
-            var result = await handler.ExecuteAsync(callParams.Arguments, cancellationToken);
+            var result = await handler.ExecuteAsync(arguments, cancellationToken);
             FileLogger.Log($"Tool completed successfully: {callParams.Name}");
             return McpResponse.Success(request.Id, result);
         }

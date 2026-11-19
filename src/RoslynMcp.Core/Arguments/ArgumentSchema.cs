@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace RoslynMcp.Core.Arguments;
 
@@ -19,10 +20,18 @@ public sealed record UnknownArgument(string Path, string Key, string? Suggestion
 }
 
 /// <summary>
+/// A value its schema does not allow.
+/// </summary>
+/// <param name="Path">The key with its place: <c>line</c>, <c>parameters[0].newPosition</c>.</param>
+/// <param name="Problem">What is wrong, to follow the path: <c>must be an integer, not "ten"</c>.</param>
+public sealed record InvalidArgument(string Path, string Problem);
+
+/// <summary>
 /// Checks tool arguments against the subset of JSON Schema the tools declare: an object's
-/// <c>properties</c>, whether it allows <c>additionalProperties</c>, and an array's
-/// <c>items</c>. The server checks the arguments of every call against the tool's input schema,
-/// the CLI checks its options against a schema built from the tool's parameter type.
+/// <c>properties</c>, whether it allows <c>additionalProperties</c>, an array's <c>items</c>,
+/// and a value's <c>type</c>, <c>enum</c>, <c>minimum</c> and <c>maximum</c>. The server checks
+/// the arguments of every call against the tool's input schema, the CLI checks its options
+/// against a schema built from the tool's parameter type.
 /// </summary>
 public static class ArgumentSchema
 {
@@ -39,6 +48,39 @@ public static class ArgumentSchema
         var found = new List<UnknownArgument>();
         Walk(schema, arguments, "", ignoreCase, found);
         return found;
+    }
+
+    /// <summary>
+    /// The values in <paramref name="arguments"/> that their schema does not allow: of another
+    /// type (an integer must be a whole number in the 32-bit range, or the 64-bit range where the
+    /// schema says <c>"format": "int64"</c>), not one of the schema's <c>enum</c> values (compared
+    /// ignoring case, as the tools read them), or outside its <c>minimum</c> / <c>maximum</c>.
+    /// A property that is <c>null</c> counts as absent (see <see cref="WithoutNulls"/>); an array
+    /// item that is <c>null</c> does not. Keys the schema does not declare are not looked at.
+    /// </summary>
+    /// <param name="schema">The schema of <paramref name="arguments"/>.</param>
+    /// <param name="arguments">The arguments of one call, or one value of them.</param>
+    /// <param name="ignoreCase">Whether a key matches a property in another case.</param>
+    public static IReadOnlyList<InvalidArgument> FindInvalidValues(JsonElement schema, JsonElement arguments, bool ignoreCase = false)
+    {
+        var found = new List<InvalidArgument>();
+        CheckValue(schema, arguments, "", ignoreCase, found);
+        return found;
+    }
+
+    /// <summary>
+    /// <paramref name="value"/> without the object properties that are <c>null</c>, at every
+    /// level: a client may send <c>null</c> for an optional argument it means to leave out, and
+    /// the tools read a missing argument as its default.
+    /// </summary>
+    public static JsonElement WithoutNulls(JsonElement value)
+    {
+        if (!ContainsNullProperty(value))
+            return value;
+
+        var node = JsonNode.Parse(value.GetRawText());
+        RemoveNullProperties(node);
+        return JsonSerializer.SerializeToElement(node);
     }
 
     /// <summary>
@@ -115,6 +157,137 @@ public static class ArgumentSchema
         return closest.Count == 1 || (closest.Count > 1 && closest[0].Distance < closest[1].Distance)
             ? closest[0].Key
             : null;
+    }
+
+    private static void CheckValue(JsonElement schema, JsonElement value, string path, bool ignoreCase, List<InvalidArgument> found)
+    {
+        if (schema.ValueKind != JsonValueKind.Object)
+            return;
+
+        var type = TypeOf(schema);
+        switch (type)
+        {
+            case "string" when value.ValueKind == JsonValueKind.String:
+                CheckEnum(schema, value.GetString()!, path, found);
+                return;
+
+            case "integer" when value.ValueKind == JsonValueKind.Number:
+                var isInt64 = schema.TryGetProperty("format", out var format) && format.ValueKind == JsonValueKind.String &&
+                    format.GetString() == "int64";
+                if (!value.TryGetInt64(out var number) || (!isInt64 && number is < int.MinValue or > int.MaxValue))
+                {
+                    var range = isInt64 ? "a whole number" : $"a whole number from {int.MinValue} to {int.MaxValue}";
+                    found.Add(new InvalidArgument(path, $"must be {range}, not {Describe(value)}"));
+                    return;
+                }
+
+                if (schema.TryGetProperty("minimum", out var minimum) && minimum.TryGetInt64(out var min) && number < min)
+                    found.Add(new InvalidArgument(path, $"must be at least {min}, not {number}"));
+                else if (schema.TryGetProperty("maximum", out var maximum) && maximum.TryGetInt64(out var max) && number > max)
+                    found.Add(new InvalidArgument(path, $"must be at most {max}, not {number}"));
+                return;
+
+            case "number" when value.ValueKind == JsonValueKind.Number:
+                return;
+
+            case "boolean" when value.ValueKind is JsonValueKind.True or JsonValueKind.False:
+                return;
+
+            case "array" when value.ValueKind == JsonValueKind.Array:
+                if (schema.TryGetProperty("items", out var items))
+                {
+                    var index = 0;
+                    foreach (var item in value.EnumerateArray())
+                    {
+                        var itemPath = $"{path}[{index++}]";
+                        if (item.ValueKind == JsonValueKind.Null && TypeOf(items) is { } itemType)
+                            found.Add(new InvalidArgument(itemPath, $"must be {Expected(itemType)}, not null"));
+                        else
+                            CheckValue(items, item, itemPath, ignoreCase, found);
+                    }
+                }
+
+                return;
+
+            case "object" or null when value.ValueKind == JsonValueKind.Object:
+                foreach (var property in value.EnumerateObject())
+                {
+                    if (property.Value.ValueKind != JsonValueKind.Null &&
+                        FindProperty(schema, property.Name, ignoreCase) is { } declared)
+                    {
+                        CheckValue(declared.Schema, property.Value, path.Length == 0 ? property.Name : $"{path}.{property.Name}", ignoreCase, found);
+                    }
+                }
+
+                return;
+
+            case null:
+                return;
+
+            default:
+                found.Add(new InvalidArgument(path, $"must be {Expected(type)}, not {Describe(value)}"));
+                return;
+        }
+    }
+
+    private static void CheckEnum(JsonElement schema, string value, string path, List<InvalidArgument> found)
+    {
+        if (!schema.TryGetProperty("enum", out var values) || values.ValueKind != JsonValueKind.Array)
+            return;
+
+        var allowed = values.EnumerateArray().Where(v => v.ValueKind == JsonValueKind.String).Select(v => v.GetString()!).ToList();
+        if (!allowed.Contains(value, StringComparer.OrdinalIgnoreCase))
+            found.Add(new InvalidArgument(path, $"must be one of {string.Join(", ", allowed)}, not {JsonSerializer.Serialize(value)}"));
+    }
+
+    private static string Expected(string type) => type switch
+    {
+        "string" => "a string",
+        "integer" => "an integer",
+        "number" => "a number",
+        "boolean" => "true or false",
+        "array" => "an array",
+        "object" => "an object",
+        _ => type
+    };
+
+    /// <summary>A JSON value as a message shows it: <c>the string "ten"</c>, <c>1.5</c>, <c>an array</c>.</summary>
+    private static string Describe(JsonElement value) => value.ValueKind switch
+    {
+        JsonValueKind.String => $"the string {JsonSerializer.Serialize(Shorten(value.GetString()!))}",
+        JsonValueKind.Number => Shorten(value.GetRawText()),
+        JsonValueKind.True => "true",
+        JsonValueKind.False => "false",
+        JsonValueKind.Array => "an array",
+        JsonValueKind.Object => "an object",
+        _ => "null"
+    };
+
+    private static string Shorten(string text) => text.Length <= 60 ? text : text[..57] + "...";
+
+    private static bool ContainsNullProperty(JsonElement value) => value.ValueKind switch
+    {
+        JsonValueKind.Object => value.EnumerateObject().Any(p => p.Value.ValueKind == JsonValueKind.Null || ContainsNullProperty(p.Value)),
+        JsonValueKind.Array => value.EnumerateArray().Any(ContainsNullProperty),
+        _ => false
+    };
+
+    private static void RemoveNullProperties(JsonNode? node)
+    {
+        switch (node)
+        {
+            case JsonObject obj:
+                foreach (var name in obj.Where(p => p.Value == null).Select(p => p.Key).ToList())
+                    obj.Remove(name);
+                foreach (var (_, child) in obj)
+                    RemoveNullProperties(child);
+                break;
+
+            case JsonArray array:
+                foreach (var child in array)
+                    RemoveNullProperties(child);
+                break;
+        }
     }
 
     private static void Walk(JsonElement schema, JsonElement value, string path, bool ignoreCase, List<UnknownArgument> found)

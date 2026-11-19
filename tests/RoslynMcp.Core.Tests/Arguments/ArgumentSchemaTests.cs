@@ -84,6 +84,42 @@ public sealed class ArgumentSchemaTests
         Assert.Null(ArgumentSchema.SuggestKey("lin", ["line", "link"]));
     }
 
+    [Fact]
+    public void Values_AreCheckedByType_WithInt64WhereTheSchemaSaysSo()
+    {
+        var schema = JsonDocument.Parse("""
+            {
+              "type": "object",
+              "properties": {
+                "small": { "type": "integer" },
+                "big": { "type": "integer", "format": "int64" },
+                "ratio": { "type": "number" },
+                "names": { "type": "array", "items": { "type": "string" } }
+              }
+            }
+            """).RootElement;
+
+        var invalid = ArgumentSchema.FindInvalidValues(schema, JsonDocument.Parse("""
+            {"small": 5000000000, "big": 5000000000, "ratio": 0.5, "names": ["a", 1, null], "other": "x"}
+            """).RootElement);
+
+        Assert.Equal(
+            [
+                ("small", "must be a whole number from -2147483648 to 2147483647, not 5000000000"),
+                ("names[1]", "must be a string, not 1"),
+                ("names[2]", "must be a string, not null")
+            ],
+            invalid.Select(i => (i.Path, i.Problem)));
+    }
+
+    [Fact]
+    public void WithoutNulls_RemovesNullPropertiesAtEveryLevel_ButNotArrayItems()
+    {
+        var value = JsonDocument.Parse("""{"a": null, "b": [{"c": null, "d": 1}, null], "e": {"f": null}}""").RootElement;
+
+        Assert.Equal("""{"b":[{"d":1},null],"e":{}}""", ArgumentSchema.WithoutNulls(value).GetRawText());
+    }
+
     private static IReadOnlyList<UnknownArgument> Find(string arguments, bool ignoreCase = false) =>
         ArgumentSchema.FindUnknownArguments(Schema, JsonDocument.Parse(arguments).RootElement, ignoreCase);
 }

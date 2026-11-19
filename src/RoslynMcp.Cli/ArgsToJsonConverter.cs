@@ -21,8 +21,9 @@ public static class ArgsToJsonConverter
     ///   a string parameter stays a string (<c>--query 42</c>, <c>--query true</c>); an integer
     ///   parameter takes an integer and a boolean one <c>true</c> or <c>false</c>
     ///   (case-insensitive), anything else is refused
-    /// - A list parameter takes a JSON array (<c>--members '["A","B"]'</c>), passed on as it is;
-    ///   the keys of the objects in it must be keys the tool takes there
+    /// - A list parameter takes a JSON array (<c>--members '["A","B"]'</c>), passed on without
+    ///   the properties that are <c>null</c>; the keys and values of the objects in it must be
+    ///   ones the tool takes there
     /// - A path parameter (<see cref="ArgumentSchema.IsPathProperty"/>) that is relative is
     ///   resolved against <paramref name="baseDirectory"/>, the way a command line names files;
     ///   the tools take only absolute paths
@@ -82,8 +83,10 @@ public static class ArgsToJsonConverter
 
                         unknownKeys.AddRange(ArgumentSchema.FindUnknownArguments(propertySchema, json.RootElement, ignoreCase: true)
                             .Select(u => u with { Path = OptionPath(kebabKey, u.Path) }));
+                        invalidValues.AddRange(ArgumentSchema.FindInvalidValues(propertySchema, json.RootElement, ignoreCase: true)
+                            .Select(i => $"{OptionPath(kebabKey, i.Path)} {i.Problem}."));
                         writer.WritePropertyName(camelKey);
-                        json.RootElement.WriteTo(writer);
+                        ArgumentSchema.WithoutNulls(json.RootElement).WriteTo(writer);
                     }
 
                     break;

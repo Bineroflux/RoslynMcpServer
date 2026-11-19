@@ -10,8 +10,9 @@ namespace RoslynMcp.Server.Tools;
 /// Checks the arguments of a tool call against the tool's input schema before the tool runs.
 /// A tool deserializes its arguments leniently, so a key it does not know (a typo, or
 /// <c>MaxResults</c> for <c>maxResults</c>) would silently be dropped and the option take its
-/// default; such a call is refused instead. So is a relative path, which the server cannot
-/// resolve.
+/// default; such a call is refused instead. So are a value of the wrong type (which the tool
+/// would fail to deserialize with a raw serializer message) and a relative path, which the
+/// server cannot resolve. A <c>null</c> argument counts as left out.
 /// </summary>
 public static class ToolArguments
 {
@@ -22,8 +23,13 @@ public static class ToolArguments
     /// <param name="toolName">The tool's name, for the message.</param>
     /// <param name="schema">The tool's input schema.</param>
     /// <param name="arguments">The call's arguments, null when the call has none.</param>
-    public static ToolResult? Check(string toolName, JsonElement schema, JsonElement? arguments)
+    /// <param name="accepted">
+    /// The arguments to run the tool with: <paramref name="arguments"/> without the properties
+    /// that are <c>null</c>, which a client may send for an argument it leaves out.
+    /// </param>
+    public static ToolResult? Check(string toolName, JsonElement schema, JsonElement? arguments, out JsonElement? accepted)
     {
+        accepted = arguments;
         if (arguments is not { } value || value.ValueKind == JsonValueKind.Null)
             return null;
 
@@ -48,7 +54,17 @@ public static class ToolArguments
                 });
         }
 
-        return CheckPaths(schema, value);
+        var invalid = ArgumentSchema.FindInvalidValues(schema, value);
+        if (invalid.Count > 0)
+        {
+            return Error(
+                ErrorCodes.InvalidParameterValue,
+                string.Join(" ", invalid.Select(i => $"{i.Path} {i.Problem}.")),
+                new Dictionary<string, object> { ["invalidArguments"] = invalid.Select(i => i.Path).ToList() });
+        }
+
+        accepted = ArgumentSchema.WithoutNulls(value);
+        return CheckPaths(schema, accepted.Value);
     }
 
     /// <summary>

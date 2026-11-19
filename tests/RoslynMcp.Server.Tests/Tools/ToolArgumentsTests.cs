@@ -64,6 +64,101 @@ public sealed class ToolArgumentsTests
     }
 
     [Fact]
+    public async Task ValuesOfTheWrongType_AreRefused_NamingKeyTypeAndValue()
+    {
+        // "line": "ten" used to fail inside the tool with System.Text.Json's own message
+        // (INTERNAL_ERROR: The JSON value could not be converted to System.Nullable`1[System.Int32]...).
+        var error = await CallForErrorAsync(
+            "find_references",
+            $$"""{"solutionPath": {{Sln}}, "sourceFile": {{Cs}}, "line": "ten", "column": 1.5, "maxResults": 0, "includeDeclaration": "yes", "symbolName": 3}""");
+
+        Assert.Equal(ErrorCodes.InvalidParameterValue, error.GetProperty("code").GetString());
+        Assert.Equal(
+            "line must be an integer, not the string \"ten\". " +
+            "column must be a whole number from -2147483648 to 2147483647, not 1.5. " +
+            "maxResults must be at least 1, not 0. " +
+            "includeDeclaration must be true or false, not the string \"yes\". " +
+            "symbolName must be a string, not 3.",
+            error.GetProperty("message").GetString());
+        Assert.Equal(
+            ["line", "column", "maxResults", "includeDeclaration", "symbolName"],
+            error.GetProperty("details").GetProperty("invalidArguments").EnumerateArray().Select(e => e.GetString()));
+    }
+
+    [Fact]
+    public async Task IntegerOutside32Bits_IsRefused()
+    {
+        var error = await CallForErrorAsync("find_references", $$"""{"solutionPath": {{Sln}}, "sourceFile": {{Cs}}, "line": 3000000000}""");
+
+        Assert.Equal("line must be a whole number from -2147483648 to 2147483647, not 3000000000.", error.GetProperty("message").GetString());
+    }
+
+    [Theory]
+    [InlineData("assert", false)]
+    [InlineData("guard", true)]
+    [InlineData("Guard", true)]
+    public async Task EnumValues_AreChecked_IgnoringCaseAsTheToolsDo(string style, bool accepted)
+    {
+        var result = await CallAsync(
+            "add_null_checks",
+            $$"""{"solutionPath": {{Sln}}, "sourceFile": {{Cs}}, "methodName": "M", "style": "{{style}}"}""");
+
+        Assert.True(result.IsError);
+        if (accepted)
+        {
+            Assert.Contains("No workspace in this test.", result.Content[0].Text);
+            return;
+        }
+
+        var error = JsonDocument.Parse(result.Content[0].Text!).RootElement.GetProperty("error");
+        Assert.Equal(ErrorCodes.InvalidParameterValue, error.GetProperty("code").GetString());
+        Assert.Equal("style must be one of throw, guard, not \"assert\".", error.GetProperty("message").GetString());
+    }
+
+    [Fact]
+    public async Task ValuesInsideAParameterChange_AreChecked()
+    {
+        var error = await CallForErrorAsync(
+            "change_signature",
+            $$"""
+            {"solutionPath": {{Sln}}, "sourceFile": {{Cs}}, "methodName": "M",
+             "parameters": [{"originalName": "a", "newPosition": "1", "remove": null}, null, {"originalName": "b", "newPosition": -1}]}
+            """);
+
+        Assert.Equal(
+            "parameters[0].newPosition must be an integer, not the string \"1\". parameters[1] must be an object, not null. " +
+            "parameters[2].newPosition must be at least 0, not -1.",
+            error.GetProperty("message").GetString());
+    }
+
+    [Fact]
+    public async Task NullArguments_CountAsLeftOut()
+    {
+        // startLine is a required int: null used to fail deserialization (INTERNAL_ERROR); now the
+        // tool sees it as missing. The fake provider refuses to load, so the call gets that far.
+        var result = await CallAsync(
+            "extract_method",
+            $$"""{"solutionPath": {{Sln}}, "sourceFile": {{Cs}}, "startLine": null, "methodName": null, "visibility": null, "preview": null}""");
+
+        Assert.True(result.IsError);
+        Assert.Contains("No workspace in this test.", result.Content[0].Text);
+    }
+
+    [Fact]
+    public void Check_HandsTheToolTheArgumentsWithoutNulls()
+    {
+        var schema = JsonSerializer.SerializeToElement(new ChangeSignatureTool(new FakeProvider()).InputSchema);
+        var arguments = JsonDocument.Parse(
+            $$"""{"solutionPath": {{Sln}}, "line": null, "parameters": [{"originalName": "a", "type": null, "newPosition": null}]}""").RootElement;
+
+        Assert.Null(ToolArguments.Check("change_signature", schema, arguments, out var accepted));
+
+        Assert.Equal(
+            $$"""{"solutionPath":{{Sln}},"parameters":[{"originalName":"a"}]}""",
+            accepted!.Value.GetRawText());
+    }
+
+    [Fact]
     public async Task ArgumentsThatAreNoObject_AreRefused()
     {
         var error = await CallForErrorAsync("search_symbols", "[1, 2]");
@@ -184,6 +279,18 @@ public sealed class ToolArgumentsTests
             else
                 CompareSchema(path + "[]", items, element, problems);
             return;
+        }
+
+        // The value check takes an integer as 32-bit unless the schema says int64.
+        var isInt64 = schema.TryGetProperty("format", out var format) && format.GetString() == "int64";
+        if (expected == "integer" && isInt64 != (underlying == typeof(long)))
+            problems.Add($"{path}: the tool reads {underlying.Name}, the schema says format {(isInt64 ? "int64" : "int32")}");
+
+        // An enum the value check enforces must name values the tool reads.
+        if (schema.TryGetProperty("enum", out var values) &&
+            (expected != "string" || values.EnumerateArray().Any(v => v.ValueKind != JsonValueKind.String)))
+        {
+            problems.Add($"{path}: an enum of non-strings, or on a {underlying.Name}");
         }
 
         if (expected != "object")

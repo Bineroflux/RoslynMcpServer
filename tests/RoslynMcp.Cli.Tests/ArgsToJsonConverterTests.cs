@@ -245,6 +245,20 @@ public class ArgsToJsonConverterTests
     }
 
     [Fact]
+    public void ValuesInsideAJsonOption_AreChecked_AndNullsLeftOut()
+    {
+        var schema = ParamsSchema.For(typeof(ChangeSignatureParams));
+
+        var ex = Assert.Throws<CliOptionException>(() => ArgsToJsonConverter.Convert(
+            new Dictionary<string, string> { ["parameters"] = """[{"originalName": "a", "newPosition": "x"}]""" }, schema));
+        var json = ArgsToJsonConverter.Convert(
+            new Dictionary<string, string> { ["parameters"] = """[{"originalName": "a", "remove": null}]""" }, schema);
+
+        Assert.Equal("--parameters[0].newPosition must be an integer, not the string \"x\".", ex.Message);
+        Assert.Equal("""{"parameters":[{"originalName":"a"}]}""", json);
+    }
+
+    [Fact]
     public void UnknownOptionsAndInvalidValues_AreReportedTogether()
     {
         var ex = Assert.Throws<CliOptionException>(() => ArgsToJsonConverter.Convert(

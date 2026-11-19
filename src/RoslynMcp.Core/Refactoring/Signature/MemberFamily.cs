@@ -325,8 +325,10 @@ internal sealed class MemberFamily
 
     /// <summary>
     /// <paramref name="type"/> with its type parameters replaced through <paramref name="map"/>,
-    /// or null when it mentions one the map leaves out (or one inside a pointer, function
-    /// pointer or generic containing type, which are not rewritten).
+    /// wherever they occur: in arrays, pointers, function pointers (<c>delegate*&lt;T, void&gt;</c>),
+    /// tuples, type arguments and generic containing types (<c>Outer&lt;T&gt;.Inner</c>), nullable
+    /// or not. Null when it mentions a type parameter the map leaves out, which has no
+    /// counterpart to write.
     /// </summary>
     internal static ITypeSymbol? Substitute(
         ITypeSymbol type,
@@ -352,15 +354,42 @@ internal sealed class MemberFamily
                         .WithNullableAnnotation(array.NullableAnnotation)
                     : null;
 
-            case INamedTypeSymbol { IsTupleType: true } tuple when !MentionsTypeParameter(tuple.ContainingType):
+            case IPointerTypeSymbol pointer:
+                return Substitute(pointer.PointedAtType, map, compilation) is { } pointedAt
+                    ? compilation.CreatePointerTypeSymbol(pointedAt)
+                    : null;
+
+            case IFunctionPointerTypeSymbol functionPointer:
+                return SubstituteFunctionPointer(functionPointer.Signature, map, compilation);
+
+            case INamedTypeSymbol { IsTupleType: true } tuple:
                 return SubstituteTuple(tuple, map, compilation);
 
-            case INamedTypeSymbol named when !MentionsTypeParameter(named.ContainingType):
-                return SubstituteTypeArguments(named, map, compilation);
+            case INamedTypeSymbol named:
+                return SubstituteNamedType(named, map, compilation);
 
             default:
                 return null;
         }
+    }
+
+    private static ITypeSymbol? SubstituteFunctionPointer(
+        IMethodSymbol signature,
+        IReadOnlyDictionary<ITypeParameterSymbol, ITypeSymbol> map,
+        Compilation compilation)
+    {
+        var returnType = Substitute(signature.ReturnType, map, compilation);
+        var parameterTypes = signature.Parameters.Select(p => Substitute(p.Type, map, compilation)).ToList();
+        if (returnType == null || parameterTypes.Any(p => p == null))
+            return null;
+
+        return compilation.CreateFunctionPointerTypeSymbol(
+            returnType,
+            signature.RefKind,
+            parameterTypes.ToImmutableArray()!,
+            signature.Parameters.Select(p => p.RefKind).ToImmutableArray(),
+            signature.CallingConvention,
+            signature.UnmanagedCallingConventionTypes);
     }
 
     private static ITypeSymbol? SubstituteTuple(
@@ -379,16 +408,35 @@ internal sealed class MemberFamily
             .WithNullableAnnotation(tuple.NullableAnnotation);
     }
 
-    private static ITypeSymbol? SubstituteTypeArguments(
+    /// <summary>
+    /// A generic type with its type arguments replaced, as a member of its containing type with
+    /// that one's replaced: <c>Outer&lt;T&gt;.Inner&lt;U&gt;</c> becomes <c>Outer&lt;int&gt;.Inner&lt;string&gt;</c>.
+    /// </summary>
+    private static ITypeSymbol? SubstituteNamedType(
         INamedTypeSymbol named,
         IReadOnlyDictionary<ITypeParameterSymbol, ITypeSymbol> map,
         Compilation compilation)
     {
+        var definition = named.ConstructedFrom;
+        if (named.ContainingType is { } containing && MentionsTypeParameter(containing))
+        {
+            if (Substitute(containing, map, compilation) is not INamedTypeSymbol newContaining)
+                return null;
+
+            definition = newContaining.GetTypeMembers(named.Name, named.Arity)
+                .FirstOrDefault(t => SymbolEqualityComparer.Default.Equals(t.OriginalDefinition, named.OriginalDefinition));
+            if (definition == null)
+                return null;
+        }
+
+        if (named.Arity == 0)
+            return definition.WithNullableAnnotation(named.NullableAnnotation);
+
         var arguments = named.TypeArguments.Select(a => Substitute(a, map, compilation)).ToList();
         if (arguments.Any(a => a == null))
             return null;
 
-        return named.ConstructedFrom
+        return definition
             .Construct(arguments.ToImmutableArray()!, arguments.Select(a => a!.NullableAnnotation).ToImmutableArray())
             .WithNullableAnnotation(named.NullableAnnotation);
     }

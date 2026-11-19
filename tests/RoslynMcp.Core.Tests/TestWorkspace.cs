@@ -64,6 +64,7 @@ internal sealed class TestWorkspace : IDisposable
     /// (also for <see cref="GetDiskCompilationErrors"/> and <see cref="EmitDiskAssembly"/>).
     /// </param>
     /// <param name="languageVersion">The project's C# version (default: the latest).</param>
+    /// <param name="allowUnsafe">Whether unsafe code is allowed, like a project with <c>AllowUnsafeBlocks</c>.</param>
     public static TestWorkspace Create(
         IEnumerable<(string Name, string Text)> files,
         IEnumerable<MetadataReference> extraReferences,
@@ -71,9 +72,10 @@ internal sealed class TestWorkspace : IDisposable
         string? defaultNamespace = null,
         IEnumerable<(string Name, string Text)>? additionalFiles = null,
         bool checkOverflow = false,
-        LanguageVersion languageVersion = LanguageVersion.Latest)
+        LanguageVersion languageVersion = LanguageVersion.Latest,
+        bool allowUnsafe = false)
     {
-        var compilationOptions = CompilationOptions.WithOverflowChecks(checkOverflow);
+        var compilationOptions = CompilationOptions.WithOverflowChecks(checkOverflow).WithAllowUnsafe(allowUnsafe);
         var directory = Path.Combine(Path.GetTempPath(), $"RoslynMcpServer.TestWorkspace-{Guid.NewGuid():N}");
         System.IO.Directory.CreateDirectory(directory);
 

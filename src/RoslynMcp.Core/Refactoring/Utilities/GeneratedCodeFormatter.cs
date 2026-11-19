@@ -187,7 +187,12 @@ internal static class GeneratedCodeFormatter
     /// <paramref name="from"/> to <paramref name="to"/> (lines indented less are left alone);
     /// the text of tokens and comments, so lines inside strings, is not touched.
     /// </summary>
-    private static SyntaxNode Reindent(SyntaxNode node, string from, string to, bool startsLine)
+    /// <param name="node">The code to re-indent.</param>
+    /// <param name="from">The indentation it was written at.</param>
+    /// <param name="to">The indentation it moves to.</param>
+    /// <param name="startsLine">Whether the node's first line starts with its leading trivia (a statement or member), rather than inside a line (an expression).</param>
+    internal static TNode Reindent<TNode>(TNode node, string from, string to, bool startsLine)
+        where TNode : SyntaxNode
     {
         if (from == to)
             return node;
@@ -237,9 +242,9 @@ internal static class GeneratedCodeFormatter
     }
 
     /// <summary>The indentation of the line a node starts on.</summary>
-    private static string IndentationOf(SyntaxNode node) =>
+    internal static string IndentationOf(SyntaxNode node) =>
         LeadingWhitespace(node.SyntaxTree.GetText().Lines.GetLineFromPosition(node.SpanStart).ToString());
 
-    private static string LeadingWhitespace(string line) =>
+    internal static string LeadingWhitespace(string line) =>
         line[..(line.Length - line.TrimStart(' ', '\t').Length)];
 }

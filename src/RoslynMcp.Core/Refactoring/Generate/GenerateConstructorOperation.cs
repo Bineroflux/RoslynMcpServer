@@ -1,7 +1,6 @@
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
-using Microsoft.CodeAnalysis.Simplification;
 using RoslynMcp.Contracts.Errors;
 using RoslynMcp.Contracts.Models;
 using RoslynMcp.Core.FileSystem;
@@ -138,7 +137,11 @@ public sealed class GenerateConstructorOperation : RefactoringOperationBase<Gene
         }
 
         // Generate the constructor
-        var constructor = GenerateConstructor(members, typeDeclaration, @params.AddNullChecks);
+        var constructor = GenerateConstructor(
+            members,
+            typeDeclaration,
+            @params.AddNullChecks,
+            semanticModel.GetNullableContext(typeDeclaration.OpenBraceToken.Span.End).AnnotationsEnabled());
 
         // If preview mode, return without applying (but include generated constructor code)
         if (@params.Preview)
@@ -229,7 +232,8 @@ public sealed class GenerateConstructorOperation : RefactoringOperationBase<Gene
     private static ConstructorDeclarationSyntax GenerateConstructor(
         List<ISymbol> members,
         TypeDeclarationSyntax typeDeclaration,
-        bool addNullChecks)
+        bool addNullChecks,
+        bool nullableAnnotations)
     {
         // Build parameters
         var parameters = new List<ParameterSyntax>();
@@ -239,8 +243,7 @@ public sealed class GenerateConstructorOperation : RefactoringOperationBase<Gene
             var paramName = ToCamelCase(member.Name);
 
             var parameter = SyntaxFactory.Parameter(IdentifierNames.Token(paramName))
-                .WithType(SyntaxFactory.ParseTypeName(type.ToDisplayString())
-                    .WithAdditionalAnnotations(Simplifier.Annotation)
+                .WithType(SyntaxGenerationHelper.CreateTypeSyntax(type, nullableAnnotations)
                     .WithTrailingTrivia(SyntaxFactory.Space));
 
             parameters.Add(parameter);

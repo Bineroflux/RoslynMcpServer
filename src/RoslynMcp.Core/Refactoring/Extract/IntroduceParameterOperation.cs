@@ -87,14 +87,21 @@ public sealed class IntroduceParameterOperation : RefactoringOperationBase<Intro
         var localDeclStatement = localDecl.Ancestors().OfType<LocalDeclarationStatementSyntax>().First();
         var declaredType = localDeclStatement.Declaration.Type;
 
-        // If using 'var', resolve the actual type
+        // If using 'var', resolve the actual type: the initializer's (a `var` local is always
+        // nullable, so `new List<int>()` would become `List<int>?`), `?` only where nullable
+        // annotations are enabled (CS8632), and simplified to what the file's usings allow.
         TypeSyntax paramType;
         if (declaredType.IsVar)
         {
-            var typeInfo = semanticModel.GetTypeInfo(declaredType, cancellationToken);
-            if (typeInfo.Type != null)
+            var type = (localDecl.Initializer is { } varInitializer
+                    ? semanticModel.GetTypeInfo(varInitializer.Value, cancellationToken).Type
+                    : null)
+                ?? semanticModel.GetTypeInfo(declaredType, cancellationToken).Type;
+            if (type != null)
             {
-                paramType = SyntaxFactory.ParseTypeName(typeInfo.Type.ToDisplayString());
+                paramType = SyntaxGenerationHelper.CreateTypeSyntax(
+                    type,
+                    semanticModel.GetNullableContext(containingMethod.ParameterList.SpanStart).AnnotationsEnabled());
             }
             else
             {
@@ -160,7 +167,8 @@ public sealed class IntroduceParameterOperation : RefactoringOperationBase<Intro
             .WithBody(newBody);
 
         var newRoot = root.ReplaceNode(containingMethod, newMethod);
-        var newSolution = document.WithSyntaxRoot(newRoot).Project.Solution;
+        var newSolution = await GeneratedCodeFormatter.FormatAsync(
+            document.WithSyntaxRoot(newRoot).Project.Solution, document, cancellationToken);
 
         // 3. Update call sites: add the initializer value as argument
         if (initializer != null)

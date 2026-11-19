@@ -504,6 +504,10 @@ public sealed class ExtractMethodOperation : RefactoringOperationBase<ExtractMet
         SemanticModel semanticModel,
         CancellationToken cancellationToken)
     {
+        // Types are written with `?` only where nullable annotations are enabled (CS8632) and
+        // simplified to what the file's usings allow.
+        var nullable = semanticModel.GetNullableContext(containingMethod.SpanStart).AnnotationsEnabled();
+
         // Build parameters
         var parameters = new List<ParameterSyntax>();
         var arguments = new List<ArgumentSyntax>();
@@ -520,34 +524,25 @@ public sealed class ExtractMethodOperation : RefactoringOperationBase<ExtractMet
             if (type != null)
             {
                 parameters.Add(SyntaxFactory.Parameter(IdentifierNames.Token(param.Name))
-                    .WithType(SyntaxFactory.ParseTypeName(type.ToDisplayString())));
+                    .WithType(SyntaxGenerationHelper.CreateTypeSyntax(type, nullable)));
                 arguments.Add(SyntaxFactory.Argument(IdentifierNames.Name(param.Name)));
             }
         }
 
-        // Determine return type - wrap in Task<T> if async
+        // Determine return type - wrap in Task<T> (or Task for void) if async; Task is written
+        // System.Threading.Tasks.Task where no using allows the short name.
         TypeSyntax returnType;
         if (dataFlow.ContainsAwait)
         {
-            if (dataFlow.ReturnType != null)
-            {
-                // async method with return value -> Task<T>
-                returnType = SyntaxFactory.GenericName(
-                    SyntaxFactory.Identifier("Task"),
-                    SyntaxFactory.TypeArgumentList(
-                        SyntaxFactory.SingletonSeparatedList<TypeSyntax>(
-                            SyntaxFactory.ParseTypeName(dataFlow.ReturnType.ToDisplayString()))));
-            }
-            else
-            {
-                // async method returning void -> Task
-                returnType = SyntaxFactory.ParseTypeName("Task");
-            }
+            returnType = SyntaxGenerationHelper.ToAsyncReturnType(
+                dataFlow.ReturnType ?? semanticModel.Compilation.GetSpecialType(SpecialType.System_Void),
+                semanticModel.Compilation,
+                nullable);
         }
         else
         {
             returnType = dataFlow.ReturnType != null
-                ? SyntaxFactory.ParseTypeName(dataFlow.ReturnType.ToDisplayString())
+                ? SyntaxGenerationHelper.CreateTypeSyntax(dataFlow.ReturnType, nullable)
                 : SyntaxFactory.PredefinedType(SyntaxFactory.Token(SyntaxKind.VoidKeyword));
         }
 
@@ -627,7 +622,8 @@ public sealed class ExtractMethodOperation : RefactoringOperationBase<ExtractMet
 
         if (dataFlow.ContainsAwait)
         {
-            call = SyntaxFactory.AwaitExpression(call);
+            call = SyntaxFactory.AwaitExpression(
+                SyntaxFactory.Token(SyntaxKind.AwaitKeyword).WithTrailingTrivia(SyntaxFactory.Space), call);
         }
 
         return (method, call);

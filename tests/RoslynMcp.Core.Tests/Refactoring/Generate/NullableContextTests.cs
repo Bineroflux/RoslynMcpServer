@@ -147,6 +147,156 @@ public sealed class NullableContextTests
         Assert.Empty(ws.GetDiskCompilationWarningsAndErrors());
     }
 
+    private const string AnnotatedStore = """
+        namespace App;
+
+        public static class Store
+        {
+            public static string? Find(string key) => key;
+            public static System.Threading.Tasks.Task<int> LoadAsync() => System.Threading.Tasks.Task.FromResult(1);
+        }
+        """;
+
+    [Theory]
+    [InlineData("#nullable disable", "public static int Run(string name, List<int> list)")]
+    [InlineData("#nullable enable", "public static int Run(string? name, List<int> list)")]
+    public async Task IntroduceParameter_VarLocal_WritesTheTypeLikeGeneratedCode(string context, string signature)
+    {
+        using var ws = TestWorkspace.Create(("Store.cs", AnnotatedStore), ("Use.cs", $$"""
+            {{context}}
+            using System.Collections.Generic;
+
+            namespace App;
+
+            public static class Use
+            {
+                public static int Run()
+                {
+                    var name = Store.Find("a");
+                    var list = new List<int>();
+                    return (name ?? "").Length + list.Count;
+                }
+            }
+            """));
+
+        foreach (var (variable, line) in new[] { ("name", 10), ("list", 10) })
+        {
+            var result = await new IntroduceParameterOperation(ws.Context).ExecuteAsync(
+                new IntroduceParameterParams { SourceFile = ws.PathOf("Use.cs"), VariableName = variable, Line = line },
+                TestContext.Current.CancellationToken);
+            Assert.True(result.Success, result.Error?.Message);
+        }
+
+        Assert.Contains(signature, ws.ReadFile("Use.cs"));
+        Assert.Empty(ws.GetDiskCompilationWarningsAndErrors());
+    }
+
+    [Theory]
+    [InlineData("#nullable disable", "public Order(string note, int id)")]
+    [InlineData("#nullable enable", "public Order(string? note, int id)")]
+    public async Task GenerateConstructor_MemberFromAnnotatedPart_WritesAnnotationsOnlyWhereEnabled(string context, string signature)
+    {
+        using var ws = TestWorkspace.Create(
+            ("Order.Note.cs", """
+                #nullable enable
+                namespace App;
+
+                public partial class Order
+                {
+                    private readonly string? note;
+
+                    public string? Note => note;
+                }
+                """),
+            ("Order.cs", $$"""
+                {{context}}
+                namespace App;
+
+                public partial class Order
+                {
+                    private readonly int id;
+
+                    public int Id => id;
+                }
+                """));
+
+        var result = await new GenerateConstructorOperation(ws.Context).ExecuteAsync(
+            new GenerateConstructorParams { SourceFile = ws.PathOf("Order.cs"), TypeName = "Order" },
+            TestContext.Current.CancellationToken);
+
+        Assert.True(result.Success, result.Error?.Message);
+        Assert.Contains(signature, ws.ReadFile("Order.cs"));
+        Assert.Empty(ws.GetDiskCompilationWarningsAndErrors());
+    }
+
+    [Theory]
+    [InlineData("#nullable disable", "private static void Print(string name)")]
+    [InlineData("#nullable enable", "private static void Print(string? name)")]
+    public async Task ExtractMethod_WritesAnnotationsOnlyWhereEnabled(string context, string signature)
+    {
+        using var ws = TestWorkspace.Create(("Store.cs", AnnotatedStore), ("Use.cs", $$"""
+            {{context}}
+            namespace App;
+
+            public static class Use
+            {
+                public static void Run()
+                {
+                    var name = Store.Find("a");
+                    System.Console.WriteLine(name);
+                }
+            }
+            """));
+
+        var result = await ExtractMethodAsync(ws, "System.Console.WriteLine(name);", "Print");
+
+        Assert.True(result.Success, result.Error?.Message);
+        Assert.Contains(signature, ws.ReadFile("Use.cs"));
+        Assert.Empty(ws.GetDiskCompilationWarningsAndErrors());
+    }
+
+    [Fact]
+    public async Task ExtractMethod_AsyncWithoutTasksUsing_QualifiesTask()
+    {
+        using var ws = TestWorkspace.Create(("Store.cs", AnnotatedStore), ("Use.cs", """
+            namespace App;
+
+            public static class Use
+            {
+                public static async System.Threading.Tasks.Task RunAsync()
+                {
+                    System.Console.WriteLine(await Store.LoadAsync());
+                }
+            }
+            """));
+
+        var result = await ExtractMethodAsync(ws, "System.Console.WriteLine(await Store.LoadAsync());", "PrintAsync");
+
+        Assert.True(result.Success, result.Error?.Message);
+        var text = ws.ReadFile("Use.cs");
+        Assert.Contains("private static async System.Threading.Tasks.Task PrintAsync()", text);
+        Assert.Contains("await PrintAsync();", text);
+        Assert.Empty(ws.GetDiskCompilationWarningsAndErrors());
+    }
+
+    private static Task<RefactoringResult> ExtractMethodAsync(TestWorkspace ws, string statement, string name)
+    {
+        var lines = ws.ReadFile("Use.cs").ReplaceLineEndings("\n").Split('\n');
+        var line = Array.FindIndex(lines, l => l.Contains(statement, StringComparison.Ordinal));
+        var column = lines[line].IndexOf(statement, StringComparison.Ordinal) + 1;
+        return new ExtractMethodOperation(ws.Context).ExecuteAsync(
+            new ExtractMethodParams
+            {
+                SourceFile = ws.PathOf("Use.cs"),
+                StartLine = line + 1,
+                StartColumn = column,
+                EndLine = line + 1,
+                EndColumn = column + statement.Length,
+                MethodName = name
+            },
+            TestContext.Current.CancellationToken);
+    }
+
     private static Task<RefactoringResult> ImplementAsync(TestWorkspace ws, bool explicitImplementation) =>
         new ImplementInterfaceOperation(ws.Context).ExecuteAsync(
             new ImplementInterfaceParams

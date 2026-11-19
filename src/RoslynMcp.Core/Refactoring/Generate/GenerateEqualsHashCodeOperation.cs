@@ -136,7 +136,10 @@ public sealed class GenerateEqualsHashCodeOperation : RefactoringOperationBase<G
             {
                 // EqualityComparer<T>.Default.Equals(field, other.field)
                 var comparer = comparerType == null
-                    ? SyntaxFactory.ParseTypeName($"global::System.Collections.Generic.EqualityComparer<{memberType.ToDisplayString()}>")
+                    ? SyntaxFactory.QualifiedName(
+                            SyntaxFactory.ParseName("global::System.Collections.Generic"),
+                            SyntaxFactory.GenericName(SyntaxFactory.Identifier("EqualityComparer"), SyntaxFactory.TypeArgumentList(
+                                SyntaxFactory.SingletonSeparatedList(SyntaxGenerationHelper.CreateTypeSyntax(memberType, nullableAnnotations)))))
                         .WithAdditionalAnnotations(Simplifier.Annotation)
                     : SyntaxGenerationHelper.CreateTypeSyntax(comparerType.Construct(memberType), nullableAnnotations);
                 eq = SyntaxFactory.InvocationExpression(

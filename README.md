@@ -426,6 +426,9 @@ dotnet test
 dotnet test tests/RoslynMcp.Core.Tests
 dotnet test tests/RoslynMcp.Server.Tests
 dotnet test tests/RoslynMcp.Cli.Tests
+
+# With code coverage: a Cobertura report per test project in TestResults/, merged into TestResults/merged/
+dotnet test --solution RoslynMcp.sln -c Release --coverage --coverage-output-format cobertura
 ```
 
 ---

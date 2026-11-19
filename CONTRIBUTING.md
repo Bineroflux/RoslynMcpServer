@@ -113,8 +113,9 @@ public void MethodName_Scenario_ExpectedBehavior()
 # Run all tests
 dotnet test
 
-# Run tests with coverage
-dotnet test /p:CollectCoverage=true
+# Run tests with coverage (Microsoft.Testing.Extensions.CodeCoverage): a Cobertura report per
+# test project in TestResults/, merged into TestResults/merged/merged-*.cobertura.xml
+dotnet test --solution RoslynMcp.sln -c Release --coverage --coverage-output-format cobertura
 
 # Run specific test project
 dotnet test tests/RoslynMcp.Core.Tests

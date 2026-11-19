@@ -496,15 +496,18 @@ public sealed class RenameNamespaceTests
         Assert.Equal(
             "@using System.Net.Http\r\n@using Company.New\r\n@using Company.New.Shared\r\n@using Company.OldStuff\r\n@using static Company.New.Util\r\n@using M = Company.New.Model\r\n",
             Encoding.UTF8.GetString(bytes[3..]));
-        Assert.Equal(index.Replace("@namespace Company.Old.Pages", "@namespace Company.New.Pages", StringComparison.Ordinal), ws.ReadFile("Pages/Index.razor"));
+        Assert.Equal(
+            index.Replace("@namespace Company.Old.Pages", "@namespace Company.New.Pages", StringComparison.Ordinal)
+                .Replace("@inherits Company.Old.BasePage", "@inherits Company.New.BasePage", StringComparison.Ordinal),
+            ws.ReadFile("Pages/Index.razor"));
         Assert.Equal("@using Company.New\n@namespace Company.New.Views\n", ws.ReadFile("Views/_ViewImports.cshtml"));
-        Assert.Equal(7, result.ReferencesUpdated);
+        Assert.Equal(8, result.ReferencesUpdated);
         Assert.Contains(ws.PathOf("_Imports.razor"), result.Changes!.FilesModified);
         Assert.Contains(ws.PathOf("Views/_ViewImports.cshtml"), result.Changes.FilesModified);
 
         // The other mentions are left, and reported by line.
-        var mentions = result.Warnings!.Where(w => w.Contains("in Razor files only @using and @namespace directives are rewritten", StringComparison.Ordinal)).ToList();
-        Assert.Equal([2, 4, 7], mentions.Select(m => int.Parse(m[(m.IndexOf("Index.razor(", StringComparison.Ordinal) + "Index.razor(".Length)..m.IndexOf("):", StringComparison.Ordinal)], System.Globalization.CultureInfo.InvariantCulture)));
+        var mentions = result.Warnings!.Where(w => w.Contains("in Razor files only directives", StringComparison.Ordinal)).ToList();
+        Assert.Equal([4, 7], mentions.Select(m => int.Parse(m[(m.IndexOf("Index.razor(", StringComparison.Ordinal) + "Index.razor(".Length)..m.IndexOf("):", StringComparison.Ordinal)], System.Globalization.CultureInfo.InvariantCulture)));
 
         // The workspace holds the new text, so the file watcher has nothing to take over.
         foreach (var name in new[] { "_Imports.razor", "Pages/Index.razor", "Views/_ViewImports.cshtml" })
@@ -516,6 +519,53 @@ public sealed class RenameNamespaceTests
 
         File.AppendAllText(ws.PathOf("Pages/Index.razor"), "<p>edited</p>\n");
         Assert.False(await ws.Context.AdditionalDocumentsMatchDiskAsync(ws.PathOf("Pages/Index.razor"), TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task RazorDirectivesThatTakeAType_GetTheNewNamespaceWhereTheOldOneStartsAQualifiedName()
+    {
+        const string component = """
+            @inherits Company.Old.BasePage
+            @inject System.Collections.Generic.IEnumerable<Company.Old.Model> Models
+            @inject global::Company.Old.Sub.Service Service
+            @implements Company.Old.IThing
+            @attribute [Company.Old.Tag]
+            @attribute [Obsolete("Company.Old.Model is old")]
+            @typeparam TItem where TItem : Company.Old.Model
+            @layout Company.Old.Layouts.Main
+            @inherits Company.OldStuff.Base
+            @inject Other.Company.Old.Thing Thing
+
+            """;
+        using var ws = TestWorkspace.Create(
+            [
+                ("Model.cs", "namespace Company.Old\n{\n    public class Model { }\n}\n"),
+                ("Stuff.cs", "namespace Company.OldStuff\n{\n    public class Base { }\n}\n")
+            ],
+            [],
+            additionalFiles: [("Widget.razor", component.ReplaceLineEndings("\n")), ("Views/Show.cshtml", "@model Company.Old.Model\n<p>@Model</p>\n")]);
+
+        var result = await RenameAsync(ws, "Company.Old", "Brand.Core");
+
+        Assert.True(result.Success, result.Error?.Message);
+        Assert.Equal("""
+            @inherits Brand.Core.BasePage
+            @inject System.Collections.Generic.IEnumerable<Brand.Core.Model> Models
+            @inject global::Brand.Core.Sub.Service Service
+            @implements Brand.Core.IThing
+            @attribute [Brand.Core.Tag]
+            @attribute [Obsolete("Company.Old.Model is old")]
+            @typeparam TItem where TItem : Brand.Core.Model
+            @layout Brand.Core.Layouts.Main
+            @inherits Company.OldStuff.Base
+            @inject Other.Company.Old.Thing Thing
+
+            """.ReplaceLineEndings("\n"), ws.ReadFile("Widget.razor"));
+        Assert.Equal("@model Brand.Core.Model\n<p>@Model</p>\n", ws.ReadFile("Views/Show.cshtml"));
+
+        // The string literal is left, and reported.
+        var mention = Assert.Single(result.Warnings!, w => w.Contains("in Razor files only directives", StringComparison.Ordinal));
+        Assert.StartsWith(ws.PathOf("Widget.razor") + "(6):", mention, StringComparison.Ordinal);
     }
 
     [Fact]

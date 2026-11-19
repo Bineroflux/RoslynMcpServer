@@ -51,7 +51,8 @@ namespace RoslynMcp.Core.Refactoring.Rename;
 /// </para>
 /// <para>
 /// In Razor files (<c>.razor</c>, <c>.cshtml</c>) the <c>@using</c> and <c>@namespace</c>
-/// directives naming the old namespace or one under it are rewritten as text (see
+/// directives naming the old namespace or one under it, and the qualified type names of the
+/// directives that take a type, are rewritten as text (see
 /// <see cref="RazorNamespaceDirectives"/>); other mentions there are reported in <c>warnings</c>
 /// by line, as are the errors the Razor generator's code gets.
 /// </para>
@@ -119,7 +120,7 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
             $"'{path}' is generated and was not changed; it still refers to namespace '{rename.Old}'."));
         warnings.AddRange(extensionWarnings);
         warnings.AddRange(razor.Mentions.Select(line =>
-            $"{line}: still names namespace '{rename.Old}'; in Razor files only @using and @namespace directives are rewritten."));
+            $"{line}: still names namespace '{rename.Old}'; in Razor files only directives (@using, @namespace, and the qualified type names of @inherits, @inject, @model, @implements, @attribute, @typeparam, @layout) are rewritten."));
 
         var plans = new List<PlannedMove>();
         if (@params.UpdateFolders)
@@ -1389,7 +1390,7 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
             {
                 File = file.Path,
                 ChangeType = ChangeKind.Modify,
-                Description = $"Rename namespace '{rename.Old}' to '{rename.New}': {file.Directives} @using / @namespace directive(s)",
+                Description = $"Rename namespace '{rename.Old}' to '{rename.New}': {file.Directives} name(s) in Razor directives",
                 BeforeSnippet = file.Text.Lines[line].ToString().Trim(),
                 AfterSnippet = file.NewText.Lines[line].ToString().Trim(),
                 StartLine = line + 1,

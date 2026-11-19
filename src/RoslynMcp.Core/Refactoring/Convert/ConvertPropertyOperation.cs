@@ -138,11 +138,17 @@ public sealed class ConvertPropertyOperation : RefactoringOperationBase<ConvertP
         // Generate backing field name
         var fieldName = "_" + char.ToLower(property.Identifier.Text[0]) + property.Identifier.Text.Substring(1);
 
-        // Create backing field
+        // Create backing field; it takes over the property's initializer, as written.
+        var declarator = SyntaxFactory.VariableDeclarator(fieldName);
+        if (property.Initializer?.Value is { } initialValue)
+        {
+            declarator = declarator.WithInitializer(SyntaxFactory.EqualsValueClause(
+                GeneratedCodeFormatter.KeepLayout(initialValue.WithoutTrivia(), initialValue.WithoutTrivia(), initialValue)));
+        }
+
         var backingField = SyntaxFactory.FieldDeclaration(
-            SyntaxFactory.VariableDeclaration(property.Type)
-                .WithVariables(SyntaxFactory.SingletonSeparatedList(
-                    SyntaxFactory.VariableDeclarator(fieldName))))
+            SyntaxFactory.VariableDeclaration(property.Type.WithoutTrivia())
+                .WithVariables(SyntaxFactory.SingletonSeparatedList(declarator)))
             .WithModifiers(SyntaxFactory.TokenList(SyntaxFactory.Token(SyntaxKind.PrivateKeyword)))
             .NormalizeWhitespace();
 
@@ -181,10 +187,15 @@ public sealed class ConvertPropertyOperation : RefactoringOperationBase<ConvertP
             accessors.Add(setter);
         }
 
-        var newProperty = WithLayoutOf(property, property
-            .WithAccessorList(SyntaxFactory.AccessorList(SyntaxFactory.List(accessors)))
+        // Only the accessors are generated (and laid out by the formatter); the property's
+        // attributes, modifiers, type and name stay as written.
+        var generated = SyntaxFactory.AccessorList(SyntaxFactory.List(accessors)).NormalizeWhitespace();
+        var newProperty = WithoutTrailingWhitespace(property, property.AccessorList.OpenBraceToken.GetPreviousToken())
+            .WithAccessorList(GeneratedCodeFormatter.Mark(generated
+                .WithLeadingTrivia(SyntaxFactory.ElasticCarriageReturnLineFeed)
+                .WithTrailingTrivia(property.GetTrailingTrivia())))
             .WithInitializer(null)
-            .WithSemicolonToken(default));
+            .WithSemicolonToken(default);
 
         var before = property.NormalizeWhitespace().ToFullString();
         var after = backingField.NormalizeWhitespace().ToFullString() + "\n" + newProperty.NormalizeWhitespace().ToFullString();
@@ -233,9 +244,18 @@ public sealed class ConvertPropertyOperation : RefactoringOperationBase<ConvertP
             accessors.Add(autoAccessor);
         }
 
-        var newProperty = WithLayoutOf(property, property
-            .WithAccessorList(SyntaxFactory.AccessorList(SyntaxFactory.List(accessors)))
-            .WithExpressionBody(null));
+        // `{ get; set; }` on the line of the name; the rest of the property stays as written.
+        var space = SyntaxFactory.Space;
+        var autoList = SyntaxFactory.AccessorList(
+            SyntaxFactory.Token(SyntaxKind.OpenBraceToken).WithLeadingTrivia(space).WithTrailingTrivia(space),
+            SyntaxFactory.List(accessors.Select(a => a
+                .WithModifiers(SyntaxFactory.TokenList(a.Modifiers.Select(m => m.WithoutTrivia().WithTrailingTrivia(space))))
+                .WithKeyword(a.Keyword.WithoutTrivia())
+                .WithSemicolonToken(a.SemicolonToken.WithoutTrivia().WithTrailingTrivia(space)))),
+            SyntaxFactory.Token(SyntaxKind.CloseBraceToken).WithTrailingTrivia(property.AccessorList.CloseBraceToken.TrailingTrivia));
+        var newProperty = WithoutTrailingWhitespace(property, property.AccessorList.OpenBraceToken.GetPreviousToken())
+            .WithAccessorList(autoList)
+            .WithExpressionBody(null);
 
         var before = property.NormalizeWhitespace().ToFullString();
         var after = newProperty.NormalizeWhitespace().ToFullString();
@@ -243,15 +263,8 @@ public sealed class ConvertPropertyOperation : RefactoringOperationBase<ConvertP
         return (root.ReplaceNode(property, newProperty), before, after);
     }
 
-    /// <summary>
-    /// <paramref name="converted"/> laid out from scratch but keeping what surrounds
-    /// <paramref name="original"/> (its documentation comment, attributes' indentation, the
-    /// line break after it), and marked for <see cref="GeneratedCodeFormatter.FormatAsync"/>,
-    /// which indents it and gives its line breaks the document's line ending.
-    /// </summary>
-    private static PropertyDeclarationSyntax WithLayoutOf(PropertyDeclarationSyntax original, PropertyDeclarationSyntax converted) =>
-        GeneratedCodeFormatter.Mark(converted
-            .NormalizeWhitespace()
-            .WithLeadingTrivia(original.GetLeadingTrivia())
-            .WithTrailingTrivia(original.GetTrailingTrivia()));
+    /// <summary>The property with the whitespace (and line break) after <paramref name="token"/> removed.</summary>
+    private static PropertyDeclarationSyntax WithoutTrailingWhitespace(PropertyDeclarationSyntax property, SyntaxToken token) =>
+        property.ReplaceToken(token, token.WithTrailingTrivia(
+            token.TrailingTrivia.Where(t => !t.IsKind(SyntaxKind.WhitespaceTrivia) && !t.IsKind(SyntaxKind.EndOfLineTrivia))));
 }

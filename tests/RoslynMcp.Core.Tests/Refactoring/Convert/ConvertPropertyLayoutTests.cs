@@ -95,6 +95,78 @@ public sealed class ConvertPropertyLayoutTests
             ws.ReadFile("Person.cs"));
     }
 
+    [Fact]
+    public async Task ToFullProperty_KeepsTheHeader_FieldTakesTheInitializerAsWritten()
+    {
+        using var ws = TestWorkspace.Create(("Person.cs", """
+            namespace App
+            {
+                public class Person
+                {
+                    [System.ComponentModel.Description( "age" )]
+                    public  int Age { get; private set; } = 4*10;
+                }
+
+                public static class Program
+                {
+                    public static string Run() => new Person().Age.ToString();
+                }
+            }
+            """.ReplaceLineEndings("\n")));
+        var before = Run(ws);
+
+        var result = await ConvertAsync(ws, "Age", "ToFullProperty");
+
+        Assert.True(result.Success, result.Error?.Message);
+        var text = ws.ReadFile("Person.cs");
+        Assert.Contains("        private int _age = 4*10;\n", text);
+        Assert.Contains("        [System.ComponentModel.Description( \"age\" )]\n        public  int Age\n        {\n            get\n", text);
+        Assert.Contains("            private set\n", text);
+        Assert.Equal("40", before);
+        Assert.Equal(before, Run(ws));
+    }
+
+    [Fact]
+    public async Task ToAutoProperty_KeepsTheHeader()
+    {
+        using var ws = TestWorkspace.Create(("Person.cs", """
+            namespace App
+            {
+                public class Person
+                {
+                    private int _age;
+
+                    [System.Obsolete]
+                    public  int Age
+                    {
+                        get { return _age; }
+                        private set { _age = value; }
+                    }
+                }
+            }
+            """.ReplaceLineEndings("\n")));
+
+        var result = await ConvertAsync(ws, "Age", "ToAutoProperty");
+
+        Assert.True(result.Success, result.Error?.Message);
+        Assert.Contains("        [System.Obsolete]\n        public  int Age { get; private set; }\n    }\n", ws.ReadFile("Person.cs"));
+        Assert.Empty(ws.GetDiskCompilationErrors());
+    }
+
+    private static string Run(TestWorkspace ws)
+    {
+        var context = new System.Runtime.Loader.AssemblyLoadContext(nameof(ConvertPropertyLayoutTests), isCollectible: true);
+        try
+        {
+            var assembly = context.LoadFromStream(new MemoryStream(ws.EmitDiskAssembly()));
+            return (string)assembly.GetType("App.Program", throwOnError: true)!.GetMethod("Run")!.Invoke(null, null)!;
+        }
+        finally
+        {
+            context.Unload();
+        }
+    }
+
     private static Task<RefactoringResult> ConvertAsync(TestWorkspace ws, string property, string direction) =>
         new ConvertPropertyOperation(ws.Context).ExecuteAsync(
             new ConvertPropertyParams { SourceFile = ws.PathOf("Person.cs"), PropertyName = property, Direction = direction },

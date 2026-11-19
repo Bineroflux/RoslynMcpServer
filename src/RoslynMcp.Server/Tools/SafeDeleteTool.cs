@@ -31,7 +31,7 @@ public sealed class SafeDeleteTool : IToolHandler
     public string Description =>
         "Delete a type or member only if nothing outside its own declaration references it; otherwise fail and list " +
         "the references (nameof and doc-comment crefs count; crefs are marked). Removes every partial part, a single " +
-        "variable of 'int a, b;', the doc comment above it, and the file when a type was all it declared. Refuses " +
+        "variable of 'int a, b;', the doc comment above it, the usings only it used, and the file when a type was all it declared. Refuses " +
         "overrides, interface implementations and members that are overridden or implemented. Reflection and other " +
         "assemblies are invisible; compiler errors left behind are returned as 'warnings'.";
 

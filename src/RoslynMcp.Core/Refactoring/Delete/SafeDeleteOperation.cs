@@ -41,7 +41,9 @@ namespace RoslynMcp.Core.Refactoring.Delete;
 /// <para>
 /// All partial parts go; of <c>int a, b;</c> only the variable. Documentation and other comments
 /// directly above a declaration go with it (see <see cref="DeclarationRemoval.Span"/>). A file
-/// left without declarations (a type that was alone in it) is deleted. Compiler errors the
+/// left without declarations (a type that was alone in it) is deleted. A using directive that
+/// only the deleted code used goes too (the compiler reports it unnecessary, CS8019, afterwards
+/// but not before; usings that were unused already stay). Compiler errors the
 /// deletion introduces anyway in the touched files (or, for a constructor, in the files using
 /// its type, such as a <c>new()</c> constraint) are returned as warnings.
 /// </para>
@@ -105,6 +107,16 @@ public sealed class SafeDeleteOperation : RefactoringOperationBase<SafeDeletePar
             throw StillReferenced(symbol, references);
 
         var (newSolution, edits) = await RemoveAsync(solution, declarations, cancellationToken);
+
+        // Usings only the deleted code needed go too; those that were unused before stay.
+        var (cleaned, usingsRemoved) = await NewlyReportedUsings.RemoveAsync(
+            solution,
+            newSolution,
+            edits.Where(e => !e.DeletesFile).Select(e => e.Document.Id),
+            [NewlyReportedUsings.UnnecessaryUsing],
+            includeGlobal: false,
+            cancellationToken);
+        newSolution = cleaned;
         var warnings = await FindWarningsAsync(symbol, solution, newSolution, edits, cancellationToken);
 
         if (@params.Preview)
@@ -115,7 +127,8 @@ public sealed class SafeDeleteOperation : RefactoringOperationBase<SafeDeletePar
                 Success = true,
                 OperationId = operationId,
                 Preview = true,
-                PendingChanges = CreatePendingChanges(symbol, edits),
+                PendingChanges = [.. CreatePendingChanges(symbol, edits), .. usingsRemoved.Select(UsingRemoval)],
+                UsingDirectivesRemoved = usingsRemoved.Count,
                 Warnings = warnings
             };
         }
@@ -145,9 +158,20 @@ public sealed class SafeDeleteOperation : RefactoringOperationBase<SafeDeletePar
                     Column = location.StartLinePosition.Character + 1
                 }
             },
+            UsingDirectivesRemoved = usingsRemoved.Count,
             Warnings = warnings
         };
     }
+
+    private static PendingChange UsingRemoval(NewlyReportedUsings.Removed removed) => new()
+    {
+        File = removed.File,
+        ChangeType = ChangeKind.Modify,
+        Description = $"Remove '{removed.Directive}', which only the deleted code used",
+        BeforeSnippet = removed.Directive,
+        StartLine = removed.Line,
+        EndLine = removed.Line
+    };
 
     /// <summary>
     /// The symbol the request names. A constructor or finalizer is named by its type's name and
@@ -607,7 +631,8 @@ public sealed class SafeDeleteOperation : RefactoringOperationBase<SafeDeletePar
             }
         }
 
-        var errors = await IntroducedErrors.FindAsync(before, after, documents, cancellationToken);
+        // The deletion removes lines, so the errors below it move; they are matched without their line.
+        var errors = await IntroducedErrors.FindAsync(before, after, documents, cancellationToken, matchLines: false);
         var warnings = (errors ?? []).Concat(notes).ToList();
         return warnings.Count == 0 ? null : warnings;
     }

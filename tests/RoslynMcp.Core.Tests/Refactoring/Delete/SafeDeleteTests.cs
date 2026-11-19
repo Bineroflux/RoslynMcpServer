@@ -399,6 +399,86 @@ public sealed class SafeDeleteTests
     }
 
     [Fact]
+    public async Task UsingsOnlyTheDeletedCodeUsed_Go_AndThoseUnusedBeforeStay()
+    {
+        const string source = """
+            using System.Text;
+            using System.Collections.Concurrent;
+            using System.Net;
+            using SB = System.Text.StringBuilder;
+            using static System.Math;
+
+            namespace App
+            {
+                using System.Globalization;
+
+                internal class Worker
+                {
+                    public int Run() => 1;
+
+                    private string Build() => new StringBuilder().Append(CultureInfo.InvariantCulture).ToString() + new SB() + Abs(-1);
+                }
+            }
+            """;
+        using var ws = TestWorkspace.Create(("Worker.cs", Lf(source)));
+
+        var preview = await DeleteAsync(ws, "Worker.cs", "Build", preview: true);
+        var result = await DeleteAsync(ws, "Worker.cs", "Build");
+
+        Assert.True(result.Success, result.Error?.Message);
+        Assert.Equal(Lf("""
+            using System.Collections.Concurrent;
+            using System.Net;
+
+            namespace App
+            {
+                internal class Worker
+                {
+                    public int Run() => 1;
+                }
+            }
+            """), ws.ReadFile("Worker.cs"));
+        Assert.Equal(4, result.UsingDirectivesRemoved);
+
+        // The preview lists them, with the lines they are on.
+        Assert.Equal(4, preview.UsingDirectivesRemoved);
+        Assert.Equal(
+            ["1: using System.Text;", "4: using SB = System.Text.StringBuilder;", "5: using static System.Math;", "9: using System.Globalization;"],
+            preview.PendingChanges!.Where(c => c.Description!.StartsWith("Remove 'using", StringComparison.Ordinal)).Select(c => $"{c.StartLine}: {c.BeforeSnippet}"));
+    }
+
+    [Fact]
+    public async Task AUsingStillUsedByAnotherTargetFramework_Stays()
+    {
+        const string source = """
+            using System.Text;
+
+            namespace App;
+
+            internal class Worker
+            {
+                public int Run() => 1;
+
+                private string Build() => new StringBuilder().ToString();
+
+            #if NET9
+                public string Other() => new StringBuilder().ToString();
+            #endif
+            }
+            """;
+        using var ws = TestWorkspace.CreateSolution(
+            new TestWorkspace.ProjectSpec("Multi", [("Worker.cs", Lf(source))], TargetFrameworks: ["net8", "net9"]));
+
+        var result = await new SafeDeleteOperation(ws.Context).ExecuteAsync(
+            new SafeDeleteParams { SourceFile = ws.PathOf("Multi", "Worker.cs"), SymbolName = "Build" },
+            TestContext.Current.CancellationToken);
+
+        Assert.True(result.Success, result.Error?.Message);
+        Assert.StartsWith("using System.Text;\n", File.ReadAllText(ws.PathOf("Multi", "Worker.cs")), StringComparison.Ordinal);
+        Assert.Equal(0, result.UsingDirectivesRemoved);
+    }
+
+    [Fact]
     public async Task CrlfFileWithBom_KeepsBoth()
     {
         const string source = "internal class C\r\n{\r\n    private void Unused() { }\r\n\r\n    public void Run() { }\r\n}\r\n";

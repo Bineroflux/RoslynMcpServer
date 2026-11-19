@@ -235,7 +235,7 @@ Every call's arguments are checked against the tool's input schema before the to
 
 | Tool | Description | Key Parameters |
 |------|-------------|----------------|
-| `safe_delete` | Delete a type or member only when nothing outside its own declaration references it; otherwise fail and list the references (`nameof` and doc-comment `cref`s count, crefs marked as such). Removes every partial part, one variable of `int a, b;`, the comments right above the declaration, and the file when a type was all it declared. Refuses overrides, interface implementations, members that are overridden or implemented, and symbols used implicitly (entry point, static constructors, finalizers, implicit conversions). Compiler errors left behind are returned as `warnings`. | `sourceFile`, `symbolName`, `line`, `column` |
+| `safe_delete` | Delete a type or member only when nothing outside its own declaration references it; otherwise fail and list the references (`nameof` and doc-comment `cref`s count, crefs marked as such). Removes every partial part, one variable of `int a, b;`, the comments right above the declaration, the `using` directives only it used (those unused before stay), and the file when a type was all it declared. Refuses overrides, interface implementations, members that are overridden or implemented, and symbols used implicitly (entry point, static constructors, finalizers, implicit conversions). Compiler errors left behind are returned as `warnings`. | `sourceFile`, `symbolName`, `line`, `column` |
 
 ### Signature and Encapsulation
 

@@ -194,6 +194,85 @@ public sealed class PullMembersUpTargetTests
         Assert.Empty(ws.GetDiskCompilationErrors());
     }
 
+    [Fact]
+    public async Task MakeAbstract_OfABaseCreatedThroughANewConstraintOrActivator_IsRefused()
+    {
+        var source = Lf("""
+            using System;
+            using System.Collections.Generic;
+
+            public class Base { }
+
+            public class Derived : Base
+            {
+                public void Run() { }
+            }
+
+            public static class Factory
+            {
+                public static T Make<T>() where T : new() => new T();
+                public static T Clone<T>(T item) where T : new() => new T();
+                public static List<T> Wrap<T>(T item) => [item];
+            }
+
+            public sealed class Pool<T> where T : new()
+            {
+                public T Get() => new T();
+            }
+
+            public static class Use
+            {
+                public static object A() => Factory.Make<Base>();
+                public static object B(Base item) => Factory.Clone(item);
+                public static object C() => new Pool<Base>().Get();
+                public static object D() => Activator.CreateInstance<Base>();
+                public static object? E() => Activator.CreateInstance(typeof(Base));
+                public static object F(Base item) => Factory.Wrap(item);
+                public static List<Base> G() => new();
+                public static object? H() => Activator.CreateInstance(Type.GetType("Base")!);
+            }
+            """);
+        using var ws = TestWorkspace.Create(("C.cs", source));
+
+        var ex = await Assert.ThrowsAsync<RefactoringException>(() => PullAsync(ws, ["Run"], file: "C.cs", makeAbstract: true));
+
+        Assert.Equal(ErrorCodes.BaseClassInstantiated, ex.ErrorCode);
+        var path = ws.PathOf("C.cs");
+        Assert.Equal(
+            [$"{path}(25,41)", $"{path}(26,50)", $"{path}(27,37)", $"{path}(28,43)", $"{path}(29,44)"],
+            Assert.IsType<List<string>>(ex.Details!["instantiations"]));
+        Assert.Contains($"{path}(25,41) (the new() constraint of 'T' in 'Factory.Make<T>()')", ex.Message);
+        Assert.Contains($"{path}(27,37) (the new() constraint of 'T' in 'Pool<T>')", ex.Message);
+        Assert.Contains($"{path}(28,43) (Activator.CreateInstance)", ex.Message);
+        Assert.Equal(source, ws.ReadFile("C.cs"));
+    }
+
+    [Fact]
+    public async Task MakeAbstract_OfABaseOnlyUsedAsAnUnconstrainedTypeArgument_MakesItAbstract()
+    {
+        using var ws = TestWorkspace.Create(("C.cs", Lf("""
+            using System.Collections.Generic;
+
+            public class Base { }
+
+            public class Derived : Base
+            {
+                public void Run() { }
+            }
+
+            public static class Use
+            {
+                public static List<Base> Items() => new() { new Derived() };
+            }
+            """)));
+
+        var result = await PullAsync(ws, ["Run"], file: "C.cs", makeAbstract: true);
+
+        Assert.True(result.Success, result.Error?.Message);
+        Assert.Contains("public abstract class Base", ws.ReadFile("C.cs"));
+        Assert.Empty(ws.GetDiskCompilationErrors());
+    }
+
     private static string Lf(string text) => text.ReplaceLineEndings("\n") + "\n";
 
     private static Task<RefactoringResult> PullAsync(

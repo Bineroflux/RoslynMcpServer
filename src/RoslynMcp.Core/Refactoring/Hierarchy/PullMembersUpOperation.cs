@@ -3,6 +3,7 @@ using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.FindSymbols;
 using Microsoft.CodeAnalysis.Formatting;
+using Microsoft.CodeAnalysis.Operations;
 using Microsoft.CodeAnalysis.Simplification;
 using Microsoft.CodeAnalysis.Text;
 using RoslynMcp.Contracts.Enums;
@@ -26,7 +27,9 @@ namespace RoslynMcp.Core.Refactoring.Hierarchy;
 /// private member becomes protected (a <c>private protected</c> one stays, or becomes protected
 /// when the base class is in another assembly). With <c>makeAbstract</c>, methods, properties,
 /// indexers and events are declared abstract in the base class and stay in the type as overrides
-/// (fields still move); a base class that is never instantiated is made abstract. Refused: a member
+/// (fields still move); a base class that is never instantiated (<c>new</c>, a type argument
+/// for a <c>new()</c>-constrained type parameter, <c>Activator.CreateInstance</c>; reflection by
+/// name isn't seen) is made abstract. Refused: a member
 /// that uses members of the type staying behind (listed), a name or signature the target already
 /// declares, an override of a member the base class declares, <c>base.</c> calls whose meaning
 /// would change, and types that can't be written in the base class's terms.
@@ -941,10 +944,22 @@ public sealed class PullMembersUpOperation : RefactoringOperationBase<PullMember
         return result.WithModifiers(result.Modifiers.Insert(index, @abstract));
     }
 
-    /// <summary>Refuses to make the base class abstract when something creates an instance of it.</summary>
+    /// <summary>
+    /// Refuses to make the base class abstract when something creates an instance of it: a
+    /// <c>new</c> expression; the class as the type argument of a type parameter with a
+    /// <c>new()</c> constraint, written or (in a file that names the class) inferred; or
+    /// <c>Activator.CreateInstance</c> with the class as type argument or <c>typeof</c> argument.
+    /// Creation through reflection by name is not seen.
+    /// </summary>
     private static async Task CheckNotInstantiatedAsync(INamedTypeSymbol target, Solution solution, CancellationToken cancellationToken)
     {
-        var creations = new List<string>();
+        var creations = new List<(string Location, string How)>();
+        void Add(Location location, string how)
+        {
+            var span = location.GetLineSpan();
+            creations.Add(($"{span.Path}({span.StartLinePosition.Line + 1},{span.StartLinePosition.Character + 1})", how));
+        }
+
         foreach (var constructor in target.InstanceConstructors)
         {
             foreach (var location in (await SymbolFinder.FindReferencesAsync(constructor, solution, cancellationToken)).SelectMany(r => r.Locations))
@@ -954,21 +969,81 @@ public sealed class PullMembersUpOperation : RefactoringOperationBase<PullMember
 
                 var node = root.FindNode(location.Location.SourceSpan, getInnermostNodeForTie: true);
                 if (node.AncestorsAndSelf().FirstOrDefault(n => n is BaseObjectCreationExpressionSyntax or ConstructorInitializerSyntax) is BaseObjectCreationExpressionSyntax)
+                    Add(location.Location, "new");
+            }
+        }
+
+        // Type arguments are looked for in the files that name the class: a type argument is
+        // written there, or inferred from something declared with the class's name.
+        var documents = (await SymbolFinder.FindReferencesAsync(target, solution, cancellationToken))
+            .SelectMany(r => r.Locations)
+            .Where(l => !l.IsImplicit)
+            .Select(l => l.Document.Id)
+            .Distinct()
+            .ToList();
+        foreach (var id in documents)
+        {
+            var document = solution.GetDocument(id)!;
+            if (await document.GetSyntaxRootAsync(cancellationToken) is not { } root || await document.GetSemanticModelAsync(cancellationToken) is not { } model)
+                continue;
+
+            foreach (var node in root.DescendantNodes())
+            {
+                var (symbol, name) = node switch
                 {
-                    var span = location.Location.GetLineSpan();
-                    creations.Add($"{span.Path}({span.StartLinePosition.Line + 1},{span.StartLinePosition.Character + 1})");
+                    GenericNameSyntax generic => (model.GetSymbolInfo(generic, cancellationToken).Symbol, generic.Identifier),
+                    InvocationExpressionSyntax { Expression: not GenericNameSyntax and not MemberAccessExpressionSyntax { Name: GenericNameSyntax } } invocation =>
+                        (model.GetSymbolInfo(invocation, cancellationToken).Symbol, CalledName(invocation)),
+                    _ => (null, default)
+                };
+
+                if (symbol is IMethodSymbol { Name: "CreateInstance", ContainingType: { Name: "Activator", ContainingNamespace.Name: "System" } } activator)
+                {
+                    var created = activator.TypeArguments.FirstOrDefault() ??
+                        (node is InvocationExpressionSyntax { ArgumentList.Arguments: [var first, ..] } &&
+                            model.GetOperation(first.Expression, cancellationToken) is ITypeOfOperation typeOf ? typeOf.TypeOperand : null);
+                    if (created != null && IsTarget(created))
+                        Add(name.GetLocation(), "Activator.CreateInstance");
+                    continue;
+                }
+
+                var (parameters, arguments) = symbol switch
+                {
+                    IMethodSymbol method => (method.TypeParameters, method.TypeArguments),
+                    INamedTypeSymbol type => (type.TypeParameters, type.TypeArguments),
+                    _ => ([], [])
+                };
+                foreach (var (parameter, argument) in parameters.Zip(arguments))
+                {
+                    if (parameter.HasConstructorConstraint && IsTarget(argument))
+                        Add(name.GetLocation(), $"the new() constraint of '{parameter.Name}' in '{symbol!.OriginalDefinition.ToDisplayString()}'");
                 }
             }
         }
 
-        if (creations.Count > 0)
+        var distinct = creations.DistinctBy(c => c.Location).ToList();
+        if (distinct.Count > 0)
         {
             throw new RefactoringException(
                 ErrorCodes.BaseClassInstantiated,
-                $"makeAbstract needs '{target.ToDisplayString()}' to be abstract, but it is instantiated at {string.Join(", ", creations.Distinct().Take(5))}" +
-                (creations.Count > 5 ? $" and {creations.Count - 5} more" : "") + ".",
-                new Dictionary<string, object> { ["instantiations"] = creations.Distinct().ToList() });
+                $"makeAbstract needs '{target.ToDisplayString()}' to be abstract, but it is instantiated at " +
+                string.Join(", ", distinct.Take(5).Select(c => $"{c.Location} ({c.How})")) +
+                (distinct.Count > 5 ? $" and {distinct.Count - 5} more" : "") + ".",
+                new Dictionary<string, object> { ["instantiations"] = distinct.Select(c => c.Location).ToList() });
         }
+
+        // The class, also as another project sees it.
+        bool IsTarget(ITypeSymbol type) =>
+            SymbolEqualityComparer.Default.Equals(type.OriginalDefinition, target) ||
+            (type.ContainingAssembly?.Name == target.ContainingAssembly.Name &&
+                type.OriginalDefinition.GetDocumentationCommentId() == target.GetDocumentationCommentId());
+
+        static SyntaxToken CalledName(InvocationExpressionSyntax invocation) => invocation.Expression switch
+        {
+            MemberAccessExpressionSyntax access => access.Name.Identifier,
+            SimpleNameSyntax simple => simple.Identifier,
+            _ => invocation.Expression.GetFirstToken()
+        };
     }
 
     /// <summary>Removes the marked declarations and variables from the text, with their comments.</summary>

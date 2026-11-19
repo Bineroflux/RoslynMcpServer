@@ -173,24 +173,38 @@ public sealed class PullMembersUpTargetTests
 
                     public Sb Encoding => Sb.UTF8;
                 }
+
+                public class Helper
+                {
+                }
+                """)),
+            ("Tools.cs", Lf("""
+                namespace App.Tools;
+
+                public class Helper
+                {
+                    public override string ToString() => "h";
+                }
                 """)),
             ("Derived.cs", Lf("""
-                using Core;
+                using App.Tools;
                 using static System.Math;
                 using Sb = System.Text.StringBuilder;
 
                 namespace App;
 
-                public class Derived : Base
+                public class Derived : Core.Base
                 {
-                    public string Bigger(int a, int b) => new Sb().Append(Max(a, b)).ToString();
+                    public string Bigger(int a, int b) => new Sb().Append(Max(a, b)).Append(new Helper()).ToString();
                 }
                 """)));
 
         var result = await PullAsync(ws, ["Bigger"]);
 
         Assert.True(result.Success, result.Error?.Message);
-        Assert.Contains("    public string Bigger(int a, int b) => new System.Text.StringBuilder().Append(Math.Max(a, b)).ToString();\n", ws.ReadFile("Base.cs"));
+        Assert.Contains(
+            "    public string Bigger(int a, int b) => new System.Text.StringBuilder().Append(Math.Max(a, b)).Append(new App.Tools.Helper()).ToString();\n",
+            ws.ReadFile("Base.cs"));
         Assert.StartsWith("using System;\nusing Sb = System.Text.Encoding;\n\nnamespace Core;", ws.ReadFile("Base.cs"));
         Assert.Null(result.Warnings);
         Assert.Empty(ws.GetDiskCompilationErrors());

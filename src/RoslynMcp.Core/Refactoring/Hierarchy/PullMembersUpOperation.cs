@@ -616,26 +616,38 @@ public sealed class PullMembersUpOperation : RefactoringOperationBase<PullMember
         // the type it is nested in; qualified where the name means something else in the target.
         void TypeUsing(SimpleNameSyntax name, INamedTypeSymbol named)
         {
-            var bound = targetModel.GetSpeculativeSymbolInfo(position, name, SpeculativeBindingOption.BindAsTypeOrNamespace).Symbol;
-            if (bound != null && SameSymbol(bound, named))
+            var bound = targetModel.GetSpeculativeSymbolInfo(position, name, SpeculativeBindingOption.BindAsTypeOrNamespace);
+            if (bound.Symbol != null && SameSymbol(bound.Symbol, named))
                 return;
 
             CheckVisible(named);
-            if (named.ContainingType is { } outer)
+            if (named.ContainingType is { } outer &&
+                SymbolEqualityComparer.Default.Equals(outer.OriginalDefinition, source.OriginalDefinition))
             {
-                if (SymbolEqualityComparer.Default.Equals(outer.OriginalDefinition, source.OriginalDefinition))
-                    return; // a dependency left behind, refused on its own
+                return; // a dependency left behind, refused on its own
+            }
 
-                if (bound == null)
-                    needed.Add(new UsingDirectives.NewUsing(TypeName(outer), Static: true));
-                else
-                    qualified[name] = Qualify(name, SyntaxGenerationHelper.CreateTypeSyntax(named, nullable));
+            // Something else of that name (or several) in the target: the type's full name, unless
+            // it uses type parameters the translation into the target's terms has to rewrite.
+            if ((bound.Symbol != null || bound.CandidateSymbols.Length > 0) && !MentionsTypeParameter(named))
+            {
+                qualified[name] = Qualify(name, SyntaxGenerationHelper.CreateTypeSyntax(named, nullable));
                 return;
             }
 
-            if (named.ContainingNamespace is { IsGlobalNamespace: false } ns)
+            if (named.ContainingType is { } container)
+                needed.Add(new UsingDirectives.NewUsing(TypeName(container), Static: true));
+            else if (named.ContainingNamespace is { IsGlobalNamespace: false } ns)
                 needed.Add(new UsingDirectives.NewUsing(ns.ToDisplayString()));
         }
+
+        static bool MentionsTypeParameter(ITypeSymbol type) => type switch
+        {
+            ITypeParameterSymbol => true,
+            IArrayTypeSymbol array => MentionsTypeParameter(array.ElementType),
+            INamedTypeSymbol named => named.TypeArguments.Any(MentionsTypeParameter) || (named.ContainingType != null && MentionsTypeParameter(named.ContainingType)),
+            _ => false
+        };
 
         // An extension method called in extension form: the namespace of its class.
         void ExtensionUsing(IMethodSymbol extension)

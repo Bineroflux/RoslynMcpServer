@@ -28,7 +28,8 @@ public sealed class ExtractInterfaceTool : IToolHandler
     public string Name => "extract_interface";
 
     /// <inheritdoc />
-    public string Description => "Extract an interface from a class's public members.";
+    public string Description =>
+        "Extract an interface from a class's public members. A new file (targetFile) gets only the source's usings it needs.";
 
     /// <inheritdoc />
     public object InputSchema => new

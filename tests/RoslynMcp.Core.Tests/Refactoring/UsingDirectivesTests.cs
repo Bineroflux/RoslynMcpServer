@@ -39,4 +39,20 @@ public sealed class UsingDirectivesTests
 
         Assert.Equal(expected, result.ToFullString());
     }
+
+    [Fact]
+    public void InAFileWithItsUsingsInANamespace_TheyGoThereIndentedLikeTheOthers()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var root = (CompilationUnitSyntax)CSharpSyntaxTree.ParseText(
+            "namespace App\n{\n    using System;\n\n    class C { }\n}\n", cancellationToken: cancellationToken).GetRoot(cancellationToken);
+
+        UsingDirectives.NewUsing[] added = [new("System.Text"), new("System.Math", Static: true)];
+
+        var result = UsingDirectives.Add(root, added, "\n");
+
+        Assert.Equal(
+            "namespace App\n{\n    using System;\n    using System.Text;\n    using static System.Math;\n\n    class C { }\n}\n",
+            result.ToFullString());
+    }
 }

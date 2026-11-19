@@ -1,6 +1,7 @@
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using Microsoft.CodeAnalysis.Simplification;
 using Microsoft.CodeAnalysis.Text;
 using RoslynMcp.Contracts.Enums;
 using RoslynMcp.Contracts.Errors;
@@ -57,6 +58,9 @@ public sealed class MoveTypeToFileOperation : RefactoringOperationBase<MoveTypeT
             cancellationToken);
 
         // Usings only the moved type used go from the file it left; those unused before stay.
+        // Every target framework's document of the edited files gets their new text first.
+        newSolution = await LinkedDocuments.SyncAsync(
+            original, newSolution, original.GetDocumentIdsWithFilePath(@params.TargetFile).Append(resolution.Document.Id), cancellationToken);
         var (cleaned, usingsRemoved) = await NewlyReportedUsings.RemoveLeftUnusedAsync(original, newSolution, [resolution.Document.Id], cancellationToken);
         newSolution = cleaned;
 
@@ -166,7 +170,7 @@ public sealed class MoveTypeToFileOperation : RefactoringOperationBase<MoveTypeT
     {
         var solution = Context.Solution;
         var sourceDoc = resolution.Document;
-        var sourceRoot = await sourceDoc.GetSyntaxRootAsync(cancellationToken);
+        var sourceRoot = (await sourceDoc.GetSyntaxRootAsync(cancellationToken))!;
 
         // Extract the type declaration with its trivia
         var typeNode = resolution.Declaration;
@@ -175,30 +179,48 @@ public sealed class MoveTypeToFileOperation : RefactoringOperationBase<MoveTypeT
         var namespaceDecl = typeNode.Ancestors().OfType<BaseNamespaceDeclarationSyntax>().FirstOrDefault();
         var namespaceName = namespaceDecl?.Name.ToString() ?? resolution.Symbol.ContainingNamespace.ToDisplayString();
 
-        // Get required using directives
-        var usings = sourceRoot!.DescendantNodes()
-            .OfType<UsingDirectiveSyntax>()
-            .ToList();
-
         // Check if target document exists
         var targetDoc = Context.GetDocumentByPath(@params.TargetFile);
 
         // The type takes the line ending of the file it goes into (its string literals excepted).
         int keptLiterals;
         string lineEnding;
+        DocumentId? newDocumentId = null;
         if (targetDoc != null)
         {
-            // Add to existing file
+            // Add to the existing file, with the usings the type needs that the file lacks.
             lineEnding = await LineEndings.GetAsync(targetDoc, cancellationToken);
-            var targetRoot = await targetDoc.GetSyntaxRootAsync(cancellationToken);
-            var newTargetRoot = AddTypeToExistingFile(
-                targetRoot!, LineEndings.Convert(typeNode, lineEnding, out keptLiterals), namespaceName);
-            solution = solution.WithDocumentSyntaxRoot(targetDoc.Id, newTargetRoot);
+            var targetRoot = (CompilationUnitSyntax)(await targetDoc.GetSyntaxRootAsync(cancellationToken))!;
+            var targetModel = (await targetDoc.GetSemanticModelAsync(cancellationToken))!;
+            var sourceModel = (await sourceDoc.GetSemanticModelAsync(cancellationToken))!;
+            var position = TargetContainer(targetRoot, namespaceName) switch
+            {
+                NamespaceDeclarationSyntax block => block.OpenBraceToken.Span.End,
+                FileScopedNamespaceDeclarationSyntax fileScoped => fileScoped.SemicolonToken.Span.End,
+                _ => targetRoot.Members.FirstOrDefault()?.SpanStart ?? targetRoot.EndOfFileToken.SpanStart
+            };
+            var qualified = new Dictionary<SyntaxNode, SyntaxNode>();
+            var needed = MovedCodeUsings.Needed(
+                [typeNode],
+                resolution.Symbol,
+                sourceMoves: true,
+                sourceModel,
+                targetModel,
+                position,
+                targetModel.GetNullableContext(position).AnnotationsEnabled(),
+                qualified,
+                cancellationToken);
+            var moved = qualified.Count == 0 ? typeNode : typeNode.ReplaceNodes(qualified.Keys, (original, _) => qualified[original]);
+            var newTargetRoot = AddTypeToExistingFile(targetRoot, LineEndings.Convert(moved, lineEnding, out keptLiterals), namespaceName);
+            solution = solution.WithDocumentSyntaxRoot(targetDoc.Id, UsingDirectives.Add(newTargetRoot, needed, lineEnding));
+            if (qualified.Count > 0)
+                solution = (await Simplifier.ReduceAsync(solution.GetDocument(targetDoc.Id)!, Simplifier.Annotation, cancellationToken: cancellationToken)).Project.Solution;
         }
         else
         {
             // Create new document, with the end_of_line of its .editorconfig, else the line
-            // ending of the file the type comes from.
+            // ending of the file the type comes from. It gets the source's usings; those it doesn't
+            // need go once the type has left the source.
             var project = sourceDoc.Project;
             var probe = project.AddDocument(
                 Path.GetFileNameWithoutExtension(@params.TargetFile), SourceText.From(string.Empty), filePath: @params.TargetFile);
@@ -207,13 +229,14 @@ public sealed class MoveTypeToFileOperation : RefactoringOperationBase<MoveTypeT
             var targetContent = CreateTargetFileContent(
                 LineEndings.Convert(typeNode, lineEnding, out keptLiterals),
                 namespaceName,
-                usings.Select(u => LineEndings.Convert(u, lineEnding, out _)).ToList(),
+                NewFileUsings.FromSource(sourceRoot).Select(u => LineEndings.Convert(u, lineEnding, out _)).ToList(),
                 lineEnding);
             var newDoc = project.AddDocument(
                 Path.GetFileNameWithoutExtension(@params.TargetFile),
                 targetContent,
                 filePath: @params.TargetFile);
             solution = newDoc.Project.Solution;
+            newDocumentId = newDoc.Id;
         }
 
         if (keptLiterals > 0)
@@ -235,6 +258,9 @@ public sealed class MoveTypeToFileOperation : RefactoringOperationBase<MoveTypeT
             solution = solution.WithDocumentSyntaxRoot(sourceDoc.Id, newSourceRoot);
         }
 
+        if (newDocumentId != null)
+            solution = await NewFileUsings.RemoveUnnecessaryAsync(solution, newDocumentId, cancellationToken);
+
         return (solution, new ChangeInfo
         {
             SourceFileEmptied = !remainingTypes,
@@ -255,8 +281,10 @@ public sealed class MoveTypeToFileOperation : RefactoringOperationBase<MoveTypeT
         // Use file-scoped namespace (modern C# style)
         var namespaceDecl = $"namespace {namespaceName};";
 
-        // Get the type declaration with original formatting
-        var typeDecl = typeNode.ToFullString();
+        // Get the type declaration with original formatting, without the blank lines and
+        // indentation before it (the namespace line is followed by one blank line)
+        var typeDecl = typeNode.WithLeadingTrivia(typeNode.GetLeadingTrivia()
+            .SkipWhile(t => t.IsKind(SyntaxKind.WhitespaceTrivia) || t.IsKind(SyntaxKind.EndOfLineTrivia))).ToFullString();
 
         var blankLine = lineEnding + lineEnding;
         var content = string.IsNullOrEmpty(usingStatements)
@@ -266,37 +294,23 @@ public sealed class MoveTypeToFileOperation : RefactoringOperationBase<MoveTypeT
         return content.TrimStart();
     }
 
-    private SyntaxNode AddTypeToExistingFile(
-        SyntaxNode root,
+    /// <summary>
+    /// Where <see cref="AddTypeToExistingFile"/> puts the type: the namespace declaration of
+    /// <paramref name="namespaceName"/>, else the first file-scoped namespace, else (null) the file.
+    /// </summary>
+    private static BaseNamespaceDeclarationSyntax? TargetContainer(SyntaxNode root, string namespaceName) =>
+        root.DescendantNodes().OfType<BaseNamespaceDeclarationSyntax>().FirstOrDefault(n => n.Name.ToString() == namespaceName) ??
+        root.DescendantNodes().OfType<FileScopedNamespaceDeclarationSyntax>().FirstOrDefault();
+
+    private static CompilationUnitSyntax AddTypeToExistingFile(
+        CompilationUnitSyntax root,
         TypeDeclarationSyntax typeNode,
         string namespaceName)
     {
-        // Find the namespace in the target file
-        var targetNamespace = root.DescendantNodes()
-            .OfType<BaseNamespaceDeclarationSyntax>()
-            .FirstOrDefault(n => n.Name.ToString() == namespaceName);
-
-        if (targetNamespace != null)
-        {
-            // Add to existing namespace
-            var newNamespace = targetNamespace.AddMembers(typeNode);
-            return root.ReplaceNode(targetNamespace, newNamespace);
-        }
-
-        // Check for file-scoped namespace
-        var fileScopedNs = root.DescendantNodes()
-            .OfType<FileScopedNamespaceDeclarationSyntax>()
-            .FirstOrDefault();
-
-        if (fileScopedNs != null)
-        {
-            var newNs = fileScopedNs.AddMembers(typeNode);
-            return root.ReplaceNode(fileScopedNs, newNs);
-        }
-
-        // No matching namespace, add at compilation unit level
-        var compilationUnit = (CompilationUnitSyntax)root;
-        return compilationUnit.AddMembers(typeNode);
+        // The matching namespace, else the first file-scoped one, else the file itself.
+        return TargetContainer(root, namespaceName) is { } container
+            ? root.ReplaceNode(container, container.AddMembers(typeNode))
+            : root.AddMembers(typeNode);
     }
 
     private Contracts.Models.SymbolInfo CreateSymbolInfo(SymbolResolutionResult resolution, string targetFile)

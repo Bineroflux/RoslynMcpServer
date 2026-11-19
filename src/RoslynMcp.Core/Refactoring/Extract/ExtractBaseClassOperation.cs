@@ -249,8 +249,14 @@ public sealed class ExtractBaseClassOperation : RefactoringOperationBase<Extract
         newSolution = newSolution.WithDocumentText(document.Id, DeclarationRemoval.Remove(
             formattedText, DeclarationRemoval.Spans(formattedText, formattedRoot!.GetAnnotatedNodes(RemoveAnnotationKind))));
 
+        // The new file keeps only the source's usings it needs (in any target framework).
+        foreach (var target in @params.TargetFile == null ? [] : newSolution.GetDocumentIdsWithFilePath(@params.TargetFile).Where(id => id != document.Id))
+            newSolution = await NewFileUsings.RemoveUnnecessaryAsync(newSolution, target, cancellationToken);
+
         // Usings only the extracted members used go from the type's file (when they moved to
-        // another file); those unused before stay.
+        // another file); those unused before stay. Every target framework's document of the file
+        // gets its new text first.
+        newSolution = await LinkedDocuments.SyncAsync(originalSolution, newSolution, [document.Id], cancellationToken);
         var (cleaned, usingsRemoved) = await NewlyReportedUsings.RemoveLeftUnusedAsync(originalSolution, newSolution, [document.Id], cancellationToken);
         newSolution = cleaned;
 
@@ -349,10 +355,8 @@ public sealed class ExtractBaseClassOperation : RefactoringOperationBase<Extract
         SyntaxNode sourceRoot,
         CancellationToken cancellationToken)
     {
-        // Build compilation unit with usings from source
-        var usings = sourceRoot.DescendantNodes()
-            .OfType<UsingDirectiveSyntax>()
-            .ToList();
+        // Build compilation unit with usings from source (those it doesn't need go later)
+        var usings = NewFileUsings.FromSource(sourceRoot);
 
         MemberDeclarationSyntax wrappedClass;
         if (!string.IsNullOrEmpty(namespaceName))

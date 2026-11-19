@@ -48,7 +48,7 @@ internal static class UsingDirectives
         if (root.Usings.Count == 0 &&
             root.Members.FirstOrDefault() is BaseNamespaceDeclarationSyntax { Usings.Count: > 0 } ns)
         {
-            return root.ReplaceNode(ns, ns.WithUsings(Insert(ns.Usings, added, lineEnding)));
+            return root.ReplaceNode(ns, ns.WithUsings(Insert(ns.Usings, added, lineEnding, Indentation(ns.Usings[0].GetLeadingTrivia()))));
         }
 
         if (root.Usings.Count > 0)

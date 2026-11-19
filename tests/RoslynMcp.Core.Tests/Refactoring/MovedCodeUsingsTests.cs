@@ -138,6 +138,215 @@ public sealed class MovedCodeUsingsTests
         Assert.Empty(ws.GetDiskCompilationErrors());
     }
 
+    private static readonly string Dog = Lf("""
+        // Header
+        global using System.Collections.Generic;
+        using System;
+        using System.Linq;
+        using System.Text;
+        using static System.Math;
+        using Sb = System.Text.StringBuilder;
+
+        namespace App;
+
+        public class Keep
+        {
+            public DateTime When = DateTime.MinValue;
+        }
+
+        public class Dog
+        {
+            public Uri Home() => new Uri("https://example.com");
+
+            public string Bark(int a, int b) => new Sb().Append(Max(a, b)).Append(new StringBuilder()).ToString();
+
+            public List<int> Legs() => new();
+        }
+        """);
+
+    private static readonly string DogUsings = Lf("""
+        using System;
+        using System.Text;
+        using static System.Math;
+        using Sb = System.Text.StringBuilder;
+
+        namespace App;
+        """);
+
+    private static readonly string DogLeft = Lf("""
+        // Header
+        global using System.Collections.Generic;
+        using System;
+        using System.Linq;
+
+        namespace App;
+        """);
+
+    [Fact]
+    public async Task MoveTypeToFile_IntoANewFile_CopiesOnlyTheUsingsTheTypeNeeds_WithOneBlankLineAfterTheNamespace()
+    {
+        using var ws = TestWorkspace.Create(("Dog.cs", Dog));
+
+        var result = await new MoveTypeToFileOperation(ws.Context).ExecuteAsync(
+            new MoveTypeToFileParams { SourceFile = ws.PathOf("Dog.cs"), SymbolName = "Dog", TargetFile = ws.PathOf("Dog.Moved.cs") },
+            TestContext.Current.CancellationToken);
+
+        Assert.True(result.Success, result.Error?.Message);
+        Assert.Equal(DogUsings + Lf("""
+
+            public class Dog
+            {
+                public Uri Home() => new Uri("https://example.com");
+
+                public string Bark(int a, int b) => new Sb().Append(Max(a, b)).Append(new StringBuilder()).ToString();
+
+                public List<int> Legs() => new();
+            }
+            """), ws.ReadFile("Dog.Moved.cs"));
+        Assert.StartsWith(DogLeft + "\npublic class Keep", ws.ReadFile("Dog.cs"));
+        Assert.Empty(ws.GetDiskCompilationErrors());
+    }
+
+    [Fact]
+    public async Task ExtractBaseClass_IntoANewFile_CopiesOnlyTheUsingsTheMembersNeed()
+    {
+        using var ws = TestWorkspace.Create(("Dog.cs", Dog));
+
+        var result = await new ExtractBaseClassOperation(ws.Context).ExecuteAsync(
+            new ExtractBaseClassParams
+            {
+                SourceFile = ws.PathOf("Dog.cs"),
+                TypeName = "Dog",
+                BaseClassName = "Animal",
+                Members = ["Home", "Bark"],
+                TargetFile = ws.PathOf("Animal.cs")
+            },
+            TestContext.Current.CancellationToken);
+
+        Assert.True(result.Success, result.Error?.Message);
+        Assert.StartsWith(DogUsings + "\npublic class Animal\n", ws.ReadFile("Animal.cs"));
+        Assert.StartsWith(DogLeft, ws.ReadFile("Dog.cs"));
+        Assert.Empty(ws.GetDiskCompilationErrors());
+    }
+
+    [Fact]
+    public async Task ExtractInterface_IntoANewFile_CopiesOnlyTheUsingsTheInterfaceNeeds()
+    {
+        using var ws = TestWorkspace.Create(("Dog.cs", Dog));
+
+        var result = await new ExtractInterfaceOperation(ws.Context).ExecuteAsync(
+            new ExtractInterfaceParams
+            {
+                SourceFile = ws.PathOf("Dog.cs"),
+                TypeName = "Dog",
+                InterfaceName = "IDog",
+                Members = ["Home", "Bark"],
+                TargetFile = ws.PathOf("IDog.cs")
+            },
+            TestContext.Current.CancellationToken);
+
+        Assert.True(result.Success, result.Error?.Message);
+        Assert.StartsWith("using System;\n\nnamespace App;", ws.ReadFile("IDog.cs"));
+        Assert.Contains("Uri Home();", ws.ReadFile("IDog.cs"));
+        Assert.Empty(ws.GetDiskCompilationErrors());
+    }
+
+    [Fact]
+    public async Task MoveTypeToFile_InAMultiTargetedProject_KeepsAUsingOnlyAnotherFrameworksCodeNeeds()
+    {
+        using var ws = TestWorkspace.CreateSolution(new TestWorkspace.ProjectSpec(
+            "Lib",
+            [("Models.cs", Lf("""
+                using System.Linq;
+                using System.Text;
+
+                namespace App;
+
+                public class Keep
+                {
+                }
+
+                public class Moved
+                {
+                #if NET11
+                    public int Count(int[] values) => values.Count();
+                #endif
+
+                    public string Text() => new StringBuilder().ToString();
+                }
+                """))],
+            TargetFrameworks: ["net10", "net11"]));
+
+        var result = await new MoveTypeToFileOperation(ws.Context).ExecuteAsync(
+            new MoveTypeToFileParams { SourceFile = ws.PathOf("Lib", "Models.cs"), SymbolName = "Moved", TargetFile = ws.PathOf("Lib", "Moved.cs") },
+            TestContext.Current.CancellationToken);
+
+        Assert.True(result.Success, result.Error?.Message);
+        Assert.StartsWith("using System.Linq;\nusing System.Text;\n\nnamespace App;\n\npublic class Moved", File.ReadAllText(ws.PathOf("Lib", "Moved.cs")));
+        Assert.Equal(2, result.UsingDirectivesRemoved);
+        Assert.Equal(Lf("""
+            namespace App;
+
+            public class Keep
+            {
+            }
+            """), File.ReadAllText(ws.PathOf("Lib", "Models.cs")));
+    }
+
+    [Fact]
+    public async Task MoveTypeToFile_IntoAnExistingFile_AddsTheUsingsTheTypeNeeds_WhereTheFileHasItsUsings()
+    {
+        using var ws = TestWorkspace.Create(
+            ("Contacts.cs", Lf("""
+                namespace App
+                {
+                    using System;
+
+                    public class Contact
+                    {
+                        public DateTime Born;
+                    }
+                }
+                """)),
+            ("Models.cs", Lf("""
+                using System.Collections.Generic;
+                using System.Text;
+                using static System.Math;
+                using Sb = System.Text.StringBuilder;
+
+                namespace App;
+
+                public class Keep
+                {
+                }
+
+                public class Moved
+                {
+                    public string Text(int a, int b) => new Sb().Append(Max(a, b)).Append(new StringBuilder()).Append(new List<int>().Count).ToString();
+                }
+                """)));
+
+        var result = await new MoveTypeToFileOperation(ws.Context).ExecuteAsync(
+            new MoveTypeToFileParams { SourceFile = ws.PathOf("Models.cs"), SymbolName = "Moved", TargetFile = ws.PathOf("Contacts.cs") },
+            TestContext.Current.CancellationToken);
+
+        Assert.True(result.Success, result.Error?.Message);
+        Assert.StartsWith(Lf("""
+            namespace App
+            {
+                using System;
+                using System.Collections.Generic;
+                using System.Text;
+                using static System.Math;
+                using Sb = System.Text.StringBuilder;
+
+                public class Contact
+            """), ws.ReadFile("Contacts.cs"));
+        Assert.Contains("public class Moved", ws.ReadFile("Contacts.cs"));
+        Assert.Equal(4, result.UsingDirectivesRemoved);
+        Assert.Empty(ws.GetDiskCompilationErrors());
+    }
+
     private static void AssertListed(RefactoringResult preview, string file, string usedBy)
     {
         Assert.True(preview.Success, preview.Error?.Message);

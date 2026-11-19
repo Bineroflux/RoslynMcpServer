@@ -179,7 +179,7 @@ public sealed class MovedCodeLineEndingTests
     public async Task ExtractInterface_IntoANewLfFile_WritesWhatComesFromTheSourceInLf()
     {
         const string Source =
-            "/* The usings\r\n   of the dog */\r\nusing System;\r\n\r\nnamespace App;\r\n\r\npublic class Dog\r\n{\r\n    public string Bark() => String.Empty;\r\n}\r\n";
+            "/* The usings\r\n   of the dog */\r\nusing System;\r\n\r\nnamespace App;\r\n\r\npublic class Dog\r\n{\r\n    public Uri Home() => new Uri(\"https://example.com\");\r\n}\r\n";
         using var ws = TestWorkspace.Create([("Dog.cs", Source)], [], editorConfig: LfEditorConfig);
 
         var result = await new ExtractInterfaceOperation(ws.Context).ExecuteAsync(
@@ -194,7 +194,7 @@ public sealed class MovedCodeLineEndingTests
             TestContext.Current.CancellationToken);
 
         Assert.True(result.Success, result.Error?.Message);
-        AssertLf(ws.ReadFile("IDog.cs"), "/* The usings\n   of the dog */");
+        AssertLf(ws.ReadFile("IDog.cs"), "/* The usings\n   of the dog */\nusing System;\n", "Uri Home();");
     }
 
     /// <summary>

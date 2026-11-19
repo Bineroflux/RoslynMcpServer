@@ -28,8 +28,9 @@ public sealed class MoveTypeToFileTool : IToolHandler
 
     /// <inheritdoc />
     public string Description =>
-        "Move a C# type declaration to a different file within the solution. Updates all references automatically; " +
-        "usings only the moved type used are removed from the file it leaves.";
+        "Move a C# type declaration to a different file within the solution. Updates all references automatically. " +
+        "The target file gets the usings the type needs (a new one only those of the source's it needs), and usings only " +
+        "the moved type used are removed from the file it leaves.";
 
     /// <inheritdoc />
     public object InputSchema => new

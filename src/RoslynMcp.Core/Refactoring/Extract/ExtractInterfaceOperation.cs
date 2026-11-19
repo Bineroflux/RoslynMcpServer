@@ -248,10 +248,8 @@ public sealed class ExtractInterfaceOperation : RefactoringOperationBase<Extract
         ICollection<string> layoutNotes,
         CancellationToken cancellationToken)
     {
-        // Build compilation unit with usings from source
-        var usings = sourceRoot.DescendantNodes()
-            .OfType<UsingDirectiveSyntax>()
-            .ToList();
+        // Build compilation unit with usings from source (those it doesn't need go at the end)
+        var usings = NewFileUsings.FromSource(sourceRoot);
 
         MemberDeclarationSyntax wrappedInterface;
         if (!string.IsNullOrEmpty(namespaceName))
@@ -282,7 +280,8 @@ public sealed class ExtractInterfaceOperation : RefactoringOperationBase<Extract
         // file has the one line ending, also in what came from the source (comments of usings).
         newDoc = newDoc.WithSyntaxRoot(compilationUnit);
         var formatted = await GeneratedCodeFormatter.FormatAsync(newDoc.Project.Solution, newDoc, cancellationToken);
-        return await LineEndings.ConvertDocumentAsync(formatted, newDoc.Id, lineEnding, layoutNotes, cancellationToken);
+        var converted = await LineEndings.ConvertDocumentAsync(formatted, newDoc.Id, lineEnding, layoutNotes, cancellationToken);
+        return await NewFileUsings.RemoveUnnecessaryAsync(converted, newDoc.Id, cancellationToken);
     }
 
     private static Solution AddInterfaceToSameFile(

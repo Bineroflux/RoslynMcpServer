@@ -249,11 +249,16 @@ public sealed class ExtractBaseClassOperation : RefactoringOperationBase<Extract
         newSolution = newSolution.WithDocumentText(document.Id, DeclarationRemoval.Remove(
             formattedText, DeclarationRemoval.Spans(formattedText, formattedRoot!.GetAnnotatedNodes(RemoveAnnotationKind))));
 
+        // Usings only the extracted members used go from the type's file (when they moved to
+        // another file); those unused before stay.
+        var (cleaned, usingsRemoved) = await NewlyReportedUsings.RemoveLeftUnusedAsync(originalSolution, newSolution, [document.Id], cancellationToken);
+        newSolution = cleaned;
+
         // If preview mode, return without applying
         if (@params.Preview)
         {
             await PreviewCommitAsync(newSolution, cancellationToken);
-            return CreatePreviewResult(operationId, @params, moved, baseClass, namespaceName);
+            return CreatePreviewResult(operationId, @params, moved, baseClass, namespaceName, usingsRemoved);
         }
 
         var warnings = await FindWarningsAsync(originalSolution, newSolution, document.Id, @params.TargetFile, moved, cancellationToken);
@@ -279,6 +284,7 @@ public sealed class ExtractBaseClassOperation : RefactoringOperationBase<Extract
                     : $"{namespaceName}.{@params.BaseClassName}",
                 Kind = Contracts.Enums.SymbolKind.Class
             },
+            UsingDirectivesRemoved = usingsRemoved.Count,
             Warnings = warnings
         };
     }
@@ -408,7 +414,8 @@ public sealed class ExtractBaseClassOperation : RefactoringOperationBase<Extract
         ExtractBaseClassParams @params,
         List<ISymbol> members,
         ClassDeclarationSyntax baseClass,
-        string? namespaceName)
+        string? namespaceName,
+        List<NewlyReportedUsings.Removed> usingsRemoved)
     {
         var memberNames = string.Join(", ", members.Select(m => m is IPropertySymbol { IsIndexer: true } ? "this" : m.Name).Distinct());
         var baseClassCode = baseClass.NormalizeWhitespace().ToFullString();
@@ -435,7 +442,15 @@ public sealed class ExtractBaseClassOperation : RefactoringOperationBase<Extract
                 AfterSnippet = $"class {@params.TypeName} : {@params.BaseClassName}"
             }
         };
+        pendingChanges.AddRange(usingsRemoved.Select(r => r.ToPendingChange("the extracted members")));
 
-        return RefactoringResult.PreviewResult(operationId, pendingChanges);
+        return new RefactoringResult
+        {
+            Success = true,
+            OperationId = operationId,
+            Preview = true,
+            PendingChanges = pendingChanges,
+            UsingDirectivesRemoved = usingsRemoved.Count
+        };
     }
 }

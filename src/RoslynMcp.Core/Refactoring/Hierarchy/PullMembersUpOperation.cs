@@ -45,7 +45,8 @@ namespace RoslynMcp.Core.Refactoring.Hierarchy;
 /// The members go into the target's part in <c>targetFile</c>, or else its first part in a file
 /// that isn't generated. Usings the moved code needs are added to that file: namespaces, a
 /// <c>using static</c> for static members named without their type, and the aliases it uses; a
-/// name the target uses for something else is written qualified instead. Compiler errors introduced in the
+/// name the target uses for something else is written qualified instead. Usings only the moved
+/// code used are removed from the files it leaves. Compiler errors introduced in the
 /// files of the target, the type, the target's other derived types or implementers (members they
 /// now hide or lack) are returned as warnings, with notes on changed accessibility.
 /// </para>
@@ -223,6 +224,10 @@ public sealed class PullMembersUpOperation : RefactoringOperationBase<PullMember
         var removals = await RemoveMarkedAsync(newSolution, edits.Documents, cancellationToken);
         newSolution = await LinkedDocuments.SyncAsync(solution, removals.Solution, edits.Documents, cancellationToken);
 
+        // Usings only the moved code used go from the files it left; those unused before stay.
+        var (cleaned, usingsRemoved) = await NewlyReportedUsings.RemoveLeftUnusedAsync(solution, newSolution, edits.Documents, cancellationToken);
+        newSolution = cleaned;
+
         var (siblingNotes, related) = await RelatedTypesAsync(type, target, moved, makeAbstract, solution, cancellationToken);
         notes.AddRange(siblingNotes);
         var affected = edits.Documents.Concat(related).ToList();
@@ -245,7 +250,12 @@ public sealed class PullMembersUpOperation : RefactoringOperationBase<PullMember
                 Success = true,
                 OperationId = operationId,
                 Preview = true,
-                PendingChanges = await CreatePendingChangesAsync(annotated, targetDocument.Id, target, makesTargetAbstract, removals.Changes, selected, makeAbstract, isInterface, cancellationToken),
+                PendingChanges =
+                [
+                    .. await CreatePendingChangesAsync(annotated, targetDocument.Id, target, makesTargetAbstract, removals.Changes, selected, makeAbstract, isInterface, cancellationToken),
+                    .. usingsRemoved.Select(r => r.ToPendingChange("the moved code"))
+                ],
+                UsingDirectivesRemoved = usingsRemoved.Count,
                 Warnings = warnings.Count == 0 ? null : warnings
             };
         }
@@ -268,6 +278,7 @@ public sealed class PullMembersUpOperation : RefactoringOperationBase<PullMember
                 Kind = isInterface ? Contracts.Enums.SymbolKind.Interface : Contracts.Enums.SymbolKind.Class
             },
             ReferencesUpdated = moved.Count,
+            UsingDirectivesRemoved = usingsRemoved.Count,
             Warnings = warnings.Count == 0 ? null : warnings
         };
     }

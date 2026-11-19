@@ -1,6 +1,8 @@
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using RoslynMcp.Contracts.Enums;
+using RoslynMcp.Contracts.Models;
 using RoslynMcp.Core.Refactoring.Delete;
 
 namespace RoslynMcp.Core.Refactoring.Utilities;
@@ -23,7 +25,30 @@ internal static class NewlyReportedUsings
     public const string UnnecessaryUsing = "CS8019";
 
     /// <summary>A removed directive: its file, its 1-based line before the removal, and its text.</summary>
-    public sealed record Removed(string File, int Line, string Directive);
+    public sealed record Removed(string File, int Line, string Directive)
+    {
+        /// <summary>The removal as a preview lists it: "Remove 'using X;', which only <paramref name="usedBy"/> used".</summary>
+        public PendingChange ToPendingChange(string usedBy) => new()
+        {
+            File = File,
+            ChangeType = ChangeKind.Modify,
+            Description = $"Remove '{Directive}', which only {usedBy} used",
+            BeforeSnippet = Directive,
+            StartLine = Line,
+            EndLine = Line
+        };
+    }
+
+    /// <summary>
+    /// <see cref="RemoveAsync"/> for the usings a move of code out of <paramref name="documents"/>
+    /// left unused (CS8019 after the move, not before); global usings stay.
+    /// </summary>
+    public static Task<(Solution Solution, List<Removed> Removed)> RemoveLeftUnusedAsync(
+        Solution before,
+        Solution after,
+        IEnumerable<DocumentId> documents,
+        CancellationToken cancellationToken) =>
+        RemoveAsync(before, after, documents, [UnnecessaryUsing], includeGlobal: false, cancellationToken);
 
     /// <summary>
     /// In the files of <paramref name="documents"/>, removes from <paramref name="after"/> each

@@ -36,7 +36,8 @@ public sealed class PullMembersUpTool : IToolHandler
         "indexers and events are declared abstract in the base class (made abstract if nothing instantiates it) and " +
         "stay in the type as overrides. Refused when a member uses members that stay behind (they are listed), when the " +
         "target already declares it, or when its types can't be written in the target's type parameters. Adds the " +
-        "usings the moved code needs (also using static and aliases); notes and the compiler errors left (e.g. other " +
+        "usings the moved code needs (also using static and aliases) and removes those only it used from the files it " +
+        "leaves; notes and the compiler errors left (e.g. other " +
         "derived types or implementers now lacking a member) are returned as 'warnings'.";
 
     /// <inheritdoc />

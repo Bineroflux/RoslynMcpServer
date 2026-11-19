@@ -49,17 +49,22 @@ public sealed class MoveTypeToFileOperation : RefactoringOperationBase<MoveTypeT
             cancellationToken);
 
         // Compute changes
+        var original = Context.Solution;
         var (newSolution, changeInfo) = await ComputeChangesAsync(
             @params,
             resolution,
             references,
             cancellationToken);
 
+        // Usings only the moved type used go from the file it left; those unused before stay.
+        var (cleaned, usingsRemoved) = await NewlyReportedUsings.RemoveLeftUnusedAsync(original, newSolution, [resolution.Document.Id], cancellationToken);
+        newSolution = cleaned;
+
         // If preview mode, return without applying
         if (@params.Preview)
         {
             await PreviewCommitAsync(newSolution, resolution.Document.FilePath, cancellationToken);
-            return CreatePreviewResult(operationId, changeInfo, resolution);
+            return CreatePreviewResult(operationId, @params, changeInfo, resolution, usingsRemoved);
         }
 
         // Commit changes; a new target file takes the encoding of the file the type comes from,
@@ -77,7 +82,8 @@ public sealed class MoveTypeToFileOperation : RefactoringOperationBase<MoveTypeT
                 FilesDeleted = commitResult.FilesDeleted
             },
             Symbol = CreateSymbolInfo(resolution, @params.TargetFile),
-            ReferencesUpdated = references.TotalReferenceCount
+            ReferencesUpdated = references.TotalReferenceCount,
+            UsingDirectivesRemoved = usingsRemoved.Count
         };
     }
 
@@ -333,8 +339,10 @@ public sealed class MoveTypeToFileOperation : RefactoringOperationBase<MoveTypeT
 
     private RefactoringResult CreatePreviewResult(
         Guid operationId,
+        MoveTypeToFileParams @params,
         ChangeInfo changeInfo,
-        SymbolResolutionResult resolution)
+        SymbolResolutionResult resolution,
+        List<NewlyReportedUsings.Removed> usingsRemoved)
     {
         var pendingChanges = new List<PendingChange>();
 
@@ -351,14 +359,22 @@ public sealed class MoveTypeToFileOperation : RefactoringOperationBase<MoveTypeT
         // Target file change
         pendingChanges.Add(new PendingChange
         {
-            File = changeInfo.TypeNode.SyntaxTree.FilePath,
+            File = @params.TargetFile,
             ChangeType = changeInfo.TargetFileCreated ? ChangeKind.Create : ChangeKind.Modify,
             Description = changeInfo.TargetFileCreated
                 ? $"Create file with {resolution.Symbol.Name}"
                 : $"Add {resolution.Symbol.Name} declaration"
         });
+        pendingChanges.AddRange(usingsRemoved.Select(r => r.ToPendingChange("the moved type")));
 
-        return RefactoringResult.PreviewResult(operationId, pendingChanges);
+        return new RefactoringResult
+        {
+            Success = true,
+            OperationId = operationId,
+            Preview = true,
+            PendingChanges = pendingChanges,
+            UsingDirectivesRemoved = usingsRemoved.Count
+        };
     }
 
     private sealed class ChangeInfo

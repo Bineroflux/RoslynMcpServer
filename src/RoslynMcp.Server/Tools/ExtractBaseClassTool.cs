@@ -31,7 +31,8 @@ public sealed class ExtractBaseClassTool : IToolHandler
     public string Description =>
         "Extract members to a new base class. Members are picked by name like pull_members_up picks them (every " +
         "overload, field-like events, 'this' for indexers, one variable of 'int a, b;'); private members become " +
-        "protected. Refused when a member uses members that would stay behind (they are listed).";
+        "protected. Refused when a member uses members that would stay behind (they are listed). With targetFile, " +
+        "usings only the extracted members used are removed from the type's file.";
 
     /// <inheritdoc />
     public object InputSchema => new

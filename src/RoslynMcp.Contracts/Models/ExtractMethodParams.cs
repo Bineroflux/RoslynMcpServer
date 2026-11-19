@@ -41,7 +41,8 @@ public sealed class ExtractMethodParams
     public string Visibility { get; init; } = "private";
 
     /// <summary>
-    /// Force the method to be static. Default: false (auto-detect).
+    /// true: make the method static (refused when the selection uses instance members);
+    /// false: an instance method. Default (null): static unless the selection uses instance members.
     /// </summary>
     public bool? MakeStatic { get; init; }
 

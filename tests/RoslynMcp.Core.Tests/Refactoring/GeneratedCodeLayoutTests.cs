@@ -346,7 +346,7 @@ public sealed class GeneratedCodeLayoutTests
                         return text;
                     }
 
-                    private void Log(string prefix)
+                    private static void Log(string prefix)
                     {
                         Console.WriteLine(prefix);
                     }

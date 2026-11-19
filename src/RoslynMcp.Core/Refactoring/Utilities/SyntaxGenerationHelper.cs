@@ -403,6 +403,23 @@ public static class SyntaxGenerationHelper
         return SyntaxFactory.List(clauses);
     }
 
+    /// <summary>
+    /// Constraint clauses that declare the constraints of <paramref name="typeParameters"/> on a
+    /// new method, e.g. one that takes over type parameters of the method it was extracted from.
+    /// The constraints are the type parameters' own, inherited ones included.
+    /// </summary>
+    /// <param name="typeParameters">The type parameters, by their names in the new method.</param>
+    /// <param name="nullableAnnotations">Whether nullable annotations are enabled where the method goes.</param>
+    internal static SyntaxList<TypeParameterConstraintClauseSyntax> CreateConstraintClauses(
+        IEnumerable<ITypeParameterSymbol> typeParameters,
+        bool nullableAnnotations) =>
+        SyntaxFactory.List(typeParameters
+            .Select(typeParameter => (typeParameter, Constraints: DeclaredConstraints(typeParameter, nullableAnnotations)))
+            .Where(entry => entry.Constraints.Count > 0)
+            .Select(entry => SyntaxFactory.TypeParameterConstraintClause(
+                IdentifierNames.Name(entry.typeParameter.Name),
+                SyntaxFactory.SeparatedList(entry.Constraints))));
+
     private static List<TypeParameterConstraintSyntax> DeclaredConstraints(
         ITypeParameterSymbol typeParameter,
         bool nullableAnnotations)

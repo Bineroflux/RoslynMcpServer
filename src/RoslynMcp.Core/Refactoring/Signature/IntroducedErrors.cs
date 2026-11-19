@@ -18,18 +18,28 @@ internal static class IntroducedErrors
     /// (<c>path(line,column): error id: message</c>), or null when there are none. Errors are
     /// compared without their column, which a longer or shorter name on the line shifts.
     /// </summary>
+    /// <param name="before">The solution before the change.</param>
+    /// <param name="after">The solution after the change.</param>
+    /// <param name="documents">The documents to check.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <param name="matchLines">
+    /// Whether an error must also stay on its line to count as the same. A change that adds or
+    /// removes lines (moving code into a new method, inserting a property) passes false, so the
+    /// errors below it, which only moved, are not reported.
+    /// </param>
     public static async Task<IReadOnlyList<string>?> FindAsync(
         Solution before,
         Solution after,
         IReadOnlyCollection<DocumentId> documents,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool matchLines = true)
     {
-        var remaining = (await GetErrorsAsync(before, documents, cancellationToken))
+        var remaining = (await GetErrorsAsync(before, documents, matchLines, cancellationToken))
             .GroupBy(e => e.Key)
             .ToDictionary(g => g.Key, g => g.Count());
 
         var added = new List<string>();
-        foreach (var (key, text) in await GetErrorsAsync(after, documents, cancellationToken))
+        foreach (var (key, text) in await GetErrorsAsync(after, documents, matchLines, cancellationToken))
         {
             if (remaining.TryGetValue(key, out var count) && count > 0)
                 remaining[key] = count - 1;
@@ -63,6 +73,7 @@ internal static class IntroducedErrors
     private static async Task<List<(string Key, string Text)>> GetErrorsAsync(
         Solution solution,
         IEnumerable<DocumentId> documents,
+        bool matchLines,
         CancellationToken cancellationToken)
     {
         var errors = new List<(string Path, int Line, int Column, string Key, string Text)>();
@@ -84,7 +95,7 @@ internal static class IntroducedErrors
                     span.Path,
                     line,
                     column,
-                    $"{span.Path}|{line}|{diagnostic.Id}|{message}",
+                    matchLines ? $"{span.Path}|{line}|{diagnostic.Id}|{message}" : $"{span.Path}|{diagnostic.Id}|{message}",
                     $"{span.Path}({line},{column}): error {diagnostic.Id}: {message}"));
             }
         }

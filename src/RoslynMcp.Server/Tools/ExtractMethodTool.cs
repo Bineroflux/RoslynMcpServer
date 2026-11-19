@@ -28,7 +28,7 @@ public sealed class ExtractMethodTool : IToolHandler
     public string Name => "extract_method";
 
     /// <inheritdoc />
-    public string Description => "Extract selected code into a new method. Automatically detects parameters and return values.";
+    public string Description => "Extract the selected statements or expression into a new method. Variables the selection reads become parameters; variables it assigns that the code after it reads are returned (a tuple for several). An instance method when the selection uses instance members, otherwise static; async when it awaits.";
 
     /// <inheritdoc />
     public object InputSchema => new
@@ -86,7 +86,7 @@ public sealed class ExtractMethodTool : IToolHandler
             makeStatic = new
             {
                 type = "boolean",
-                description = "Force the method to be static (otherwise auto-detected)"
+                description = "true: make the method static (refused when the selection uses instance members); false: an instance method. Default: static unless the selection uses instance members"
             },
             preview = new
             {

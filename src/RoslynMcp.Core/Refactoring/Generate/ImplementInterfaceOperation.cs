@@ -164,12 +164,19 @@ public sealed class ImplementInterfaceOperation : RefactoringOperationBase<Imple
             unimplementedMembers = unimplementedMembers.Where(m => requestedSet.Contains(m.Name)).ToList();
         }
 
-        if (unimplementedMembers.Count == 0)
+        // A type that already has every member still gains the interface in its base list;
+        // only a type that already lists the interface has nothing to do.
+        if (unimplementedMembers.Count == 0 && !addsInterface)
         {
             throw new RefactoringException(
                 ErrorCodes.MemberAlreadyImplemented,
                 "All interface members are already implemented.");
         }
+
+        IReadOnlyList<string>? warnings = unimplementedMembers.Count == 0
+            ? [$"No members were generated: '{@params.TypeName}' already has every {(@params.Members is { Count: > 0 } ? "requested " : "")}member of " +
+               $"'{interfaceSymbol.ToDisplayString()}'; only the interface was added to its base list."]
+            : null;
 
         // Generate implementations (appended at the end of the type)
         var nullableAnnotations = semanticModel
@@ -184,7 +191,7 @@ public sealed class ImplementInterfaceOperation : RefactoringOperationBase<Imple
         // If preview mode, return without applying
         if (@params.Preview)
         {
-            return CreatePreviewResult(operationId, @params, unimplementedMembers, implementations, addsInterface);
+            return CreatePreviewResult(operationId, @params, unimplementedMembers, implementations, addsInterface, warnings);
         }
 
         // Add implementations to type
@@ -198,22 +205,24 @@ public sealed class ImplementInterfaceOperation : RefactoringOperationBase<Imple
         // Commit changes
         var commitResult = await CommitChangesAsync(newSolution, cancellationToken);
 
-        return RefactoringResult.Succeeded(
-            operationId,
-            new FileChanges
+        return new RefactoringResult
+        {
+            Success = true,
+            OperationId = operationId,
+            Changes = new FileChanges
             {
                 FilesModified = commitResult.FilesModified,
                 FilesCreated = commitResult.FilesCreated,
                 FilesDeleted = commitResult.FilesDeleted
             },
-            new Contracts.Models.SymbolInfo
+            Symbol = new Contracts.Models.SymbolInfo
             {
                 Name = @params.TypeName,
                 FullyQualifiedName = typeSymbol.ToDisplayString(),
                 Kind = Contracts.Enums.SymbolKind.Class
             },
-            0,
-            0);
+            Warnings = warnings
+        };
     }
 
     private async Task<INamedTypeSymbol?> FindInterfaceAsync(
@@ -292,7 +301,8 @@ public sealed class ImplementInterfaceOperation : RefactoringOperationBase<Imple
         ImplementInterfaceParams @params,
         List<ISymbol> members,
         List<MemberDeclarationSyntax> implementations,
-        bool addsInterface)
+        bool addsInterface,
+        IReadOnlyList<string>? warnings)
     {
         var memberNames = string.Join(", ", members.Select(m => m.Name));
         var baseList = addsInterface ? $" (adds {@params.InterfaceName} to the base list of {@params.TypeName})" : "";
@@ -305,12 +315,21 @@ public sealed class ImplementInterfaceOperation : RefactoringOperationBase<Imple
             {
                 File = @params.SourceFile,
                 ChangeType = ChangeKind.Modify,
-                Description = $"Implement {@params.InterfaceName} members: {memberNames}{baseList}",
+                Description = members.Count == 0
+                    ? $"Add {@params.InterfaceName} to the base list of {@params.TypeName}; its members are already implemented"
+                    : $"Implement {@params.InterfaceName} members: {memberNames}{baseList}",
                 BeforeSnippet = $"// End of type '{@params.TypeName}'",
                 AfterSnippet = implCode
             }
         };
 
-        return RefactoringResult.PreviewResult(operationId, pendingChanges);
+        return new RefactoringResult
+        {
+            Success = true,
+            OperationId = operationId,
+            Preview = true,
+            PendingChanges = pendingChanges,
+            Warnings = warnings
+        };
     }
 }

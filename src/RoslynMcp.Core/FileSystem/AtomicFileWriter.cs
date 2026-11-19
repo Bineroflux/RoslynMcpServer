@@ -7,21 +7,25 @@ namespace RoslynMcp.Core.FileSystem;
 /// Prevents partial writes on crash or cancellation.
 /// </summary>
 /// <remarks>
-/// An existing file keeps its encoding: a file without a byte order mark is rewritten
-/// without one, and a UTF-8 or UTF-16 BOM is kept. New files are written in the encoding
-/// the caller passes (a renamed or split-off file takes its source's), otherwise as UTF-8
-/// with BOM.
+/// Content is encoded strictly: a character the encoding cannot represent fails the write
+/// instead of turning into <c>?</c> or a best-fit look-alike (windows-1252 would write 'ā'
+/// as 'a'). Choosing an encoding that can represent the content is the caller's job; see
+/// <see cref="SourceFileEncoding"/>.
 /// </remarks>
 public sealed class AtomicFileWriter : IFileWriter
 {
     /// <inheritdoc />
     public Task WriteAsync(string filePath, string content, CancellationToken cancellationToken = default) =>
-        WriteAsync(filePath, content, newFileEncoding: null, cancellationToken);
+        WriteAsync(filePath, content, GetEncoding(filePath) ?? SourceFileEncoding.Utf8WithBom, cancellationToken);
 
     /// <inheritdoc />
-    public async Task WriteAsync(string filePath, string content, Encoding? newFileEncoding, CancellationToken cancellationToken = default)
+    public async Task WriteAsync(string filePath, string content, Encoding encoding, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(filePath);
+        ArgumentNullException.ThrowIfNull(content);
+        ArgumentNullException.ThrowIfNull(encoding);
+
+        var bytes = Encode(content, encoding);
 
         EnsureDirectoryExists(filePath);
 
@@ -33,8 +37,7 @@ public sealed class AtomicFileWriter : IFileWriter
         try
         {
             // Write to temp file
-            var encoding = GetEncoding(filePath) ?? newFileEncoding ?? Encoding.UTF8;
-            await File.WriteAllTextAsync(tempFilePath, content, encoding, cancellationToken);
+            await File.WriteAllBytesAsync(tempFilePath, bytes, cancellationToken);
 
             // Atomic rename (same filesystem)
             if (File.Exists(filePath))
@@ -72,41 +75,38 @@ public sealed class AtomicFileWriter : IFileWriter
     }
 
     /// <inheritdoc />
-    /// <remarks>
-    /// Derived from the file's byte order mark: UTF-8 or UTF-16 as it indicates, UTF-8
-    /// without BOM when it has none.
-    /// </remarks>
-    public Encoding? GetEncoding(string filePath)
+    public Encoding? GetEncoding(string filePath, Encoding? decodedWith = null)
     {
-        if (!File.Exists(filePath))
+        byte[] bytes;
+        try
+        {
+            using var stream = new FileStream(
+                filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            bytes = new byte[stream.Length];
+            stream.ReadExactly(bytes);
+        }
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
         {
             return null;
         }
 
-        Span<byte> preamble = stackalloc byte[3];
-        int read;
-        using (var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+        return SourceFileEncoding.ForRewrite(bytes, decodedWith, filePath);
+    }
+
+    private static byte[] Encode(string content, Encoding encoding)
+    {
+        var strict = encoding;
+        if (encoding.EncoderFallback is not EncoderExceptionFallback)
         {
-            read = stream.ReadAtLeast(preamble, preamble.Length, throwOnEndOfStream: false);
+            strict = (Encoding)encoding.Clone();
+            strict.EncoderFallback = EncoderFallback.ExceptionFallback;
         }
 
-        preamble = preamble[..read];
-        if (preamble.StartsWith(Encoding.UTF8.Preamble))
-        {
-            return Encoding.UTF8;
-        }
-
-        if (preamble.StartsWith(Encoding.Unicode.Preamble))
-        {
-            return Encoding.Unicode;
-        }
-
-        if (preamble.StartsWith(Encoding.BigEndianUnicode.Preamble))
-        {
-            return Encoding.BigEndianUnicode;
-        }
-
-        return new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+        var preamble = encoding.Preamble;
+        var bytes = new byte[preamble.Length + strict.GetByteCount(content)];
+        preamble.CopyTo(bytes);
+        strict.GetBytes(content, bytes.AsSpan(preamble.Length));
+        return bytes;
     }
 
     private static void TryDeleteFile(string filePath)

@@ -108,17 +108,21 @@ public sealed class MoveTypeToFileOperation
 
             stopwatch.Stop();
 
-            return RefactoringResult.Succeeded(
-                operationId,
-                new FileChanges
+            return new RefactoringResult
+            {
+                Success = true,
+                OperationId = operationId,
+                Changes = new FileChanges
                 {
                     FilesModified = commitResult.FilesModified,
                     FilesCreated = commitResult.FilesCreated,
                     FilesDeleted = commitResult.FilesDeleted
                 },
-                CreateSymbolInfo(resolution, @params.TargetFile),
-                references.TotalReferenceCount,
-                stopwatch.ElapsedMilliseconds);
+                Symbol = CreateSymbolInfo(resolution, @params.TargetFile),
+                ReferencesUpdated = references.TotalReferenceCount,
+                ExecutionTimeMs = stopwatch.ElapsedMilliseconds,
+                Warnings = commitResult.Warnings.Count > 0 ? commitResult.Warnings : null
+            };
         }
         catch (RefactoringException)
         {

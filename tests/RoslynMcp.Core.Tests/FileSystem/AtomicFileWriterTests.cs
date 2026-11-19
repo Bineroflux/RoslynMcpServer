@@ -97,14 +97,44 @@ public class AtomicFileWriterTests : IDisposable
     }
 
     [Fact]
-    public async Task WriteAsync_ExistingFile_KeepsItsOwnEncodingOverTheGivenOne()
+    public async Task WriteAsync_GivenEncoding_IsWrittenExactly()
     {
+        // The caller decides the encoding (WorkspaceContext keeps the one the text was read in).
         var filePath = Path.Combine(_tempDir, "existing.cs");
         await File.WriteAllBytesAsync(filePath, "class A { }"u8.ToArray(), TestContext.Current.CancellationToken);
 
         await _writer.WriteAsync(filePath, "class B { }", System.Text.Encoding.UTF8, TestContext.Current.CancellationToken);
 
-        Assert.Equal("class B { }"u8.ToArray(), await File.ReadAllBytesAsync(filePath, TestContext.Current.CancellationToken));
+        Assert.Equal([0xEF, 0xBB, 0xBF, .. "class B { }"u8.ToArray()], await File.ReadAllBytesAsync(filePath, TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task WriteAsync_ExistingWindows1252File_KeepsItsCodePage()
+    {
+        // Used to be rewritten as UTF-8: only a byte order mark was looked at.
+        var filePath = Path.Combine(_tempDir, "legacy.cs");
+        await File.WriteAllBytesAsync(filePath, Windows1252.GetBytes("// Größe\nclass A { }\n"), TestContext.Current.CancellationToken);
+
+        await _writer.WriteAsync(filePath, "// Größe\nclass B { }\n", TestContext.Current.CancellationToken);
+
+        Assert.Equal(
+            Windows1252.GetBytes("// Größe\nclass B { }\n"),
+            await File.ReadAllBytesAsync(filePath, TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task WriteAsync_CharacterTheEncodingLacks_ThrowsAndLeavesTheFile()
+    {
+        // Windows-1252 writes 'ā' as 'a' and '→' as '?' unless told not to.
+        var filePath = Path.Combine(_tempDir, "legacy.cs");
+        var original = Windows1252.GetBytes("// Größe\n");
+        await File.WriteAllBytesAsync(filePath, original, TestContext.Current.CancellationToken);
+
+        await Assert.ThrowsAsync<System.Text.EncoderFallbackException>(
+            () => _writer.WriteAsync(filePath, "// ā → b\n", Windows1252, TestContext.Current.CancellationToken));
+
+        Assert.Equal(original, await File.ReadAllBytesAsync(filePath, TestContext.Current.CancellationToken));
+        Assert.Single(Directory.GetFiles(_tempDir));
     }
 
     [Fact]
@@ -118,6 +148,37 @@ public class AtomicFileWriterTests : IDisposable
         Assert.NotEmpty(_writer.GetEncoding(withBom)!.GetPreamble());
         Assert.Empty(_writer.GetEncoding(withoutBom)!.GetPreamble());
         Assert.Null(_writer.GetEncoding(Path.Combine(_tempDir, "missing.cs")));
+    }
+
+    [Fact]
+    public void GetEncoding_AsciiFileReadInACodePage_KeepsThatCodePage()
+    {
+        // ASCII bytes are valid UTF-8 too; the project's code page they were read in decides.
+        var filePath = Path.Combine(_tempDir, "ascii.cs");
+        File.WriteAllText(filePath, "class A { }", new System.Text.UTF8Encoding(false));
+
+        Assert.Equal(1252, _writer.GetEncoding(filePath, decodedWith: Windows1252)!.CodePage);
+        Assert.Equal(65001, _writer.GetEncoding(filePath)!.CodePage);
+    }
+
+    [Fact]
+    public void GetEncoding_BytesInvalidForTheFilesEncoding_Throws()
+    {
+        // A UTF-8 byte order mark in front of windows-1252 text: rewriting would replace the umlaut.
+        var filePath = Path.Combine(_tempDir, "broken.cs");
+        File.WriteAllBytes(filePath, [0xEF, 0xBB, 0xBF, .. Windows1252.GetBytes("// Größe\n")]);
+
+        var ex = Assert.Throws<InvalidDataException>(() => _writer.GetEncoding(filePath));
+        Assert.Contains("UTF-8 with BOM", ex.Message);
+    }
+
+    private static System.Text.Encoding Windows1252
+    {
+        get
+        {
+            System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
+            return System.Text.Encoding.GetEncoding(1252);
+        }
     }
 
     [Fact]

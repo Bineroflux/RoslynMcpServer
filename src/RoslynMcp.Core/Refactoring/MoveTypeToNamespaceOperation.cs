@@ -155,7 +155,8 @@ public sealed class MoveTypeToNamespaceOperation
                 UsingDirectivesAdded = changeStats.UsingsAdded,
                 UsingDirectivesRemoved = changeStats.UsingsRemoved,
                 ExecutionTimeMs = stopwatch.ElapsedMilliseconds,
-                Error = warning
+                Error = warning,
+                Warnings = commitResult.Warnings.Count > 0 ? commitResult.Warnings : null
             };
         }
         catch (RefactoringException)

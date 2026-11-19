@@ -161,7 +161,11 @@ internal static class StandaloneFileWorkspace
         // Read through a shared stream so an editor holding the file open doesn't block us.
         using var stream = new FileStream(
             filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-        return SourceText.From(stream);
+        var bytes = new byte[stream.Length];
+        await stream.ReadExactlyAsync(bytes, ct);
+
+        // Decoded as the compiler would, so a file that is not UTF-8 keeps its characters.
+        return SourceFileEncoding.Decode(bytes);
     }
 
     private static IReadOnlyList<MetadataReference> ResolveFrameworkReferences()

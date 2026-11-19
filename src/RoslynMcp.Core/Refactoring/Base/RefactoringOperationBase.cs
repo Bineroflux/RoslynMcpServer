@@ -28,6 +28,9 @@ public abstract class RefactoringOperationBase<TParams> : IRefactoringOperation<
     /// </summary>
     protected ReferenceTracker ReferenceTracker { get; }
 
+    // Warnings of this execution's commits, added to its result's own.
+    private readonly List<string> _commitWarnings = [];
+
     /// <summary>
     /// Creates a new refactoring operation.
     /// </summary>
@@ -47,6 +50,7 @@ public abstract class RefactoringOperationBase<TParams> : IRefactoringOperation<
         var operationId = Guid.NewGuid();
         var workspaceLoadMs = WorkspaceTimingContext.LastLoadMs;
         var stopwatch = Stopwatch.StartNew();
+        _commitWarnings.Clear();
 
         try
         {
@@ -59,7 +63,7 @@ public abstract class RefactoringOperationBase<TParams> : IRefactoringOperation<
             var result = await Context.RunWriterAsync(
                 ct => ExecuteCoreAsync(operationId, @params, ct), cancellationToken);
             stopwatch.Stop();
-            return WithTiming(result, stopwatch.ElapsedMilliseconds, workspaceLoadMs);
+            return WithTiming(result, stopwatch.ElapsedMilliseconds, workspaceLoadMs, _commitWarnings);
         }
         catch (RefactoringException)
         {
@@ -97,7 +101,9 @@ public abstract class RefactoringOperationBase<TParams> : IRefactoringOperation<
         CancellationToken cancellationToken);
 
     /// <summary>
-    /// Commits solution changes to the filesystem.
+    /// Commits solution changes to the filesystem. The commit's warnings (e.g. a file saved
+    /// as UTF-8 because its code page cannot represent the new text) are added to the
+    /// operation's result.
     /// </summary>
     /// <param name="newSolution">Solution with changes.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
@@ -111,7 +117,25 @@ public abstract class RefactoringOperationBase<TParams> : IRefactoringOperation<
                 ErrorCodes.FilesystemError,
                 $"Failed to write files: {result.Error}");
         }
+
+        _commitWarnings.AddRange(result.Warnings);
         return result;
+    }
+
+    /// <summary>
+    /// <paramref name="warnings"/> followed by the <paramref name="additional"/> ones it does
+    /// not contain yet; null when there are none.
+    /// </summary>
+    internal static IReadOnlyList<string>? MergeWarnings(IReadOnlyList<string>? warnings, IEnumerable<string> additional)
+    {
+        var merged = new List<string>(warnings ?? []);
+        foreach (var warning in additional)
+        {
+            if (!merged.Contains(warning))
+                merged.Add(warning);
+        }
+
+        return merged.Count > 0 ? merged : warnings;
     }
 
     /// <summary>
@@ -131,9 +155,10 @@ public abstract class RefactoringOperationBase<TParams> : IRefactoringOperation<
         return doc;
     }
 
-    private static RefactoringResult WithTiming(RefactoringResult result, long elapsedMs, long workspaceLoadMs)
+    private static RefactoringResult WithTiming(
+        RefactoringResult result, long elapsedMs, long workspaceLoadMs, IReadOnlyList<string> commitWarnings)
     {
-        // Preview results intentionally don't carry timing.
+        // Preview results intentionally don't carry timing (and commit nothing).
         if (result.Preview)
             return result;
 
@@ -153,7 +178,7 @@ public abstract class RefactoringOperationBase<TParams> : IRefactoringOperation<
             TotalExecutionTimeMs = opMs + workspaceLoadMs,
             Error = result.Error,
             PendingChanges = result.PendingChanges,
-            Warnings = result.Warnings
+            Warnings = MergeWarnings(result.Warnings, commitWarnings)
         };
     }
 }

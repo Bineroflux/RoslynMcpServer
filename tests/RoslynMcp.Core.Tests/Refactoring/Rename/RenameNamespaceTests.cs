@@ -272,6 +272,68 @@ public sealed class RenameNamespaceTests
     }
 
     [Fact]
+    public async Task AMultiTargetedFile_IsRewrittenInTheIfBranchesOfEveryFramework()
+    {
+        const string use = """
+            #if NET9
+            using Old;
+            #endif
+
+            namespace App;
+
+            public static class Use
+            {
+            #if NET9
+                public static Foo Make() => new Old.Foo();
+            #else
+                public static global::Old.Foo Make() => new Old.Foo();
+            #endif
+
+                public static string Name => nameof(Old.Foo);
+            }
+            """;
+        using var ws = TestWorkspace.CreateSolution(
+            new TestWorkspace.ProjectSpec(
+                "Multi",
+                [("Foo.cs", "#if NET8\nnamespace Old\n#else\nnamespace Old\n#endif\n{\n    public class Foo { }\n}\n"), ("Use.cs", use.ReplaceLineEndings("\n") + "\n")],
+                TargetFrameworks: ["net8", "net9"]));
+
+        var result = await RenameAsync(ws, "Old", "Brand.New");
+
+        Assert.True(result.Success, result.Error?.Message);
+        Assert.Equal("#if NET8\nnamespace Brand.New\n#else\nnamespace Brand.New\n#endif\n{\n    public class Foo { }\n}\n", File.ReadAllText(ws.PathOf("Multi", "Foo.cs")));
+        Assert.Equal("""
+            #if NET9
+            using Brand.New;
+            #endif
+
+            namespace App;
+
+            public static class Use
+            {
+            #if NET9
+                public static Foo Make() => new Brand.New.Foo();
+            #else
+                public static global::Brand.New.Foo Make() => new Brand.New.Foo();
+            #endif
+
+                public static string Name => nameof(Brand.New.Foo);
+            }
+            """.ReplaceLineEndings("\n") + "\n", File.ReadAllText(ws.PathOf("Multi", "Use.cs")));
+
+        // Each name is counted once, however many frameworks compile it; nothing is left behind.
+        Assert.Equal(5, result.ReferencesUpdated);
+        Assert.Equal([ws.PathOf("Multi", "Foo.cs"), ws.PathOf("Multi", "Use.cs")], result.Changes!.FilesModified.Order(StringComparer.OrdinalIgnoreCase));
+        Assert.Null(result.Warnings);
+        foreach (var path in new[] { ws.PathOf("Multi", "Foo.cs"), ws.PathOf("Multi", "Use.cs") })
+        {
+            var onDisk = File.ReadAllText(path);
+            foreach (var id in ws.Context.Solution.GetDocumentIdsWithFilePath(path))
+                Assert.Equal(onDisk, (await ws.Context.Solution.GetDocument(id)!.GetTextAsync(TestContext.Current.CancellationToken)).ToString());
+        }
+    }
+
+    [Fact]
     public async Task Preview_ListsTheChanges_AndWritesNothing()
     {
         using var ws = TestWorkspace.Create(

@@ -4,6 +4,7 @@ using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.Simplification;
+using Microsoft.CodeAnalysis.Text;
 using RoslynMcp.Contracts.Enums;
 using RoslynMcp.Contracts.Errors;
 using RoslynMcp.Contracts.Models;
@@ -281,57 +282,90 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
         new[] { root }.Concat(root.GetNamespaceMembers().SelectMany(Namespaces));
 
     /// <summary>
-    /// Finds what to rewrite in every file that spells the old namespace's last segment, once
-    /// per file (a file compiled by several projects is read through its first document).
+    /// Finds what to rewrite in every file that spells the old namespace's last segment. A file
+    /// compiled by several projects (one per target framework) is read through each of its
+    /// documents, so a name in an <c>#if</c> branch that only one of them compiles is found too.
     /// Generated files are only inspected.
     /// </summary>
     private static async Task<Scan> ScanAsync(NamespaceRename rename, Solution solution, CancellationToken cancellationToken)
     {
         var scan = new Scan();
-        var seen = new HashSet<string>(PathResolver.PathComparer);
-        foreach (var project in solution.Projects)
+        foreach (var documents in DocumentsByFile(solution))
         {
-            foreach (var document in project.Documents)
+            var first = documents[0];
+            var text = await first.GetTextAsync(cancellationToken);
+            if (text.ToString().IndexOf(rename.LastSegment, StringComparison.Ordinal) < 0 ||
+                await first.GetSyntaxRootAsync(cancellationToken) is not CompilationUnitSyntax firstRoot)
             {
-                if (document.FilePath != null && !seen.Add(PathResolver.NormalizePath(document.FilePath)))
-                    continue;
-
-                var text = await document.GetTextAsync(cancellationToken);
-                if (text.ToString().IndexOf(rename.LastSegment, StringComparison.Ordinal) < 0 ||
-                    await document.GetSyntaxRootAsync(cancellationToken) is not CompilationUnitSyntax root)
-                {
-                    continue;
-                }
-
-                var generated = GeneratedCode.IsGenerated(root.SyntaxTree, cancellationToken);
-                var file = new FileRewrite(document, root);
-                CollectDeclarations(rename, file, editable: !generated);
-                await CollectReferencesAsync(rename, file, cancellationToken);
-                if (file.Declarations + file.References == 0)
-                    continue;
-
-                if (generated)
-                {
-                    scan.Generated.Add(document.FilePath ?? document.Name);
-                    scan.ProjectsWithGenerated.Add(project.Id);
-                    continue;
-                }
-
-                DescribeContent(rename, file);
-                scan.Files.Add(file);
+                continue;
             }
+
+            var generated = GeneratedCode.IsGenerated(firstRoot.SyntaxTree, cancellationToken);
+            var file = new FileRewrite(first, firstRoot);
+            foreach (var document in documents)
+            {
+                if (await document.GetSyntaxRootAsync(cancellationToken) is not CompilationUnitSyntax root)
+                    continue;
+
+                var version = new DocumentRewrite(document, root);
+                CollectDeclarations(rename, file, version, editable: !generated);
+                await CollectReferencesAsync(rename, file, version, cancellationToken);
+                file.Versions.Add(version);
+            }
+
+            if (file.Declarations + file.References == 0)
+                continue;
+
+            if (generated)
+            {
+                scan.Generated.Add(first.FilePath ?? first.Name);
+                scan.ProjectsWithGenerated.UnionWith(documents.Select(d => d.Project.Id));
+                continue;
+            }
+
+            DescribeContent(rename, file);
+            scan.Files.Add(file);
         }
 
         return scan;
     }
 
     /// <summary>
+    /// The documents of the solution grouped by file: the documents of a file that several
+    /// projects compile (one per target framework, a linked file) form one group.
+    /// </summary>
+    private static List<List<Document>> DocumentsByFile(Solution solution)
+    {
+        var groups = new List<List<Document>>();
+        var byPath = new Dictionary<string, List<Document>>(PathResolver.PathComparer);
+        foreach (var document in solution.Projects.SelectMany(p => p.Documents))
+        {
+            if (document.FilePath == null)
+            {
+                groups.Add([document]);
+                continue;
+            }
+
+            var path = PathResolver.NormalizePath(document.FilePath);
+            if (!byPath.TryGetValue(path, out var group))
+            {
+                byPath[path] = group = [];
+                groups.Add(group);
+            }
+
+            group.Add(document);
+        }
+
+        return groups;
+    }
+
+    /// <summary>
     /// Records the declarations to rewrite: those of the renamed namespaces whose enclosing
     /// declaration is not renamed itself (nested ones are relative to it and stay).
     /// </summary>
-    private static void CollectDeclarations(NamespaceRename rename, FileRewrite file, bool editable)
+    private static void CollectDeclarations(NamespaceRename rename, FileRewrite file, DocumentRewrite version, bool editable)
     {
-        foreach (var declaration in file.Root.DescendantNodes().OfType<BaseNamespaceDeclarationSyntax>())
+        foreach (var declaration in version.Root.DescendantNodes().OfType<BaseNamespaceDeclarationSyntax>())
         {
             if (!rename.Covers(FullName(declaration)) ||
                 (declaration.Parent is BaseNamespaceDeclarationSyntax parent && rename.Covers(FullName(parent))))
@@ -339,9 +373,9 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
                 continue;
             }
 
-            file.Declarations++;
+            file.DeclarationSpans.Add(declaration.Name.Span);
             if (editable)
-                RewriteDeclaration(rename, file, declaration);
+                RewriteDeclaration(rename, version, declaration);
         }
     }
 
@@ -351,7 +385,7 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
     /// for this one), enclosing blocks that declare nothing else are renamed too, the new name's
     /// segments spread over the chain.
     /// </summary>
-    private static void RewriteDeclaration(NamespaceRename rename, FileRewrite file, BaseNamespaceDeclarationSyntax declaration)
+    private static void RewriteDeclaration(NamespaceRename rename, DocumentRewrite version, BaseNamespaceDeclarationSyntax declaration)
     {
         var newName = rename.Map(FullName(declaration)).Split('.');
         var chain = new List<BaseNamespaceDeclarationSyntax> { declaration };
@@ -369,7 +403,7 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
                 throw new RefactoringException(
                     ErrorCodes.NamespaceBlockShared,
                     $"Renaming '{rename.Old}' to '{rename.New}' would merge the nested namespace blocks at " +
-                    $"{Where(file, block)} into one; merge them by hand first.");
+                    $"{Where(version, block)} into one; merge them by hand first.");
             }
 
             if (outer.Members.Count != 1)
@@ -378,7 +412,7 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
                 throw new RefactoringException(
                     ErrorCodes.NamespaceBlockShared,
                     $"Renaming '{rename.Old}' to '{rename.New}' would have to rename the enclosing block " +
-                    $"'namespace {outer.Name}' at {Where(file, outer)}, which also declares {string.Join(", ", others)}. " +
+                    $"'namespace {outer.Name}' at {Where(version, outer)}, which also declares {string.Join(", ", others)}. " +
                     $"Move those out of the block, or choose a new name starting with '{FullName(outer)}.'.");
             }
 
@@ -395,7 +429,7 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
                 : Math.Min(chain[i].Name.ToString().Split('.').Length, remaining.Length - (chain.Count - 1 - i));
             var segments = remaining[^count..];
             remaining = remaining[..^count];
-            file.Replacements[chain[i].Name] = SyntaxFactory.ParseName(string.Join('.', segments)).WithTriviaFrom(chain[i].Name);
+            version.Replacements[chain[i].Name] = SyntaxFactory.ParseName(string.Join('.', segments)).WithTriviaFrom(chain[i].Name);
         }
     }
 
@@ -407,8 +441,8 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
         _ => "other members"
     };
 
-    private static string Where(FileRewrite file, SyntaxNode node) =>
-        $"{file.Document.FilePath}({node.GetLocation().GetLineSpan().StartLinePosition.Line + 1})";
+    private static string Where(DocumentRewrite version, SyntaxNode node) =>
+        $"{version.Document.FilePath}({node.GetLocation().GetLineSpan().StartLinePosition.Line + 1})";
 
     /// <summary>The full name a namespace declaration declares, from its enclosing declarations.</summary>
     private static string FullName(BaseNamespaceDeclarationSyntax declaration) =>
@@ -419,10 +453,10 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
     /// Records every name that refers to the old namespace itself, from the identifier spelling
     /// its last segment, in code and in documentation comments.
     /// </summary>
-    private static async Task CollectReferencesAsync(NamespaceRename rename, FileRewrite file, CancellationToken cancellationToken)
+    private static async Task CollectReferencesAsync(NamespaceRename rename, FileRewrite file, DocumentRewrite version, CancellationToken cancellationToken)
     {
         SemanticModel? model = null;
-        foreach (var token in file.Root.DescendantTokens(descendIntoTrivia: true))
+        foreach (var token in version.Root.DescendantTokens(descendIntoTrivia: true))
         {
             if (!token.IsKind(SyntaxKind.IdentifierToken) || token.ValueText != rename.LastSegment ||
                 token.Parent is not IdentifierNameSyntax identifier ||
@@ -431,7 +465,7 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
                 continue;
             }
 
-            model ??= await file.Document.GetSemanticModelAsync(cancellationToken)
+            model ??= await version.Document.GetSemanticModelAsync(cancellationToken)
                 ?? throw new RefactoringException(ErrorCodes.RoslynError, "Could not analyze file.");
 
             var name = NameEndingWith(identifier);
@@ -440,9 +474,9 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
 
             if (Replacement(rename, name, model, cancellationToken) is { } replacement)
             {
-                file.Replacements[name] = replacement;
-                file.References++;
-                file.NeedsSimplification |= replacement.HasAnnotation(Simplifier.Annotation);
+                version.Replacements[name] = replacement;
+                version.NeedsSimplification |= replacement.HasAnnotation(Simplifier.Annotation);
+                file.ReferenceSpans.Add(name.Span);
             }
         }
     }
@@ -536,30 +570,40 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
     }
 
     /// <summary>
-    /// Applies the rewrites, simplifies the names marked for it once every file has its new
-    /// names, and gives every document compiling a file the same new text.
+    /// Applies the rewrites of every document, simplifies the names marked for it once every
+    /// file has its new names, and gives the documents compiling one file one text with the
+    /// rewrites of all of them (<see cref="LinkedDocuments.MergeRenamesAsync"/>: each line from
+    /// the document that changed it).
     /// </summary>
     private static async Task<Solution> ApplyAsync(Solution solution, Scan scan, CancellationToken cancellationToken)
     {
         var result = solution;
-        foreach (var file in scan.Files.Where(f => f.Replacements.Count > 0))
+        var versions = scan.Files.SelectMany(f => f.Versions).Where(v => v.Replacements.Count > 0).ToList();
+        foreach (var version in versions)
         {
-            var root = file.Root.ReplaceNodes(file.Replacements.Keys, (original, _) => file.Replacements[original]);
-            result = result.WithDocumentSyntaxRoot(file.Document.Id, root);
+            var root = version.Root.ReplaceNodes(version.Replacements.Keys, (original, _) => version.Replacements[original]);
+            result = result.WithDocumentSyntaxRoot(version.Document.Id, root);
         }
 
-        foreach (var file in scan.Files.Where(f => f.NeedsSimplification))
+        foreach (var version in versions.Where(v => v.NeedsSimplification))
         {
             var document = await Simplifier.ReduceAsync(
-                result.GetDocument(file.Document.Id)!, Simplifier.Annotation, cancellationToken: cancellationToken);
+                result.GetDocument(version.Document.Id)!, Simplifier.Annotation, cancellationToken: cancellationToken);
             result = document.Project.Solution;
         }
 
-        foreach (var file in scan.Files.Where(f => f.Replacements.Count > 0))
+        result = await LinkedDocuments.MergeRenamesAsync(solution, result, preferred: null, cancellationToken);
+
+        // The merge leaves a file alone whose versions differ in their number of lines, which
+        // the rewrite never changes; should it happen anyway, the file gets its first version.
+        foreach (var file in scan.Files.Where(f => f.Versions.Count > 1))
         {
-            var text = await result.GetDocument(file.Document.Id)!.GetTextAsync(cancellationToken);
-            foreach (var id in DocumentIds(solution, file.Document).Where(id => id != file.Document.Id))
-                result = result.WithDocumentText(id, text);
+            var text = await result.GetDocument(file.Versions[0].Document.Id)!.GetTextAsync(cancellationToken);
+            foreach (var version in file.Versions.Skip(1))
+            {
+                if (!(await result.GetDocument(version.Document.Id)!.GetTextAsync(cancellationToken)).ContentEquals(text))
+                    result = result.WithDocumentText(version.Document.Id, text);
+            }
         }
 
         return result;
@@ -719,7 +763,7 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
         CancellationToken cancellationToken)
     {
         var changes = new List<PendingChange>();
-        foreach (var file in scan.Files.Where(f => f.Replacements.Count > 0))
+        foreach (var file in scan.Files.Where(f => f.Versions.Any(v => v.Replacements.Count > 0)))
         {
             var before = await file.Document.GetTextAsync(cancellationToken);
             var after = await newSolution.GetDocument(file.Document.Id)!.GetTextAsync(cancellationToken);
@@ -789,20 +833,27 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
         public HashSet<ProjectId> ProjectsWithGenerated { get; } = [];
     }
 
-    /// <summary>The rewrites of one file.</summary>
+    /// <summary>The rewrites of one file, in each document that compiles it.</summary>
     private sealed class FileRewrite(Document document, CompilationUnitSyntax root)
     {
+        /// <summary>The file's first document.</summary>
         public Document Document { get; } = document;
 
+        /// <summary>The syntax root of <see cref="Document"/>.</summary>
         public CompilationUnitSyntax Root { get; } = root;
 
-        public Dictionary<SyntaxNode, SyntaxNode> Replacements { get; } = [];
+        /// <summary>One per document compiling the file (one per target framework).</summary>
+        public List<DocumentRewrite> Versions { get; } = [];
 
-        public int Declarations { get; set; }
+        /// <summary>The names of the declarations to rename, found in any of the documents.</summary>
+        public HashSet<TextSpan> DeclarationSpans { get; } = [];
 
-        public int References { get; set; }
+        /// <summary>The names referring to the old namespace, found in any of the documents.</summary>
+        public HashSet<TextSpan> ReferenceSpans { get; } = [];
 
-        public bool NeedsSimplification { get; set; }
+        public int Declarations => DeclarationSpans.Count;
+
+        public int References => ReferenceSpans.Count;
 
         /// <summary>The namespace all the file's types are in before the rename, when there is one.</summary>
         public string? OldNamespace { get; set; }
@@ -812,5 +863,20 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
 
         /// <summary>Why the file has no such namespace.</summary>
         public string? ContentReason { get; set; }
+    }
+
+    /// <summary>
+    /// The rewrites of one document of a file: a file compiled for several target frameworks has
+    /// code in <c>#if</c> branches that only some of its documents see.
+    /// </summary>
+    private sealed class DocumentRewrite(Document document, CompilationUnitSyntax root)
+    {
+        public Document Document { get; } = document;
+
+        public CompilationUnitSyntax Root { get; } = root;
+
+        public Dictionary<SyntaxNode, SyntaxNode> Replacements { get; } = [];
+
+        public bool NeedsSimplification { get; set; }
     }
 }

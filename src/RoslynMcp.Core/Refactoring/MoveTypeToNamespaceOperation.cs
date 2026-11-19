@@ -202,7 +202,45 @@ public sealed class MoveTypeToNamespaceOperation : RefactoringOperationBase<Move
             stats.UsingsRemoved += removed;
         }
 
+        // When the type was the last one in its namespace, the namespace is gone: imports of it
+        // stop binding (CS0234) and are removed, and static usings and aliases of the type (or of
+        // the namespace) follow it to the new one. Imports that still bind stay.
+        if (!resolution.Symbol.ContainingNamespace.IsGlobalNamespace)
+        {
+            var stale = await StaleUsingDirectives.FixAsync(
+                Context.Solution,
+                solution,
+                oldNamespace,
+                symbol => NewName(symbol, resolution.Symbol, oldNamespace, newNamespace),
+                cancellationToken);
+            solution = stale.Solution;
+            stats.UsingsRemoved += stale.Removed;
+        }
+
         return (solution, stats);
+    }
+
+    /// <summary>
+    /// Where a namespace or type a static using or alias named is after the move: the old namespace
+    /// itself is the new one, the moved type (or a type nested in it, constructed or not) is in the
+    /// new namespace; anything else did not move (null).
+    /// </summary>
+    private static string? NewName(ISymbol symbol, INamedTypeSymbol moved, string oldNamespace, string newNamespace)
+    {
+        if (symbol is INamespaceSymbol ns)
+            return ns.ToDisplayString() == oldNamespace ? newNamespace : null;
+        if (symbol is not INamedTypeSymbol type)
+            return null;
+
+        var outermost = type.OriginalDefinition;
+        while (outermost.ContainingType != null)
+            outermost = outermost.ContainingType;
+        if (outermost.MetadataName != moved.MetadataName || outermost.ContainingNamespace.ToDisplayString() != oldNamespace)
+            return null;
+
+        var full = type.ToDisplayString(
+            SymbolDisplayFormat.FullyQualifiedFormat.WithGlobalNamespaceStyle(SymbolDisplayGlobalNamespaceStyle.Omitted));
+        return newNamespace + full[oldNamespace.Length..];
     }
 
     /// <summary>

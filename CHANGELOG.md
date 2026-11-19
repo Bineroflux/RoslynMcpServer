@@ -130,6 +130,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - Analyzers that MSBuild reports but the host can't load (missing DLL, target-framework mismatch) are dropped after load, fixing a `4003` error on the first tool call after an otherwise successful load.
 - Cache-invalidation race (a concurrent reload could evict a freshly loaded entry), a leak that kept the old workspace and analyzer loader alive when the cache was invalidated while a tool call was still using it, and analyzer-loader locking/GC hardening.
 - Responses now report timing broken out into the operation's own time (`executionTimeMs`), the workspace load time (`workspaceLoadMs`), and the combined total (`totalExecutionTimeMs`); previously the load time was lost on the way back.
+- The CLI converts option values by the parameter's type instead of by how they look. A numeric- or boolean-looking value became a JSON number or boolean even for a string parameter, so `search-symbols --query 42` (or `--query true`) failed to deserialize, and a value starting with `[` became a JSON array. A string option now always stays a string; an integer option must be an integer in range (`--line abc` used to reach the tool as a string and fail there) and a boolean option `true` or `false`, otherwise the CLI exits with code 2 naming the option and the value; a list option takes a JSON array, with a clear error for anything else.
 
 ## [0.4.0] - 2026-02-23
 

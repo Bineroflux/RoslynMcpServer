@@ -27,8 +27,11 @@ public static class ParamsSchema
         if (underlying == typeof(string) || underlying.IsEnum)
             return new JsonObject { ["type"] = "string" };
 
-        if (underlying == typeof(int) || underlying == typeof(long) || underlying == typeof(short))
+        if (underlying == typeof(int) || underlying == typeof(short))
             return new JsonObject { ["type"] = "integer" };
+
+        if (underlying == typeof(long))
+            return new JsonObject { ["type"] = "integer", ["format"] = "int64" };
 
         if (underlying == typeof(bool))
             return new JsonObject { ["type"] = "boolean" };

@@ -140,7 +140,7 @@ roslyn-cli C:/path/to/MySolution.sln extract-method --source-file Foo.cs --start
 
 Output is JSON by default (pipeable to `jq`). Use `--format text` for human-readable output. Exit codes: 0=success, 1=tool error, 2=CLI error, 3=environment error.
 
-`roslyn-cli <tool-name> --help` lists a tool's options. An option the tool does not take (`--max-result`, or a key inside a JSON value such as `--parameters '[{"orignalName": ...}]'`) is an error (exit code 2) that names it, suggests the closest valid one and lists the valid options; it used to be ignored silently.
+`roslyn-cli <tool-name> --help` lists a tool's options. A value is converted by the option's type: a text option stays text (`--query 42`, `--query true`), an integer or boolean option must be one (`--line abc` and `--preview yes` are errors), and a list option takes a JSON array (`--members '["A","B"]'`). An option the tool does not take (`--max-result`, or a key inside a JSON value such as `--parameters '[{"orignalName": ...}]'`) is an error (exit code 2) that names it, suggests the closest valid one and lists the valid options; it used to be ignored silently.
 
 ---
 

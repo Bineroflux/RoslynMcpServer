@@ -155,4 +155,64 @@ public class ArgsToJsonConverterTests
             "which takes: originalName, name, type, defaultValue, newPosition, remove.",
             ex.Message);
     }
+
+    [Theory]
+    [InlineData("42")]
+    [InlineData("true")]
+    [InlineData("[Foo]")]
+    [InlineData("-1")]
+    public void StringParameter_StaysAString_HoweverItLooks(string query)
+    {
+        // search-symbols --query 42 failed: the value became a JSON number, which a string
+        // parameter cannot take; [Foo] became a JSON array.
+        var json = ArgsToJsonConverter.Convert(
+            new Dictionary<string, string> { ["query"] = query, ["max-results"] = "7", ["exact-match"] = "TRUE" },
+            ParamsSchema.For(typeof(SearchSymbolsParams)));
+
+        var @params = JsonSerializer.Deserialize<SearchSymbolsParams>(json, JsonOptions)!;
+        Assert.Equal(query, @params.Query);
+        Assert.Equal(7, @params.MaxResults);
+        Assert.True(@params.ExactMatch);
+    }
+
+    [Theory]
+    [InlineData("line", "abc", "--line takes an integer, not 'abc'.")]
+    [InlineData("line", "3000000000", "--line takes an integer, not '3000000000'.")]
+    [InlineData("line", "1.5", "--line takes an integer, not '1.5'.")]
+    [InlineData("preview", "yes", "--preview takes true or false, not 'yes'.")]
+    public void InvalidValues_AreRefused(string option, string value, string message)
+    {
+        var ex = Assert.Throws<CliOptionException>(() => ArgsToJsonConverter.Convert(
+            new Dictionary<string, string> { [option] = value }, RenameSchema));
+
+        Assert.Equal(message, ex.Message);
+    }
+
+    [Theory]
+    [InlineData("Print", "--members takes a JSON array, such as '[\"A\", \"B\"]', not 'Print'.")]
+    [InlineData("{\"a\": 1}", "--members takes a JSON array, not '{\"a\": 1}'.")]
+    public void ListParameter_TakesAJsonArray(string value, string message)
+    {
+        var ex = Assert.Throws<CliOptionException>(() => ArgsToJsonConverter.Convert(
+            new Dictionary<string, string> { ["members"] = value }, ParamsSchema.For(typeof(ExtractBaseClassParams))));
+
+        Assert.Equal(message, ex.Message);
+    }
+
+    [Fact]
+    public void UnknownOptionsAndInvalidValues_AreReportedTogether()
+    {
+        var ex = Assert.Throws<CliOptionException>(() => ArgsToJsonConverter.Convert(
+            new Dictionary<string, string> { ["line"] = "x", ["colour"] = "red" }, RenameSchema));
+
+        Assert.StartsWith("Unknown option '--colour'. Valid options: ", ex.Message);
+        Assert.EndsWith(" --line takes an integer, not 'x'.", ex.Message);
+    }
+
+    // The options the CLI's registry deserializes params with.
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        PropertyNameCaseInsensitive = true
+    };
 }

@@ -63,7 +63,7 @@ public sealed class WorkspaceCacheStalenessReloadTests
         WorkspaceContext second;
         using (var ctx = await provider.CreateContextAsync(fixture.SolutionPath, ct))
             second = ctx;
-        Assert.Same(first, second);
+        Assert.Same(first.Workspace, second.Workspace);
         Assert.Equal(1, misses);
 
         // Rewrite the tracked analyzer DLL so its (last-write, length) stamp changes —
@@ -77,13 +77,13 @@ public sealed class WorkspaceCacheStalenessReloadTests
 
         Assert.True(reloads >= 1, "Expected the changed analyzer DLL to trigger a reload.");
         Assert.Equal(2, misses);
-        Assert.NotSame(first, third);
+        Assert.NotSame(first.Workspace, third.Workspace);
 
         // The reloaded entry is itself stable: a follow-up access is a plain cache hit.
         WorkspaceContext fourth;
         using (var ctx = await provider.CreateContextAsync(fixture.SolutionPath, ct))
             fourth = ctx;
-        Assert.Same(third, fourth);
+        Assert.Same(third.Workspace, fourth.Workspace);
         Assert.Equal(2, misses);
     }
 

@@ -64,8 +64,9 @@ public sealed class WorkspaceCache : IDisposable
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>A tuple of the leased context and the milliseconds spent acquiring it.</returns>
     /// <remarks>
-    /// The returned context is cache-owned: calling <see cref="WorkspaceContext.Dispose"/>
-    /// releases the lease rather than tearing down the workspace.
+    /// The returned context is the caller's own handle on the cached workspace: calling
+    /// <see cref="WorkspaceContext.Dispose"/> releases the caller's lease (once, however
+    /// often it is called) rather than tearing down the workspace.
     /// </remarks>
     public async Task<(WorkspaceContext Context, long LoadMs)> GetOrCreateAsync(
         string solutionPath,
@@ -81,9 +82,9 @@ public sealed class WorkspaceCache : IDisposable
         {
             if (IsFresh(existing, key))
             {
-                await EnterOperationOrRelease(existing, cancellationToken);
+                var handle = await EnterOperationOrRelease(existing, cancellationToken);
                 stopwatch.Stop();
-                return (existing.Context, stopwatch.ElapsedMilliseconds);
+                return (handle, stopwatch.ElapsedMilliseconds);
             }
             // Stale (a referenced generator/analyzer DLL changed on disk): drop the
             // lease and invalidate so the load below produces a fresh workspace and
@@ -102,9 +103,9 @@ public sealed class WorkspaceCache : IDisposable
             {
                 if (IsFresh(existing, key))
                 {
-                    await EnterOperationOrRelease(existing, cancellationToken);
+                    var handle = await EnterOperationOrRelease(existing, cancellationToken);
                     stopwatch.Stop();
-                    return (existing.Context, stopwatch.ElapsedMilliseconds);
+                    return (handle, stopwatch.ElapsedMilliseconds);
                 }
                 InvalidateStaleEntry(key, existing);
             }
@@ -112,7 +113,7 @@ public sealed class WorkspaceCache : IDisposable
             LogCallback?.Invoke($"Cache miss for '{key}'; loading workspace...");
             var fresh = await loader(cancellationToken);
             var entry = new CachedEntry(this, key, fresh);
-            fresh.MarkCacheOwned(entry.OnLeaseReleased);
+            fresh.MarkCacheOwned();
 
             // Take the first lease for the caller before publishing, so a sweep
             // can never see RefCount == 0 between publish and return.
@@ -124,12 +125,12 @@ public sealed class WorkspaceCache : IDisposable
 
             // The freshly loaded workspace has no outstanding leases, so the
             // operation gate is idle — this await completes synchronously.
-            await EnterOperationOrRelease(entry, cancellationToken);
+            var loadedHandle = await EnterOperationOrRelease(entry, cancellationToken);
 
             stopwatch.Stop();
             LogCallback?.Invoke(
                 $"Workspace loaded for '{key}' in {stopwatch.ElapsedMilliseconds} ms.");
-            return (entry.Context, stopwatch.ElapsedMilliseconds);
+            return (loadedHandle, stopwatch.ElapsedMilliseconds);
         }
         finally
         {
@@ -160,7 +161,11 @@ public sealed class WorkspaceCache : IDisposable
         return false;
     }
 
-    private static async Task EnterOperationOrRelease(CachedEntry entry, CancellationToken ct)
+    /// <summary>
+    /// Takes an operation lease on the entry the caller has acquired, and returns the caller's
+    /// own handle on the workspace, which releases both when disposed.
+    /// </summary>
+    private static async Task<WorkspaceContext> EnterOperationOrRelease(CachedEntry entry, CancellationToken ct)
     {
         try
         {
@@ -173,6 +178,8 @@ public sealed class WorkspaceCache : IDisposable
             entry.OnLeaseReleased();
             throw;
         }
+
+        return entry.Context.CreateLeaseHandle(entry.OnLeaseReleased);
     }
 
     /// <summary>
@@ -325,7 +332,7 @@ public sealed class WorkspaceCache : IDisposable
         }
 
         /// <summary>
-        /// Lease-release callback wired to the context via MarkCacheOwned.
+        /// Lease-release callback of the handles the entry hands out (CreateLeaseHandle).
         /// </summary>
         public void OnLeaseReleased()
         {

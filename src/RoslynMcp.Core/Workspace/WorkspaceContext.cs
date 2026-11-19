@@ -17,64 +17,46 @@ namespace RoslynMcp.Core.Workspace;
 /// </summary>
 /// <remarks>
 /// When created directly (non-cached), callers must <see cref="Dispose"/> when done.
-/// When obtained from <see cref="WorkspaceCache"/>, <see cref="Dispose"/> releases a
-/// lease (ref count) and the cache owns the actual workspace lifetime. Concurrent
-/// read access to <see cref="Solution"/> is safe. Mutations are serialized two ways:
-/// refactorings run as the single writer (<see cref="RunWriterAsync{T}"/>), and
-/// file-watcher updates take the gate's exclusive file-update lease, which no operation
-/// holds at the same time.
+/// When obtained from <see cref="WorkspaceCache"/>, each caller gets a handle of its own
+/// on the cached workspace: its <see cref="Dispose"/> releases that caller's lease, once,
+/// and the cache owns the actual workspace lifetime. Concurrent read access to
+/// <see cref="Solution"/> is safe. Mutations are serialized two ways: refactorings run as
+/// the single writer (<see cref="RunWriterAsync{T}"/>), and file-watcher updates take the
+/// gate's exclusive file-update lease, which no operation holds at the same time.
 /// </remarks>
 public sealed class WorkspaceContext : IDisposable
 {
-    private readonly Microsoft.CodeAnalysis.Workspace _workspace;
-    private readonly IFileWriter _fileWriter;
-    private readonly IDisposable? _analyzerAssemblyLoader;
-    private readonly IReadOnlyList<AnalyzerFileStamp> _analyzerStamps;
-    private readonly ImmutableDictionary<string, string> _msbuildProperties;
-    private readonly FileBasedProgramInfo? _fileBasedProgram;
-    private readonly WorkspaceOperationGate _gate = new();
+    // Everything this context gives access to. Shared by all handles of a cached workspace
+    // (CreateLeaseHandle), so it is the same workspace whichever handle a caller holds.
+    private readonly Session _s;
 
-    // The writer section (RunWriterAsync): one refactoring at a time reads the solution,
-    // computes its change and commits it. Taken inside an operation lease, never the other
-    // way round, and never waited for by a file update.
-    private readonly SemaphoreSlim _writerLock = new(1, 1);
-
-    // The running writer section (a fresh object per section; null when none runs), and the
-    // section each async flow belongs to. A commit or UpdateSolution is accepted only from the
-    // flow of the running section, so neither a caller outside one nor work an earlier section
-    // left behind can race it.
-    private object? _currentWriterSection;
-    private readonly AsyncLocal<object?> _writerSectionOfFlow = new();
-
-    // The snapshot the running writer section builds on: the solution when it started, moved
-    // on by its own commits and UpdateSolution calls; null when no section runs. Touched only
-    // by the section holding _writerLock.
-    private Solution? _writerBase;
-
-    private Solution _solution;
-    private bool _disposed;
-    private Action? _onLeaseReleased;
-    private bool _cacheOwned;
+    // The operation lease this handle holds on a cached workspace; null for the context a
+    // loader created, which owns the session.
+    private readonly CacheLease? _lease;
 
     /// <summary>
     /// Current solution snapshot.
     /// </summary>
-    public Solution Solution => _solution;
+    public Solution Solution => _s.Solution;
 
     /// <summary>
     /// The underlying Roslyn workspace.
     /// </summary>
-    public Microsoft.CodeAnalysis.Workspace Workspace => _workspace;
+    public Microsoft.CodeAnalysis.Workspace Workspace => _s.Workspace;
 
     /// <summary>
     /// Path to the loaded solution or project.
     /// </summary>
-    public string LoadedPath { get; }
+    public string LoadedPath => _s.LoadedPath;
 
     /// <summary>
     /// Current workspace state.
     /// </summary>
-    public WorkspaceState State { get; private set; }
+    public WorkspaceState State
+    {
+        get => _s.State;
+        private set => _s.State = value;
+    }
 
     /// <summary>
     /// Issues encountered while loading the workspace that affect downstream
@@ -84,7 +66,7 @@ public sealed class WorkspaceContext : IDisposable
     /// diagnostics so callers can tell apart "no diagnostics" from "the
     /// generator that would have produced them never ran".
     /// </summary>
-    public IReadOnlyList<string> GeneratorLoadIssues { get; }
+    public IReadOnlyList<string> GeneratorLoadIssues => _s.GeneratorLoadIssues;
 
     /// <summary>
     /// Whether a <see cref="GeneratorLoadIssues"/> entry is about the project named
@@ -97,7 +79,7 @@ public sealed class WorkspaceContext : IDisposable
     /// Diagnostics the workspace reported while loading (and while re-evaluating projects
     /// since). Empty for workspaces not loaded through MSBuild.
     /// </summary>
-    public IReadOnlyCollection<WorkspaceDiagnostic> LoadDiagnostics { get; }
+    public IReadOnlyCollection<WorkspaceDiagnostic> LoadDiagnostics => _s.LoadDiagnostics;
 
     internal WorkspaceContext(
         Microsoft.CodeAnalysis.Workspace workspace,
@@ -110,18 +92,95 @@ public sealed class WorkspaceContext : IDisposable
         FileBasedProgramInfo? fileBasedProgram = null,
         IReadOnlyCollection<WorkspaceDiagnostic>? loadDiagnostics = null)
     {
-        _workspace = workspace;
-        _solution = solution;
-        _fileWriter = fileWriter ?? new AtomicFileWriter();
-        _analyzerAssemblyLoader = analyzerAssemblyLoader;
-        _analyzerStamps = CaptureMutableAnalyzerStamps(solution);
-        _msbuildProperties = msbuildProperties?.ToImmutableDictionary(StringComparer.OrdinalIgnoreCase)
-            ?? ImmutableDictionary<string, string>.Empty;
-        _fileBasedProgram = fileBasedProgram;
-        LoadedPath = loadedPath;
-        GeneratorLoadIssues = generatorLoadIssues ?? Array.Empty<string>();
-        LoadDiagnostics = loadDiagnostics ?? Array.Empty<WorkspaceDiagnostic>();
-        State = WorkspaceState.Ready;
+        _s = new Session(
+            workspace,
+            solution,
+            loadedPath,
+            fileWriter ?? new AtomicFileWriter(),
+            generatorLoadIssues ?? Array.Empty<string>(),
+            analyzerAssemblyLoader,
+            msbuildProperties?.ToImmutableDictionary(StringComparer.OrdinalIgnoreCase)
+                ?? ImmutableDictionary<string, string>.Empty,
+            fileBasedProgram,
+            loadDiagnostics ?? Array.Empty<WorkspaceDiagnostic>());
+    }
+
+    /// <summary>A handle on the session of a cached workspace, holding one operation lease.</summary>
+    private WorkspaceContext(Session session, CacheLease lease)
+    {
+        _s = session;
+        _lease = lease;
+    }
+
+    /// <summary>
+    /// The state of one workspace, shared by every handle on it. Its fields are guarded as
+    /// documented on <see cref="WorkspaceContext"/>'s members that use them: the solution and
+    /// the writer fields by the writer section and the file-update lease, the rest is set
+    /// once.
+    /// </summary>
+    private sealed class Session(
+        Microsoft.CodeAnalysis.Workspace workspace,
+        Solution solution,
+        string loadedPath,
+        IFileWriter fileWriter,
+        IReadOnlyList<string> generatorLoadIssues,
+        IDisposable? analyzerAssemblyLoader,
+        ImmutableDictionary<string, string> msbuildProperties,
+        FileBasedProgramInfo? fileBasedProgram,
+        IReadOnlyCollection<WorkspaceDiagnostic> loadDiagnostics)
+    {
+        public readonly Microsoft.CodeAnalysis.Workspace Workspace = workspace;
+        public readonly string LoadedPath = loadedPath;
+        public readonly IFileWriter FileWriter = fileWriter;
+        public readonly IReadOnlyList<string> GeneratorLoadIssues = generatorLoadIssues;
+        public readonly IReadOnlyCollection<WorkspaceDiagnostic> LoadDiagnostics = loadDiagnostics;
+        public readonly IDisposable? AnalyzerAssemblyLoader = analyzerAssemblyLoader;
+        public readonly IReadOnlyList<AnalyzerFileStamp> AnalyzerStamps = CaptureMutableAnalyzerStamps(solution);
+        public readonly ImmutableDictionary<string, string> MsBuildProperties = msbuildProperties;
+        public readonly FileBasedProgramInfo? FileBasedProgram = fileBasedProgram;
+        public readonly WorkspaceOperationGate Gate = new();
+
+        // The writer section (RunWriterAsync): one refactoring at a time reads the solution,
+        // computes its change and commits it. Taken inside an operation lease, never the other
+        // way round, and never waited for by a file update.
+        public readonly SemaphoreSlim WriterLock = new(1, 1);
+
+        // The running writer section (a fresh object per section; null when none runs), and the
+        // section each async flow belongs to. A commit or UpdateSolution is accepted only from the
+        // flow of the running section, so neither a caller outside one nor work an earlier section
+        // left behind can race it.
+        public object? CurrentWriterSection;
+        public readonly AsyncLocal<object?> WriterSectionOfFlow = new();
+
+        // The snapshot the running writer section builds on: the solution when it started, moved
+        // on by its own commits and UpdateSolution calls; null when no section runs. Touched only
+        // by the section holding WriterLock.
+        public Solution? WriterBase;
+
+        public Solution Solution = solution;
+        public WorkspaceState State = WorkspaceState.Ready;
+        public bool Disposed;
+        public bool CacheOwned;
+    }
+
+    /// <summary>
+    /// One operation lease on a cached workspace, released at most once however often the
+    /// handle holding it is disposed: a second release would end a lease another caller holds.
+    /// </summary>
+    private sealed class CacheLease(WorkspaceOperationGate gate, Action onReleased)
+    {
+        private int _released;
+
+        public void Release()
+        {
+            if (Interlocked.Exchange(ref _released, 1) != 0)
+                return;
+
+            // The operation lease is exited first so any queued file update can start
+            // immediately; then the cache updates its ref count and last-access time.
+            gate.ExitOperation();
+            onReleased();
+        }
     }
 
     /// <summary>
@@ -149,7 +208,7 @@ public sealed class WorkspaceContext : IDisposable
     public Document? GetDocumentByPath(string filePath)
     {
         var normalizedPath = PathResolver.NormalizePath(filePath);
-        return _solution.Projects
+        return _s.Solution.Projects
             .SelectMany(p => p.Documents)
             .FirstOrDefault(d => !string.IsNullOrEmpty(d.FilePath)
                 && PathResolver.PathComparer.Equals(PathResolver.NormalizePath(d.FilePath), normalizedPath));
@@ -168,8 +227,8 @@ public sealed class WorkspaceContext : IDisposable
     public void UpdateSolution(Solution newSolution)
     {
         EnsureWriterBaseIsCurrent(nameof(UpdateSolution));
-        _solution = newSolution;
-        _writerBase = newSolution;
+        _s.Solution = newSolution;
+        _s.WriterBase = newSolution;
     }
 
     /// <summary>
@@ -197,23 +256,23 @@ public sealed class WorkspaceContext : IDisposable
             throw new InvalidOperationException(
                 "This flow is already inside the workspace's writer section, which is not re-entrant.");
 
-        await _writerLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        await _s.WriterLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         var section = new object();
         try
         {
             ThrowIfDisposed();
-            _writerBase = _solution;
-            Volatile.Write(ref _currentWriterSection, section);
+            _s.WriterBase = _s.Solution;
+            Volatile.Write(ref _s.CurrentWriterSection, section);
             // Flows into the body (and whatever it starts); this method's caller keeps its own
             // value, since an async method restores the caller's context when it returns.
-            _writerSectionOfFlow.Value = section;
+            _s.WriterSectionOfFlow.Value = section;
             return await body(cancellationToken).ConfigureAwait(false);
         }
         finally
         {
-            Volatile.Write(ref _currentWriterSection, null);
-            _writerBase = null;
-            _writerLock.Release();
+            Volatile.Write(ref _s.CurrentWriterSection, null);
+            _s.WriterBase = null;
+            _s.WriterLock.Release();
         }
     }
 
@@ -240,11 +299,11 @@ public sealed class WorkspaceContext : IDisposable
     /// </summary>
     private void EnsureWriterBaseIsCurrent(string action)
     {
-        if (!FlowRunsWriterSection() || _writerBase is null)
+        if (!FlowRunsWriterSection() || _s.WriterBase is null)
             throw new InvalidOperationException(
                 $"{action} must run inside the workspace's writer section (RunWriterAsync).");
 
-        if (!ReferenceEquals(_writerBase, _solution))
+        if (!ReferenceEquals(_s.WriterBase, _s.Solution))
             throw new RefactoringException(
                 ErrorCodes.WorkspaceBusy,
                 "The workspace changed while this refactoring was computed, so it was not applied " +
@@ -254,8 +313,8 @@ public sealed class WorkspaceContext : IDisposable
     /// <summary>Whether the calling flow belongs to the writer section that is running now.</summary>
     private bool FlowRunsWriterSection()
     {
-        var section = _writerSectionOfFlow.Value;
-        return section != null && ReferenceEquals(section, Volatile.Read(ref _currentWriterSection));
+        var section = _s.WriterSectionOfFlow.Value;
+        return section != null && ReferenceEquals(section, Volatile.Read(ref _s.CurrentWriterSection));
     }
 
     /// <summary>
@@ -279,42 +338,57 @@ public sealed class WorkspaceContext : IDisposable
     /// </summary>
     internal bool ShouldReloadOnSourceChange(string filePath, SourceText newText)
     {
-        if (_fileBasedProgram is null) return false;
+        if (_s.FileBasedProgram is null) return false;
         if (!string.Equals(
                 PathResolver.NormalizePath(filePath),
-                _fileBasedProgram.EntryPath,
+                _s.FileBasedProgram.EntryPath,
                 StringComparison.OrdinalIgnoreCase))
             return false;
 
         var newSignature = FileBasedProgramProject.ComputeDirectiveSignature(newText.ToString());
-        return !string.Equals(newSignature, _fileBasedProgram.DirectiveSignature, StringComparison.Ordinal);
+        return !string.Equals(newSignature, _s.FileBasedProgram.DirectiveSignature, StringComparison.Ordinal);
     }
 
     /// <summary>
-    /// Marks this context as owned by a cache. After this call, <see cref="Dispose"/>
-    /// only signals the lease-release callback; actual disposal is performed by the
-    /// cache via <see cref="DisposeOwned"/>.
+    /// Marks this context as owned by a cache. After this call, the cache hands out
+    /// <see cref="CreateLeaseHandle"/>s instead of this context, this context's
+    /// <see cref="Dispose"/> does nothing, and the cache disposes the workspace via
+    /// <see cref="DisposeOwned"/>.
     /// </summary>
-    internal void MarkCacheOwned(Action onLeaseReleased)
+    internal void MarkCacheOwned()
     {
-        _cacheOwned = true;
-        _onLeaseReleased = onLeaseReleased;
+        if (_lease != null)
+            throw new InvalidOperationException("A lease handle cannot be made cache-owned; its session already is.");
+        _s.CacheOwned = true;
+    }
+
+    /// <summary>
+    /// A handle on this cache-owned workspace for one caller, holding the operation lease the
+    /// caller has just taken (<see cref="EnterOperationAsync"/>). Disposing the handle exits
+    /// that lease and then calls <paramref name="onReleased"/> — once, however often it is
+    /// disposed, so a caller that disposes twice cannot end another caller's lease.
+    /// </summary>
+    internal WorkspaceContext CreateLeaseHandle(Action onReleased)
+    {
+        if (!_s.CacheOwned)
+            throw new InvalidOperationException("Only a cache-owned workspace hands out lease handles.");
+        return new WorkspaceContext(_s, new CacheLease(_s.Gate, onReleased));
     }
 
     /// <summary>
     /// Takes a shared operation lease. All MCP tool invocations run while
     /// holding a lease, so filesystem-driven updates can't mutate the solution
-    /// under them. Multiple leases may be held simultaneously; the cache is
-    /// expected to call <see cref="ExitOperation"/> when it releases the lease.
+    /// under them. Multiple leases may be held simultaneously; a lease handle
+    /// (<see cref="CreateLeaseHandle"/>) exits its lease when it is disposed.
     /// </summary>
     internal Task EnterOperationAsync(CancellationToken cancellationToken)
-        => _gate.EnterOperationAsync(cancellationToken);
+        => _s.Gate.EnterOperationAsync(cancellationToken);
 
     /// <summary>
     /// Releases an operation lease previously obtained via
     /// <see cref="EnterOperationAsync"/>.
     /// </summary>
-    internal void ExitOperation() => _gate.ExitOperation();
+    internal void ExitOperation() => _s.Gate.ExitOperation();
 
     /// <summary>
     /// Completes once a filesystem-driven update (<see cref="SyncDocumentFromDiskAsync"/> or
@@ -322,7 +396,7 @@ public sealed class WorkspaceContext : IDisposable
     /// lease. For tests that order an update against an operation deterministically.
     /// </summary>
     internal Task WaitUntilFileUpdateQueuedAsync(CancellationToken cancellationToken)
-        => _gate.WaitUntilFileUpdateQueuedAsync(cancellationToken);
+        => _s.Gate.WaitUntilFileUpdateQueuedAsync(cancellationToken);
 
     /// <summary>
     /// Brings the documents at <paramref name="filePath"/> in line with the file on disk.
@@ -355,7 +429,7 @@ public sealed class WorkspaceContext : IDisposable
         ThrowIfDisposed();
         ThrowIfInWriterSection();
 
-        await _gate.EnterFileUpdateAsync(cancellationToken).ConfigureAwait(false);
+        await _s.Gate.EnterFileUpdateAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             ThrowIfDisposed();
@@ -365,7 +439,7 @@ public sealed class WorkspaceContext : IDisposable
                 return DiskSyncOutcome.Missing;
 
             var normalized = PathResolver.NormalizePath(filePath);
-            var sol = _solution;
+            var sol = _s.Solution;
             var tracked = sol.Projects
                 .SelectMany(p => p.Documents)
                 .Where(d => d.FilePath != null &&
@@ -401,12 +475,12 @@ public sealed class WorkspaceContext : IDisposable
             if (!changed)
                 return DiskSyncOutcome.Unchanged;
 
-            _solution = sol;
+            _s.Solution = sol;
             return DiskSyncOutcome.Updated;
         }
         finally
         {
-            _gate.ExitFileUpdate();
+            _s.Gate.ExitFileUpdate();
         }
     }
 
@@ -444,11 +518,11 @@ public sealed class WorkspaceContext : IDisposable
 
         var normalizedProjectPath = PathResolver.NormalizePath(projectFilePath);
 
-        await _gate.EnterFileUpdateAsync(cancellationToken);
+        await _s.Gate.EnterFileUpdateAsync(cancellationToken);
         try
         {
-            if (_disposed) return false;
-            var sol = _solution;
+            if (_s.Disposed) return false;
+            var sol = _s.Solution;
 
             // Existing in-memory projects for this csproj. A multi-targeted project shares
             // its file path across one entry per target framework, matched 1:1 below.
@@ -519,12 +593,12 @@ public sealed class WorkspaceContext : IDisposable
             }
 
             if (changed)
-                _solution = sol;
+                _s.Solution = sol;
             return changed;
         }
         finally
         {
-            _gate.ExitFileUpdate();
+            _s.Gate.ExitFileUpdate();
         }
     }
 
@@ -574,7 +648,7 @@ public sealed class WorkspaceContext : IDisposable
         // Only an MSBuild-backed workspace can be re-evaluated. The framework-only fallback for
         // a standalone .cs file lives in an AdhocWorkspace with no project on disk, so there is
         // nothing to reconcile — its single document is kept current via ApplyExternalTextChangeAsync.
-        if (_workspace is not MSBuildWorkspace)
+        if (_s.Workspace is not MSBuildWorkspace)
             return null;
 
         // A standalone file-based program's wrapper .csproj is materialized only transiently and
@@ -588,7 +662,7 @@ public sealed class WorkspaceContext : IDisposable
         // No ProjectMap: it would mark this project "already known" and short-circuit the
         // load. LoadMetadataForReferencedProjects stays false (the default), so referenced
         // projects surface only as metadata and the result is just this project's info(s).
-        var loader = new MSBuildProjectLoader(_workspace, _msbuildProperties);
+        var loader = new MSBuildProjectLoader(_s.Workspace, _s.MsBuildProperties);
         var evaluated = await loader.LoadProjectInfoAsync(
             projectFilePath, cancellationToken: cancellationToken);
 
@@ -613,7 +687,7 @@ public sealed class WorkspaceContext : IDisposable
         string? deepestProjectFile = null;
         var deepestDirLen = -1;
 
-        foreach (var project in _solution.Projects)
+        foreach (var project in _s.Solution.Projects)
         {
             if (project.FilePath == null) continue;
             var projFile = PathResolver.NormalizePath(project.FilePath);
@@ -702,7 +776,7 @@ public sealed class WorkspaceContext : IDisposable
         if (!string.IsNullOrEmpty(solutionDir))
             dirs.Add(PathResolver.NormalizePath(solutionDir));
 
-        foreach (var project in _solution.Projects)
+        foreach (var project in _s.Solution.Projects)
         {
             var projectDir = Path.GetDirectoryName(project.FilePath ?? "");
             if (!string.IsNullOrEmpty(projectDir))
@@ -806,7 +880,7 @@ public sealed class WorkspaceContext : IDisposable
     /// since changed, been replaced, or been removed on disk — meaning this cached
     /// workspace (and its shadow copies) is stale and should be reloaded.
     /// </summary>
-    internal bool AnalyzerReferencesChangedOnDisk() => StampsChanged(_analyzerStamps);
+    internal bool AnalyzerReferencesChangedOnDisk() => StampsChanged(_s.AnalyzerStamps);
 
     internal static bool StampsChanged(IReadOnlyList<AnalyzerFileStamp> stamps)
     {
@@ -925,7 +999,7 @@ public sealed class WorkspaceContext : IDisposable
         {
             State = WorkspaceState.Operating;
 
-            var changes = newSolution.GetChanges(_solution);
+            var changes = newSolution.GetChanges(_s.Solution);
 
             // Collect all file operations first — their content and encoding included, so
             // every encoding is read before anything is written or deleted — then execute
@@ -959,7 +1033,7 @@ public sealed class WorkspaceContext : IDisposable
                         content,
                         GetEncodingOfReplacedFile(filePath) ?? sourceEncoding ?? SourceFileEncoding.Utf8WithBom,
                         warnings);
-                    fileOperations.Add((filePath, () => _fileWriter.WriteAsync(filePath, content, encoding, cancellationToken), "created"));
+                    fileOperations.Add((filePath, () => _s.FileWriter.WriteAsync(filePath, content, encoding, cancellationToken), "created"));
                     written.Add((docId, encoding));
                     filesCreated.Add(filePath);
                 }
@@ -976,7 +1050,7 @@ public sealed class WorkspaceContext : IDisposable
                     var filePath = doc.FilePath;
                     var text = await doc.GetTextAsync(cancellationToken);
                     var content = text.ToString();
-                    var oldDoc = _solution.GetDocument(docId);
+                    var oldDoc = _s.Solution.GetDocument(docId);
                     var decodedWith = (oldDoc == null ? null : (await oldDoc.GetTextAsync(cancellationToken)).Encoding)
                         ?? text.Encoding;
                     var oldPath = oldDoc?.FilePath;
@@ -985,9 +1059,9 @@ public sealed class WorkspaceContext : IDisposable
                     var encoding = Representable(
                         filePath,
                         content,
-                        _fileWriter.GetEncoding(encodingFrom, decodedWith) ?? decodedWith ?? SourceFileEncoding.Utf8WithBom,
+                        _s.FileWriter.GetEncoding(encodingFrom, decodedWith) ?? decodedWith ?? SourceFileEncoding.Utf8WithBom,
                         warnings);
-                    fileOperations.Add((filePath, () => _fileWriter.WriteAsync(filePath, content, encoding, cancellationToken), "modified"));
+                    fileOperations.Add((filePath, () => _s.FileWriter.WriteAsync(filePath, content, encoding, cancellationToken), "modified"));
                     written.Add((docId, encoding));
                     filesModified.Add(filePath);
                 }
@@ -995,13 +1069,13 @@ public sealed class WorkspaceContext : IDisposable
                 // Handle removed documents
                 foreach (var docId in projectChanges.GetRemovedDocuments())
                 {
-                    var doc = _solution.GetDocument(docId);
+                    var doc = _s.Solution.GetDocument(docId);
                     if (doc?.FilePath == null) continue;
 
                     var filePath = doc.FilePath;
                     fileOperations.Add((filePath, () =>
                     {
-                        _fileWriter.Delete(filePath);
+                        _s.FileWriter.Delete(filePath);
                         return Task.CompletedTask;
                     }, "deleted"));
                     filesDeleted.Add(filePath);
@@ -1020,8 +1094,8 @@ public sealed class WorkspaceContext : IDisposable
             }
 
             var committed = await LabelEncodingsAsync(newSolution, written);
-            _solution = committed;
-            _writerBase = committed;
+            _s.Solution = committed;
+            _s.WriterBase = committed;
             State = WorkspaceState.Ready;
 
             return new CommitResult
@@ -1057,7 +1131,7 @@ public sealed class WorkspaceContext : IDisposable
     {
         var document = GetDocumentByPath(filePath);
         var decodedWith = document == null ? null : (await document.GetTextAsync(cancellationToken)).Encoding;
-        return _fileWriter.GetEncoding(filePath, decodedWith);
+        return _s.FileWriter.GetEncoding(filePath, decodedWith);
     }
 
     /// <summary>
@@ -1068,7 +1142,7 @@ public sealed class WorkspaceContext : IDisposable
     {
         try
         {
-            return _fileWriter.GetEncoding(filePath);
+            return _s.FileWriter.GetEncoding(filePath);
         }
         catch (InvalidDataException)
         {
@@ -1130,15 +1204,17 @@ public sealed class WorkspaceContext : IDisposable
     /// <inheritdoc />
     public void Dispose()
     {
-        if (_cacheOwned)
+        if (_lease != null)
         {
-            // Lease release: cache owns lifetime; signal it so it can update
-            // the last-access timestamp and ref count. The operation lease is
-            // exited first so any queued file update can start immediately.
-            _gate.ExitOperation();
-            _onLeaseReleased?.Invoke();
+            // A caller's handle on a cached workspace: release its lease (once). The cache
+            // owns the workspace's lifetime.
+            _lease.Release();
             return;
         }
+
+        // The cache's own reference to a workspace it owns: the cache disposes it.
+        if (_s.CacheOwned)
+            return;
 
         DisposeOwned();
     }
@@ -1150,22 +1226,22 @@ public sealed class WorkspaceContext : IDisposable
     /// </summary>
     internal void DisposeOwned()
     {
-        if (_disposed) return;
-        _disposed = true;
+        if (_s.Disposed) return;
+        _s.Disposed = true;
         State = WorkspaceState.Disposed;
-        // _writerLock is left to the GC: it never allocates a wait handle, and a section still
+        // _s.WriterLock is left to the GC: it never allocates a wait handle, and a section still
         // running (on an uncached context disposed under it) must be able to release it.
-        _workspace.Dispose();
+        _s.Workspace.Dispose();
 
         // Dispose after the workspace so it has already released its references to
         // the shadow-copied analyzer assemblies; this unloads the dedicated load
         // context and prunes the temp copies.
-        _analyzerAssemblyLoader?.Dispose();
+        _s.AnalyzerAssemblyLoader?.Dispose();
     }
 
     private void ThrowIfDisposed()
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(_s.Disposed, this);
     }
 }
 

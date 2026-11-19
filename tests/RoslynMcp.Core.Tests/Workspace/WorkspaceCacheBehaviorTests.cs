@@ -69,10 +69,12 @@ public sealed class WorkspaceCacheBehaviorTests
         Assert.True(wallClock.Elapsed < ParallelDeadline,
             $"Parallel calls took {wallClock.Elapsed}, expected < {ParallelDeadline}.");
 
-        // Every caller should observe the same underlying context instance.
+        // Every caller should observe the same underlying workspace, each through a handle
+        // of its own (the lease it releases).
         var firstContext = contexts[0];
         foreach (var c in contexts)
-            Assert.Same(firstContext, c);
+            Assert.Same(firstContext.Workspace, c.Workspace);
+        Assert.Equal(ParallelCallers, contexts.Distinct().Count());
     }
 
     [Fact]
@@ -191,7 +193,7 @@ public sealed class WorkspaceCacheBehaviorTests
         WorkspaceContext second;
         using (var ctx = await provider.CreateContextAsync(working.SolutionPath, ct))
             second = ctx;
-        Assert.Same(first, second);
+        Assert.Same(first.Workspace, second.Workspace);
         Assert.Equal(1, missCount);
     }
 
@@ -254,7 +256,7 @@ public sealed class WorkspaceCacheBehaviorTests
 
         Assert.True(tracked, "A newly created .cs file should be added to the workspace via project re-evaluation.");
         Assert.Equal(1, missCount);   // added incrementally — never a full reload
-        Assert.Same(first, last);     // same cached workspace throughout
+        Assert.Same(first.Workspace, last.Workspace);     // same cached workspace throughout
     }
 
     [Fact]
@@ -330,7 +332,7 @@ public sealed class WorkspaceCacheBehaviorTests
 
         Assert.True(visible, "External edit made shortly after a commit must be reflected in the workspace.");
         Assert.Equal(1, missCount);          // reflected incrementally — never reloaded
-        Assert.Same(first, last);            // same cached workspace throughout
+        Assert.Same(first.Workspace, last.Workspace);     // same cached workspace throughout
     }
 
     [Fact]
@@ -388,7 +390,7 @@ public sealed class WorkspaceCacheBehaviorTests
 
         Assert.False(stillTracked, "A deleted .cs file must be removed from the in-memory solution.");
         Assert.Equal(1, missCount);          // removed incrementally — never reloaded
-        Assert.Same(first, last);            // same cached workspace throughout
+        Assert.Same(first.Workspace, last.Workspace);     // same cached workspace throughout
     }
 
     [Fact]

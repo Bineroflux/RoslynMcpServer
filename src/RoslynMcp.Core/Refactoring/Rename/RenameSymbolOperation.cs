@@ -88,13 +88,15 @@ public sealed class RenameSymbolOperation : RefactoringOperationBase<RenameSymbo
             RenameFile: false // We handle file rename separately
         );
 
-        // Perform the rename
+        // Perform the rename. The renamer renames each target framework's document of a
+        // multi-targeted file on its own; merging gives the file the renames of every #if branch.
         var newSolution = await Renamer.RenameSymbolAsync(
             Context.Solution,
             symbol,
             options,
             @params.NewName,
             cancellationToken);
+        newSolution = await LinkedDocuments.MergeRenamesAsync(Context.Solution, newSolution, document.Id, cancellationToken);
 
         // Handle file rename for types. The document is repointed at its new path
         // *before* the commit, so the commit writes the renamed source straight to the
@@ -125,7 +127,9 @@ public sealed class RenameSymbolOperation : RefactoringOperationBase<RenameSymbo
                 }
                 else if (newSolution.GetDocument(document.Id) != null)
                 {
-                    newSolution = newSolution.WithDocumentFilePath(document.Id, newFilePath);
+                    // Every target framework's document of the file moves with it.
+                    foreach (var id in newSolution.GetDocumentIdsWithFilePath(document.FilePath))
+                        newSolution = newSolution.WithDocumentFilePath(id, newFilePath);
                     renamedFile = newFilePath;
                 }
             }
@@ -251,11 +255,13 @@ public sealed class RenameSymbolOperation : RefactoringOperationBase<RenameSymbo
         string? deletedFile,
         string? createdFile)
     {
+        // A multi-targeted file is written once per target framework's document.
+        var modified = commitResult.FilesModified.Distinct(PathResolver.PathComparer);
         if (deletedFile == null || createdFile == null)
         {
             return new FileChanges
             {
-                FilesModified = commitResult.FilesModified,
+                FilesModified = modified.ToList(),
                 FilesCreated = commitResult.FilesCreated,
                 FilesDeleted = commitResult.FilesDeleted
             };
@@ -263,7 +269,7 @@ public sealed class RenameSymbolOperation : RefactoringOperationBase<RenameSymbo
 
         return new FileChanges
         {
-            FilesModified = commitResult.FilesModified
+            FilesModified = modified
                 .Where(f => !PathResolver.PathsEqual(f, createdFile))
                 .ToList(),
             FilesCreated = commitResult.FilesCreated

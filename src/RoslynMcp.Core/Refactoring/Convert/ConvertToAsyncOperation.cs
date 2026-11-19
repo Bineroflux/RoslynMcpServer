@@ -1,4 +1,3 @@
-using System.Text;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -369,7 +368,7 @@ public sealed class ConvertToAsyncOperation : RefactoringOperationBase<ConvertTo
             new SymbolRenameOptions(RenameOverloads: false, RenameInStrings: false, RenameInComments: false, RenameFile: false),
             newName,
             cancellationToken);
-        renamed = await MergeLinkedDocumentsAsync(solution, renamed, document.Id, cancellationToken);
+        renamed = await LinkedDocuments.MergeRenamesAsync(solution, renamed, document.Id, cancellationToken);
 
         var renamedDocument = renamed.GetDocument(document.Id)!;
         var root = await renamedDocument.GetSyntaxRootAsync(cancellationToken);
@@ -385,55 +384,6 @@ public sealed class ConvertToAsyncOperation : RefactoringOperationBase<ConvertTo
                 candidate.Arity == method.Arity &&
                 candidate.Parameters.Select(p => p.Type.ToDisplayString()).SequenceEqual(parameterTypes))
             ?? throw new RefactoringException(ErrorCodes.RoslynError, $"Could not find '{newName}' after renaming it."));
-    }
-
-    /// <summary>
-    /// Gives the documents of a file that several projects compile (one per target framework) one
-    /// text with all of their renames. The renamer renames each of them on its own, so a reference
-    /// in an <c>#if</c> branch that only one of them compiles is renamed in that document only.
-    /// A line takes the first changed version among the documents, the declaring one first.
-    /// </summary>
-    private static async Task<Solution> MergeLinkedDocumentsAsync(
-        Solution original,
-        Solution renamed,
-        DocumentId declaringDocument,
-        CancellationToken cancellationToken)
-    {
-        var result = renamed;
-        var paths = new HashSet<string>(PathResolver.PathComparer);
-        foreach (var id in ChangedDocuments(original, renamed))
-        {
-            if (renamed.GetDocument(id)?.FilePath is not { } path || !paths.Add(path))
-                continue;
-
-            var ids = renamed.GetDocumentIdsWithFilePath(path).OrderBy(d => d == declaringDocument ? 0 : 1).ToList();
-            if (ids.Count < 2 || original.GetDocument(ids[0]) is not { } originalDocument)
-                continue;
-
-            var originalText = await originalDocument.GetTextAsync(cancellationToken);
-            var versions = new List<SourceText>();
-            foreach (var linked in ids)
-                versions.Add(await renamed.GetDocument(linked)!.GetTextAsync(cancellationToken));
-
-            // A rename changes no line breaks; anything else is left as the renamer made it.
-            if (versions.All(v => v.ContentEquals(versions[0])) || versions.Any(v => v.Lines.Count != originalText.Lines.Count))
-                continue;
-
-            var merged = new StringBuilder();
-            foreach (var line in originalText.Lines)
-            {
-                var before = originalText.ToString(line.SpanIncludingLineBreak);
-                merged.Append(versions
-                    .Select(v => v.ToString(v.Lines[line.LineNumber].SpanIncludingLineBreak))
-                    .FirstOrDefault(after => after != before) ?? before);
-            }
-
-            var text = SourceText.From(merged.ToString(), originalText.Encoding, originalText.ChecksumAlgorithm);
-            foreach (var linked in ids)
-                result = result.WithDocumentText(linked, text);
-        }
-
-        return result;
     }
 
     /// <summary>

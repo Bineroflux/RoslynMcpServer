@@ -27,7 +27,7 @@ public sealed class MoveTypeToNamespaceTool : IToolHandler
     public string Name => "move_type_to_namespace";
 
     /// <inheritdoc />
-    public string Description => "Change the namespace of a C# type. Updates all using directives and qualified references.";
+    public string Description => "Change the namespace of a C# type. Updates all using directives and qualified references. The type must be alone in its namespace declaration (otherwise refused with 3130: run move_type_to_file first).";
 
     /// <inheritdoc />
     public object InputSchema => new

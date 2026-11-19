@@ -376,7 +376,9 @@ public static class ErrorCodes
 
     /// <summary>
     /// A namespace declaration whose enclosing block would have to change also declares other
-    /// members, so the rename cannot be written without splitting the block.
+    /// members, so the rename cannot be written without splitting the block (rename_namespace),
+    /// or the type whose namespace is to change shares its namespace declaration with other
+    /// members, which would move along (move_type_to_namespace; move_type_to_file first).
     /// </summary>
     public const string NamespaceBlockShared = "3130";
 

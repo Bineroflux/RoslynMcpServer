@@ -122,7 +122,12 @@ public sealed class MoveTypeToNamespaceFileLocationTests
             "no-project-file" => null,
             _ => SdkProject
         };
-        var widget = scenario == "second-type" ? Widget + "\npublic enum WidgetKind { Small }\n" : Widget;
+        // A second type in the type's own namespace declaration refuses the namespace change
+        // (MoveTypeToNamespaceSharedDeclarationTests); in a declaration of its own it stays put,
+        // and so does the file.
+        var widget = scenario == "second-type"
+            ? "namespace App\n{\n    public class Widget\n    {\n    }\n}\n\nnamespace App\n{\n    public enum WidgetKind { Small }\n}\n"
+            : Widget;
         using var ws = CreateWorkspace(project, widget);
         if (scenario == "disabled-items-in-directory-build-props")
             File.WriteAllText(ws.PathOf("Directory.Build.props"), "<Project><PropertyGroup><EnableDefaultItems>false</EnableDefaultItems></PropertyGroup></Project>");
@@ -138,7 +143,9 @@ public sealed class MoveTypeToNamespaceFileLocationTests
         Assert.True(result.Success);
         Assert.Equal("PARTIAL_SUCCESS", result.Error?.Code);
         Assert.Contains(reason, result.Error!.Message);
-        Assert.Contains($"namespace {targetNamespace};", ws.ReadFile("Widget.cs"));
+        Assert.Contains(scenario == "second-type" ? $"namespace {targetNamespace}\n{{" : $"namespace {targetNamespace};", ws.ReadFile("Widget.cs"));
+        if (scenario == "second-type")
+            Assert.Contains("namespace App\n{\n    public enum WidgetKind", ws.ReadFile("Widget.cs"));
         Assert.Empty(result.Changes!.FilesCreated);
         Assert.Empty(result.Changes.FilesDeleted);
         if (scenario == "target-exists")

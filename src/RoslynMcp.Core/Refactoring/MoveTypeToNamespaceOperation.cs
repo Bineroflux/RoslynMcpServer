@@ -231,42 +231,36 @@ public sealed class MoveTypeToNamespaceOperation : RefactoringOperationBase<Move
                 "Cannot move type without namespace declaration. Type must be in a namespace.");
         }
 
-        // Check if this is the only type in the namespace
-        var typesInNamespace = namespaceDecl.Members.OfType<TypeDeclarationSyntax>().ToList();
-
-        SyntaxNode newRoot;
-        if (typesInNamespace.Count == 1)
+        // The namespace changes by renaming the declaration around the type, which changes it for
+        // everything that declaration declares: another type, an enum, a delegate or a nested
+        // namespace would move along, and the code using them would no longer compile.
+        var others = namespaceDecl.Members.Where(m => !ReferenceEquals(m, resolution.Declaration)).ToList();
+        if (others.Count > 0)
         {
-            // Simply rename the namespace
-            var newNameNode = SyntaxFactory.ParseName(newNamespace);
-
-            if (namespaceDecl is FileScopedNamespaceDeclarationSyntax fileScopedNs)
-            {
-                var newNs = fileScopedNs.WithName(newNameNode);
-                newRoot = root.ReplaceNode(namespaceDecl, newNs);
-            }
-            else if (namespaceDecl is NamespaceDeclarationSyntax blockNs)
-            {
-                var newNs = blockNs.WithName(newNameNode);
-                newRoot = root.ReplaceNode(namespaceDecl, newNs);
-            }
-            else
-            {
-                return solution;
-            }
-        }
-        else
-        {
-            // Multiple types - need to extract this one
-            // For now, we'll update the entire namespace
-            // A more sophisticated implementation would split the file
+            var names = string.Join(", ", others.Take(3).Select(DescribeMember)) + (others.Count > 3 ? ", ..." : "");
             throw new RefactoringException(
-                ErrorCodes.RoslynError,
-                "File contains multiple types. Move the type to its own file first.");
+                ErrorCodes.NamespaceBlockShared,
+                $"'{resolution.Symbol.Name}' shares its namespace declaration in '{Path.GetFileName(document.FilePath)}' " +
+                $"with {names}, which would change namespace with it. Move '{resolution.Symbol.Name}' to a file of its own " +
+                "with move_type_to_file first, then change its namespace.",
+                suggestions: [$"Run move_type_to_file for '{resolution.Symbol.Name}', then move_type_to_namespace on the new file"]);
         }
+
+        // The new name keeps the old one's trivia: in a block namespace the line break before `{`.
+        var newNameNode = SyntaxFactory.ParseName(newNamespace).WithTriviaFrom(namespaceDecl.Name);
+        var newRoot = root.ReplaceNode(namespaceDecl, namespaceDecl.WithName(newNameNode));
 
         return solution.WithDocumentSyntaxRoot(document.Id, newRoot);
     }
+
+    /// <summary>How a member sharing the moved type's namespace declaration is named in the refusal.</summary>
+    private static string DescribeMember(MemberDeclarationSyntax member) => member switch
+    {
+        BaseTypeDeclarationSyntax type => $"'{type.Identifier.Text}'",
+        DelegateDeclarationSyntax @delegate => $"'{@delegate.Identifier.Text}'",
+        BaseNamespaceDeclarationSyntax nested => $"namespace '{nested.Name}'",
+        _ => member.Kind().ToString(),
+    };
 
     private async Task<(Document, int added, int removed)> UpdateUsingDirectivesAsync(
         Document document,

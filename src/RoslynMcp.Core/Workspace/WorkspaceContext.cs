@@ -4,7 +4,9 @@ using Microsoft.CodeAnalysis.Diagnostics;
 using Microsoft.CodeAnalysis.MSBuild;
 using Microsoft.CodeAnalysis.Text;
 using RoslynMcp.Contracts.Enums;
+using RoslynMcp.Contracts.Errors;
 using RoslynMcp.Core.FileSystem;
+using RoslynMcp.Core.Refactoring;
 using RoslynMcp.Core.Resolution;
 
 namespace RoslynMcp.Core.Workspace;
@@ -16,8 +18,10 @@ namespace RoslynMcp.Core.Workspace;
 /// When created directly (non-cached), callers must <see cref="Dispose"/> when done.
 /// When obtained from <see cref="WorkspaceCache"/>, <see cref="Dispose"/> releases a
 /// lease (ref count) and the cache owns the actual workspace lifetime. Concurrent
-/// read access to <see cref="Solution"/> is safe; mutations (commits, external text
-/// updates) are serialized via an internal lock.
+/// read access to <see cref="Solution"/> is safe. Mutations are serialized two ways:
+/// refactorings run as the single writer (<see cref="RunWriterAsync{T}"/>), and
+/// file-watcher updates take the gate's exclusive file-update lease, which no operation
+/// holds at the same time.
 /// </remarks>
 public sealed class WorkspaceContext : IDisposable
 {
@@ -27,8 +31,25 @@ public sealed class WorkspaceContext : IDisposable
     private readonly IReadOnlyList<AnalyzerFileStamp> _analyzerStamps;
     private readonly ImmutableDictionary<string, string> _msbuildProperties;
     private readonly FileBasedProgramInfo? _fileBasedProgram;
-    private readonly SemaphoreSlim _commitLock = new(1, 1);
     private readonly WorkspaceOperationGate _gate = new();
+
+    // The writer section (RunWriterAsync): one refactoring at a time reads the solution,
+    // computes its change and commits it. Taken inside an operation lease, never the other
+    // way round, and never waited for by a file update.
+    private readonly SemaphoreSlim _writerLock = new(1, 1);
+
+    // The running writer section (a fresh object per section; null when none runs), and the
+    // section each async flow belongs to. A commit or UpdateSolution is accepted only from the
+    // flow of the running section, so neither a caller outside one nor work an earlier section
+    // left behind can race it.
+    private object? _currentWriterSection;
+    private readonly AsyncLocal<object?> _writerSectionOfFlow = new();
+
+    // The snapshot the running writer section builds on: the solution when it started, moved
+    // on by its own commits and UpdateSolution calls; null when no section runs. Touched only
+    // by the section holding _writerLock.
+    private Solution? _writerBase;
+
     private Solution _solution;
     private bool _disposed;
     private Action? _onLeaseReleased;
@@ -134,12 +155,117 @@ public sealed class WorkspaceContext : IDisposable
     }
 
     /// <summary>
-    /// Updates the solution with a new snapshot.
+    /// Updates the solution with a new snapshot. Only inside <see cref="RunWriterAsync{T}"/>,
+    /// with a snapshot derived from <see cref="Solution"/> as read inside that section.
     /// </summary>
     /// <param name="newSolution">New solution snapshot.</param>
+    /// <exception cref="InvalidOperationException">Called outside a writer section.</exception>
+    /// <exception cref="RefactoringException">
+    /// <see cref="ErrorCodes.WorkspaceBusy"/>: the solution is no longer the one the section
+    /// started from (or last set).
+    /// </exception>
     public void UpdateSolution(Solution newSolution)
     {
+        EnsureWriterBaseIsCurrent(nameof(UpdateSolution));
         _solution = newSolution;
+        _writerBase = newSolution;
+    }
+
+    /// <summary>
+    /// Runs <paramref name="body"/> as the workspace's only writer: refactorings run their
+    /// whole read-compute-commit here, so none builds on a snapshot another one is about to
+    /// replace, or commits over another one's commit. Queries need not; they read immutable
+    /// snapshots. <see cref="CommitChangesAsync(Solution, string?, CancellationToken)"/> and
+    /// <see cref="UpdateSolution"/> only work inside a section.
+    /// </summary>
+    /// <remarks>
+    /// A cached context's caller holds an operation lease while it waits here, which keeps
+    /// file updates out until every waiting writer is done; so the body must never wait for
+    /// a file update (<see cref="SyncDocumentFromDiskAsync"/> and
+    /// <see cref="ReconcileProjectDocumentsAsync"/> refuse to run inside a section) or for
+    /// another operation. Not re-entrant. The section ends, and the lock is released, when the
+    /// body completes, throws or is cancelled.
+    /// </remarks>
+    public async Task<T> RunWriterAsync<T>(
+        Func<CancellationToken, Task<T>> body,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(body);
+        ThrowIfDisposed();
+        if (FlowRunsWriterSection())
+            throw new InvalidOperationException(
+                "This flow is already inside the workspace's writer section, which is not re-entrant.");
+
+        await _writerLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        var section = new object();
+        try
+        {
+            ThrowIfDisposed();
+            _writerBase = _solution;
+            Volatile.Write(ref _currentWriterSection, section);
+            // Flows into the body (and whatever it starts); this method's caller keeps its own
+            // value, since an async method restores the caller's context when it returns.
+            _writerSectionOfFlow.Value = section;
+            return await body(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            Volatile.Write(ref _currentWriterSection, null);
+            _writerBase = null;
+            _writerLock.Release();
+        }
+    }
+
+    /// <inheritdoc cref="RunWriterAsync{T}"/>
+    public Task RunWriterAsync(
+        Func<CancellationToken, Task> body,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(body);
+        return RunWriterAsync<bool>(
+            async ct =>
+            {
+                await body(ct).ConfigureAwait(false);
+                return true;
+            },
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// Fails unless the calling flow runs a writer section whose snapshot is still
+    /// <see cref="Solution"/>. Inside a section nothing else replaces the solution, so a
+    /// mismatch means a mutation bypassed the section; committing a change computed against
+    /// the section's snapshot would then silently revert it.
+    /// </summary>
+    private void EnsureWriterBaseIsCurrent(string action)
+    {
+        if (!FlowRunsWriterSection() || _writerBase is null)
+            throw new InvalidOperationException(
+                $"{action} must run inside the workspace's writer section (RunWriterAsync).");
+
+        if (!ReferenceEquals(_writerBase, _solution))
+            throw new RefactoringException(
+                ErrorCodes.WorkspaceBusy,
+                "The workspace changed while this refactoring was computed, so it was not applied " +
+                "(applying it would have reverted that change). Nothing was written; run it again.");
+    }
+
+    /// <summary>Whether the calling flow belongs to the writer section that is running now.</summary>
+    private bool FlowRunsWriterSection()
+    {
+        var section = _writerSectionOfFlow.Value;
+        return section != null && ReferenceEquals(section, Volatile.Read(ref _currentWriterSection));
+    }
+
+    /// <summary>
+    /// A file update waits until no operation holds a lease, and a writer section runs inside
+    /// one: waiting for an update from inside a section would never end.
+    /// </summary>
+    private void ThrowIfInWriterSection()
+    {
+        if (FlowRunsWriterSection())
+            throw new InvalidOperationException(
+                "A filesystem-driven update cannot run inside the workspace's writer section; it would wait for the section's own operation lease.");
     }
 
     /// <summary>
@@ -222,6 +348,7 @@ public sealed class WorkspaceContext : IDisposable
         CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
+        ThrowIfInWriterSection();
 
         await _gate.EnterFileUpdateAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -298,6 +425,7 @@ public sealed class WorkspaceContext : IDisposable
         CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
+        ThrowIfInWriterSection();
 
         // Evaluate outside the gate — an MSBuild evaluation must not block operations.
         var freshInfos = await EvaluateProjectAsync(projectFilePath, cancellationToken);
@@ -714,9 +842,8 @@ public sealed class WorkspaceContext : IDisposable
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>List of files that were written.</returns>
     /// <remarks>
-    /// This method uses a semaphore to prevent race conditions when multiple
-    /// commit operations are attempted concurrently on the same workspace context.
-    /// Files are written sequentially to avoid file locking issues.
+    /// Only inside <see cref="RunWriterAsync{T}"/>, which serializes commits; see the other
+    /// overload. Files are written sequentially to avoid file locking issues.
     /// </remarks>
     public Task<CommitResult> CommitChangesAsync(
         Solution newSolution,
@@ -729,18 +856,31 @@ public sealed class WorkspaceContext : IDisposable
     /// an added document that of <paramref name="newFilesEncodingFrom"/> (e.g. the file a
     /// type was split off from). Encodings are read before anything is written or deleted.
     /// </summary>
-    /// <param name="newSolution">Solution with changes to commit.</param>
+    /// <param name="newSolution">
+    /// Solution with changes to commit, derived from <see cref="Solution"/> as read inside the
+    /// running writer section.
+    /// </param>
     /// <param name="newFilesEncodingFrom">Existing file whose encoding added documents take.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
+    /// <remarks>
+    /// The change is everything that differs between <paramref name="newSolution"/> and the
+    /// current solution, so it must be computed from the current solution: built on an older
+    /// snapshot, it would write that snapshot's text over every edit committed since. Hence
+    /// commits run only inside <see cref="RunWriterAsync{T}"/>, and one is refused when the
+    /// solution is no longer the snapshot its section builds on.
+    /// </remarks>
+    /// <exception cref="InvalidOperationException">Called outside a writer section.</exception>
+    /// <exception cref="RefactoringException">
+    /// <see cref="ErrorCodes.WorkspaceBusy"/>: the solution changed since the section started
+    /// (or last committed); nothing was written.
+    /// </exception>
     public async Task<CommitResult> CommitChangesAsync(
         Solution newSolution,
         string? newFilesEncodingFrom,
         CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
-
-        // Acquire lock to prevent concurrent commits
-        await _commitLock.WaitAsync(cancellationToken);
+        EnsureWriterBaseIsCurrent(nameof(CommitChangesAsync));
 
         var filesModified = new List<string>();
         var filesCreated = new List<string>();
@@ -821,6 +961,7 @@ public sealed class WorkspaceContext : IDisposable
             }
 
             _solution = newSolution;
+            _writerBase = newSolution;
             State = WorkspaceState.Ready;
 
             return new CommitResult
@@ -842,10 +983,6 @@ public sealed class WorkspaceContext : IDisposable
                 FilesDeleted = filesDeleted,
                 Error = ex.Message
             };
-        }
-        finally
-        {
-            _commitLock.Release();
         }
     }
 
@@ -875,7 +1012,8 @@ public sealed class WorkspaceContext : IDisposable
         if (_disposed) return;
         _disposed = true;
         State = WorkspaceState.Disposed;
-        _commitLock.Dispose();
+        // _writerLock is left to the GC: it never allocates a wait handle, and a section still
+        // running (on an uncached context disposed under it) must be able to release it.
         _workspace.Dispose();
 
         // Dispose after the workspace so it has already released its references to

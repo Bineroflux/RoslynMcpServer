@@ -194,7 +194,7 @@ public sealed class GetDiagnosticsFilterTests
         // A generator that throws makes App report RMCP0002 whenever App is processed.
         using var ws = CreateAppAndLib();
         var app = ws.Context.Solution.Projects.Single(p => p.Name == "App");
-        ws.Context.UpdateSolution(ws.Context.Solution.WithProjectAnalyzerReferences(app.Id, [new ThrowingAnalyzerReference()]));
+        await ws.Context.UpdateSolutionInWriterAsync(s => s.WithProjectAnalyzerReferences(app.Id, [new ThrowingAnalyzerReference()]), TestContext.Current.CancellationToken);
 
         var lib = await GetAsync(ws, new GetDiagnosticsParams { ProjectPath = ws.ProjectPathOf("Lib") });
         var appOnly = await GetAsync(ws, new GetDiagnosticsParams { ProjectPath = ws.ProjectPathOf("App"), DiagnosticIds = ["RMCP0002"] });

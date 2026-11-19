@@ -34,7 +34,8 @@ public sealed class MoveTypeToFileOperation
     }
 
     /// <summary>
-    /// Executes the move operation.
+    /// Executes the move operation. Runs as the workspace's single writer
+    /// (<see cref="WorkspaceContext.RunWriterAsync{T}"/>), from resolving the type to the commit.
     /// </summary>
     /// <param name="params">Operation parameters.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
@@ -42,6 +43,21 @@ public sealed class MoveTypeToFileOperation
     public async Task<RefactoringResult> ExecuteAsync(
         MoveTypeToFileParams @params,
         CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            return await _context.RunWriterAsync(ct => ExecuteCoreAsync(@params, ct), cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            // Cancelled while waiting for another refactoring of this workspace to finish.
+            throw new RefactoringException(ErrorCodes.Timeout, "Operation was cancelled.");
+        }
+    }
+
+    private async Task<RefactoringResult> ExecuteCoreAsync(
+        MoveTypeToFileParams @params,
+        CancellationToken cancellationToken)
     {
         var operationId = Guid.NewGuid();
         var stopwatch = Stopwatch.StartNew();

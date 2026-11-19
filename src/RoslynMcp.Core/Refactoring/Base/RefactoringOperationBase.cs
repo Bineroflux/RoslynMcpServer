@@ -51,7 +51,13 @@ public abstract class RefactoringOperationBase<TParams> : IRefactoringOperation<
         try
         {
             ValidateParams(@params);
-            var result = await ExecuteCoreAsync(operationId, @params, cancellationToken);
+
+            // Everything that reads the solution — and the commit and file moves that follow —
+            // runs as the workspace's single writer, so a concurrent refactoring can neither
+            // build on a snapshot this one replaces nor commit over it. Previews take the writer
+            // too: they compute against the snapshot a commit would build on.
+            var result = await Context.RunWriterAsync(
+                ct => ExecuteCoreAsync(operationId, @params, ct), cancellationToken);
             stopwatch.Stop();
             return WithTiming(result, stopwatch.ElapsedMilliseconds, workspaceLoadMs);
         }

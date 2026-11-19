@@ -231,9 +231,10 @@ public sealed class FindUnusedSymbolsTests
             }
             """;
         using var ws = TestWorkspace.Create(("Program.cs", source));
-        ws.Context.UpdateSolution(ws.Context.Solution.WithProjectCompilationOptions(
-            ws.Context.Solution.ProjectIds[0],
-            new Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions(Microsoft.CodeAnalysis.OutputKind.ConsoleApplication)));
+        await ws.Context.UpdateSolutionInWriterAsync(s => s.WithProjectCompilationOptions(
+            s.ProjectIds[0],
+            new Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions(Microsoft.CodeAnalysis.OutputKind.ConsoleApplication)),
+            TestContext.Current.CancellationToken);
 
         var result = await FindAsync(ws, new FindUnusedSymbolsParams());
 

@@ -37,8 +37,8 @@ public sealed class WorkspaceReconciliationOrderingTests
             await ctx.WaitUntilFileUpdateQueuedAsync(ct);
 
             var document = ctx.GetDocumentByPath(path)!;
-            var commit = await ctx.CommitChangesAsync(
-                ctx.Solution.WithDocumentText(document.Id, SourceText.From(committed)), ct);
+            var commit = await ctx.CommitInWriterAsync(
+                s => s.WithDocumentText(document.Id, SourceText.From(committed)), ct);
             Assert.True(commit.Success, commit.Error);
             Assert.False(sync.IsCompleted, "The update must wait while the operation holds its lease.");
         }
@@ -171,11 +171,9 @@ public sealed class WorkspaceReconciliationOrderingTests
             Assert.False(reconcile.IsCompleted, "The re-evaluation must wait for the operation's lease.");
 
             // The operation creates a file (a commit writes disk and solution) ...
-            var solution = ctx.Solution;
-            var projectId = solution.ProjectIds.Single();
-            var commit = await ctx.CommitChangesAsync(
-                solution.AddDocument(
-                    DocumentId.CreateNewId(projectId),
+            var commit = await ctx.CommitInWriterAsync(
+                s => s.AddDocument(
+                    DocumentId.CreateNewId(s.ProjectIds.Single()),
                     "Created.cs",
                     SourceText.From("namespace TestProject;\n\ninternal sealed class Created\n{\n}\n"),
                     filePath: created),
@@ -185,10 +183,14 @@ public sealed class WorkspaceReconciliationOrderingTests
             // ... and moves another one, repointing its document (what a namespace move does).
             Directory.CreateDirectory(Path.GetDirectoryName(moveTo)!);
             File.Move(moveFrom, moveTo);
-            solution = ctx.Solution;
-            foreach (var documentId in solution.GetDocumentIdsWithFilePath(moveFrom))
-                solution = solution.WithDocumentFilePath(documentId, moveTo);
-            ctx.UpdateSolution(solution);
+            await ctx.UpdateSolutionInWriterAsync(
+                s =>
+                {
+                    foreach (var documentId in s.GetDocumentIdsWithFilePath(moveFrom))
+                        s = s.WithDocumentFilePath(documentId, moveTo);
+                    return s;
+                },
+                ct);
         }
         finally
         {

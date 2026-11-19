@@ -173,9 +173,8 @@ public sealed class WorkspaceCacheBehaviorTests
             var text = await doc!.GetTextAsync(ct);
             var newText = text.ToString() +
                 $"\n\nnamespace TestProject.Models {{ public class {markerClassName} {{ }} }}\n";
-            var newSolution = ctx.Solution.WithDocumentText(doc.Id, SourceText.From(newText));
-
-            var commit = await ctx.CommitChangesAsync(newSolution, ct);
+            var commit = await ctx.CommitInWriterAsync(
+                s => s.WithDocumentText(doc.Id, SourceText.From(newText)), ct);
             Assert.True(commit.Success, $"Commit failed: {commit.Error}");
         }
 
@@ -296,8 +295,8 @@ public sealed class WorkspaceCacheBehaviorTests
             var text = (await doc!.GetTextAsync(ct)).ToString();
             var newText = text +
                 $"\n\nnamespace TestProject.Models {{ public class {commitMarker} {{ }} }}\n";
-            var commit = await ctx.CommitChangesAsync(
-                ctx.Solution.WithDocumentText(doc.Id, SourceText.From(newText)), ct);
+            var commit = await ctx.CommitInWriterAsync(
+                s => s.WithDocumentText(doc.Id, SourceText.From(newText)), ct);
             Assert.True(commit.Success, $"Commit failed: {commit.Error}");
         }
 

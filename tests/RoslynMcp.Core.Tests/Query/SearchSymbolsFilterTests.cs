@@ -163,7 +163,7 @@ public sealed class SearchSymbolsFilterTests
         // Compiling Other throws once a generator that can't be enumerated is attached to it.
         using var ws = CreateWorkspace();
         var other = ws.Context.Solution.Projects.Single(p => p.Name == "Other");
-        ws.Context.UpdateSolution(ws.Context.Solution.WithProjectAnalyzerReferences(other.Id, [new ThrowingAnalyzerReference()]));
+        await ws.Context.UpdateSolutionInWriterAsync(s => s.WithProjectAnalyzerReferences(other.Id, [new ThrowingAnalyzerReference()]), TestContext.Current.CancellationToken);
 
         var result = await SearchAsync(ws, new SearchSymbolsParams { Query = "Widget", ExactMatch = true, ProjectPath = ws.ProjectPathOf("Core") });
         await Assert.ThrowsAsync<RefactoringException>(() => new SearchSymbolsOperation(ws.Context).ExecuteAsync(

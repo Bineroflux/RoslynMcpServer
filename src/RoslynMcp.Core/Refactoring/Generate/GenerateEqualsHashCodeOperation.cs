@@ -123,11 +123,11 @@ public sealed class GenerateEqualsHashCodeOperation : RefactoringOperationBase<G
         ExpressionSyntax? comparison = null;
         foreach (var member in members)
         {
-            var left = SyntaxFactory.IdentifierName(member.Name);
+            var left = IdentifierNames.Name(member.Name);
             var right = SyntaxFactory.MemberAccessExpression(
                 SyntaxKind.SimpleMemberAccessExpression,
                 SyntaxFactory.IdentifierName("other"),
-                SyntaxFactory.IdentifierName(member.Name));
+                IdentifierNames.Name(member.Name));
 
             var memberType = EqualityMemberCollector.GetMemberType(member);
             ExpressionSyntax eq;
@@ -136,7 +136,7 @@ public sealed class GenerateEqualsHashCodeOperation : RefactoringOperationBase<G
             {
                 // EqualityComparer<T>.Default.Equals(field, other.field)
                 var comparer = comparerType == null
-                    ? SyntaxFactory.ParseTypeName($"System.Collections.Generic.EqualityComparer<{memberType.ToDisplayString()}>")
+                    ? SyntaxFactory.ParseTypeName($"global::System.Collections.Generic.EqualityComparer<{memberType.ToDisplayString()}>")
                         .WithAdditionalAnnotations(Simplifier.Annotation)
                     : SyntaxGenerationHelper.CreateTypeSyntax(comparerType.Construct(memberType), nullableAnnotations);
                 eq = SyntaxFactory.InvocationExpression(
@@ -217,11 +217,11 @@ public sealed class GenerateEqualsHashCodeOperation : RefactoringOperationBase<G
         // System.HashCode, simplified to HashCode where `using System;` is in scope.
         TypeSyntax HashCodeType() => compilation.GetTypeByMetadataName("System.HashCode") is { } hashCode
             ? SyntaxGenerationHelper.CreateTypeSyntax(hashCode, nullableAnnotations: false)
-            : SyntaxFactory.ParseTypeName("System.HashCode").WithAdditionalAnnotations(Simplifier.Annotation);
+            : SyntaxFactory.ParseTypeName("global::System.HashCode").WithAdditionalAnnotations(Simplifier.Annotation);
 
         // Use HashCode.Combine(field1, field2, ...)
         var arguments = members.Select(m =>
-            SyntaxFactory.Argument(SyntaxFactory.IdentifierName(m.Name)))
+            SyntaxFactory.Argument(IdentifierNames.Name(m.Name)))
             .ToArray();
 
         ExpressionSyntax hashExpr;
@@ -259,7 +259,7 @@ public sealed class GenerateEqualsHashCodeOperation : RefactoringOperationBase<G
                             SyntaxFactory.IdentifierName("Add")))
                         .WithArgumentList(SyntaxFactory.ArgumentList(
                             SyntaxFactory.SingletonSeparatedList(
-                                SyntaxFactory.Argument(SyntaxFactory.IdentifierName(member.Name)))))));
+                                SyntaxFactory.Argument(IdentifierNames.Name(member.Name)))))));
             }
 
             // return hash.ToHashCode();

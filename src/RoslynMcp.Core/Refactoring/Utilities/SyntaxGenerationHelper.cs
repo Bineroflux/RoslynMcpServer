@@ -65,7 +65,7 @@ public static class SyntaxGenerationHelper
 
         var methodDecl = SyntaxFactory.MethodDeclaration(
                 CreateReturnType(method.ReturnType, method.ReturnsByRef, method.ReturnsByRefReadonly, nullableAnnotations),
-                method.Name)
+                IdentifierNames.Token(method.Name))
             .WithModifiers(CreateModifiers(method, explicitInterface, emittingType))
             .WithExplicitInterfaceSpecifier(CreateExplicitInterfaceSpecifier(method, explicitInterface, nullableAnnotations))
             .WithParameterList(CreateParameterList(method.Parameters, nullableAnnotations))
@@ -76,7 +76,7 @@ public static class SyntaxGenerationHelper
         if (method.TypeParameters.Length > 0)
         {
             var typeParams = method.TypeParameters.Select(tp =>
-                SyntaxFactory.TypeParameter(tp.Name));
+                SyntaxFactory.TypeParameter(IdentifierNames.Token(tp.Name)));
             var inheritsConstraints = IsExplicit(method, explicitInterface)
                 || method.ContainingType?.TypeKind != TypeKind.Interface;
             methodDecl = methodDecl
@@ -107,7 +107,7 @@ public static class SyntaxGenerationHelper
     {
         return SyntaxFactory.PropertyDeclaration(
                 CreateReturnType(property.Type, property.ReturnsByRef, property.ReturnsByRefReadonly, nullableAnnotations),
-                property.Name)
+                IdentifierNames.Token(property.Name))
             .WithModifiers(CreateModifiers(property, explicitInterface, emittingType))
             .WithExplicitInterfaceSpecifier(CreateExplicitInterfaceSpecifier(property, explicitInterface, nullableAnnotations))
             .WithAccessorList(CreateAccessorList(property, explicitInterface, throwNotImplemented, callBase, emittingType, nullableAnnotations))
@@ -158,7 +158,7 @@ public static class SyntaxGenerationHelper
         var removeAccessor = SyntaxFactory.AccessorDeclaration(SyntaxKind.RemoveAccessorDeclaration)
             .WithBody(SyntaxFactory.Block());
 
-        return SyntaxFactory.EventDeclaration(CreateTypeSyntax(eventSymbol.Type, nullableAnnotations), eventSymbol.Name)
+        return SyntaxFactory.EventDeclaration(CreateTypeSyntax(eventSymbol.Type, nullableAnnotations), IdentifierNames.Token(eventSymbol.Name))
             .WithModifiers(CreateModifiers(eventSymbol, explicitInterface, emittingType: null))
             .WithExplicitInterfaceSpecifier(CreateExplicitInterfaceSpecifier(eventSymbol, explicitInterface, nullableAnnotations))
             .WithAccessorList(SyntaxFactory.AccessorList(
@@ -202,7 +202,7 @@ public static class SyntaxGenerationHelper
         return SyntaxFactory.FieldDeclaration(
             SyntaxFactory.VariableDeclaration(CreateTypeSyntax(property.Type, nullableAnnotations))
                 .WithVariables(SyntaxFactory.SingletonSeparatedList(
-                    SyntaxFactory.VariableDeclarator(fieldName))))
+                    SyntaxFactory.VariableDeclarator(IdentifierNames.Token(fieldName)))))
             .WithModifiers(SyntaxFactory.TokenList(SyntaxFactory.Token(SyntaxKind.PrivateKeyword)))
             .NormalizeWhitespace();
     }
@@ -223,7 +223,7 @@ public static class SyntaxGenerationHelper
     {
         var getAccessor = SyntaxFactory.AccessorDeclaration(SyntaxKind.GetAccessorDeclaration)
             .WithBody(SyntaxFactory.Block(
-                SyntaxFactory.ReturnStatement(SyntaxFactory.IdentifierName(field.Name))));
+                SyntaxFactory.ReturnStatement(IdentifierNames.Name(field.Name))));
 
         var accessors = new List<AccessorDeclarationSyntax> { getAccessor };
 
@@ -234,7 +234,7 @@ public static class SyntaxGenerationHelper
                     SyntaxFactory.ExpressionStatement(
                         SyntaxFactory.AssignmentExpression(
                             SyntaxKind.SimpleAssignmentExpression,
-                            SyntaxFactory.IdentifierName(field.Name),
+                            IdentifierNames.Name(field.Name),
                             SyntaxFactory.IdentifierName("value")))));
             accessors.Add(setAccessor);
         }
@@ -312,14 +312,14 @@ public static class SyntaxGenerationHelper
     {
         var methodDecl = SyntaxFactory.MethodDeclaration(
                 CreateReturnType(method.ReturnType, method.ReturnsByRef, method.ReturnsByRefReadonly, nullableAnnotations),
-                method.Name)
+                IdentifierNames.Token(method.Name))
             .WithParameterList(CreateParameterList(method.Parameters, nullableAnnotations))
             .WithSemicolonToken(SyntaxFactory.Token(SyntaxKind.SemicolonToken));
 
         if (method.TypeParameters.Length > 0)
         {
             var typeParams = method.TypeParameters.Select(tp =>
-                SyntaxFactory.TypeParameter(tp.Name));
+                SyntaxFactory.TypeParameter(IdentifierNames.Token(tp.Name)));
             methodDecl = methodDecl
                 .WithTypeParameterList(SyntaxFactory.TypeParameterList(SyntaxFactory.SeparatedList(typeParams)))
                 .WithConstraintClauses(CreateConstraintClauses(method, inheritsConstraints: false, nullableAnnotations));
@@ -361,14 +361,14 @@ public static class SyntaxGenerationHelper
             ? SyntaxFactory.IndexerDeclaration(type)
                 .WithParameterList(CreateBracketedParameterList(property.Parameters, nullableAnnotations))
                 .WithAccessorList(accessorList)
-            : SyntaxFactory.PropertyDeclaration(type, property.Name)
+            : SyntaxFactory.PropertyDeclaration(type, IdentifierNames.Token(property.Name))
                 .WithAccessorList(accessorList);
     }
 
     private static EventDeclarationSyntax CreateInterfaceEvent(IEventSymbol eventSymbol, bool nullableAnnotations)
     {
         // Interface events use field syntax
-        return SyntaxFactory.EventDeclaration(CreateTypeSyntax(eventSymbol.Type, nullableAnnotations), eventSymbol.Name)
+        return SyntaxFactory.EventDeclaration(CreateTypeSyntax(eventSymbol.Type, nullableAnnotations), IdentifierNames.Token(eventSymbol.Name))
             .WithSemicolonToken(SyntaxFactory.Token(SyntaxKind.SemicolonToken));
     }
 
@@ -395,7 +395,7 @@ public static class SyntaxGenerationHelper
             if (constraints.Count > 0)
             {
                 clauses.Add(SyntaxFactory.TypeParameterConstraintClause(
-                    SyntaxFactory.IdentifierName(typeParameter.Name),
+                    IdentifierNames.Name(typeParameter.Name),
                     SyntaxFactory.SeparatedList(constraints)));
             }
         }
@@ -632,7 +632,7 @@ public static class SyntaxGenerationHelper
             : SyntaxFactory.MemberAccessExpression(
                 SyntaxKind.SimpleMemberAccessExpression,
                 SyntaxFactory.BaseExpression(),
-                SyntaxFactory.IdentifierName(property.Name));
+                IdentifierNames.Name(property.Name));
 
     private static TypeSyntax CreateReturnType(
         ITypeSymbol type,
@@ -699,7 +699,7 @@ public static class SyntaxGenerationHelper
                 break;
         }
 
-        return SyntaxFactory.Parameter(SyntaxFactory.Identifier(parameter.Name))
+        return SyntaxFactory.Parameter(IdentifierNames.Token(parameter.Name))
             .WithModifiers(SyntaxFactory.TokenList(modifiers))
             .WithType(CreateTypeSyntax(parameter.Type, nullableAnnotations));
     }
@@ -710,7 +710,7 @@ public static class SyntaxGenerationHelper
     /// </summary>
     private static ArgumentSyntax CreateArgument(IParameterSymbol parameter)
     {
-        var argument = SyntaxFactory.Argument(SyntaxFactory.IdentifierName(parameter.Name));
+        var argument = SyntaxFactory.Argument(IdentifierNames.Name(parameter.Name));
 
         return parameter.RefKind switch
         {
@@ -721,12 +721,17 @@ public static class SyntaxGenerationHelper
         };
     }
 
+    /// <summary>
+    /// <c>throw new global::System.NotImplementedException();</c>, the type marked for the simplifier,
+    /// so it is written <c>NotImplementedException</c> only where <c>using System;</c> (or an
+    /// implicit global using) allows it.
+    /// </summary>
     private static BlockSyntax CreateThrowNotImplementedBody()
     {
         return SyntaxFactory.Block(
             SyntaxFactory.ThrowStatement(
                 SyntaxFactory.ObjectCreationExpression(
-                    SyntaxFactory.IdentifierName("NotImplementedException"))
+                    SyntaxFactory.ParseTypeName("global::System.NotImplementedException").WithAdditionalAnnotations(Simplifier.Annotation))
                 .WithArgumentList(SyntaxFactory.ArgumentList())));
     }
 
@@ -734,10 +739,10 @@ public static class SyntaxGenerationHelper
     {
         SimpleNameSyntax name = method.TypeParameters.Length > 0
             ? SyntaxFactory.GenericName(
-                SyntaxFactory.Identifier(method.Name),
+                IdentifierNames.Token(method.Name),
                 SyntaxFactory.TypeArgumentList(SyntaxFactory.SeparatedList<TypeSyntax>(
-                    method.TypeParameters.Select(tp => SyntaxFactory.IdentifierName(tp.Name)))))
-            : SyntaxFactory.IdentifierName(method.Name);
+                    method.TypeParameters.Select(tp => IdentifierNames.Name(tp.Name)))))
+            : IdentifierNames.Name(method.Name);
 
         var baseCall = SyntaxFactory.InvocationExpression(
             SyntaxFactory.MemberAccessExpression(
@@ -766,7 +771,7 @@ public static class SyntaxGenerationHelper
             .Select(p => (StatementSyntax)SyntaxFactory.ExpressionStatement(
                 SyntaxFactory.AssignmentExpression(
                     SyntaxKind.SimpleAssignmentExpression,
-                    SyntaxFactory.IdentifierName(p.Name),
+                    IdentifierNames.Name(p.Name),
                     SyntaxFactory.LiteralExpression(SyntaxKind.DefaultLiteralExpression))));
 
         var body = CreateDefaultReturnBody(method.ReturnType, nullableAnnotations);

@@ -7,6 +7,7 @@ using RoslynMcp.Contracts.Errors;
 using RoslynMcp.Contracts.Models;
 using RoslynMcp.Core.FileSystem;
 using RoslynMcp.Core.Refactoring.Base;
+using RoslynMcp.Core.Refactoring.Utilities;
 using RoslynMcp.Core.Workspace;
 
 namespace RoslynMcp.Core.Refactoring.Extract;
@@ -62,7 +63,7 @@ public sealed class IntroduceParameterOperation : RefactoringOperationBase<Intro
             .OfType<LocalDeclarationStatementSyntax>()
             .Where(l => l.GetLocation().GetLineSpan().StartLinePosition.Line == targetLine)
             .SelectMany(l => l.Declaration.Variables)
-            .FirstOrDefault(v => v.Identifier.Text == @params.VariableName);
+            .FirstOrDefault(v => v.Identifier.ValueText == IdentifierNames.ValueText(@params.VariableName));
 
         if (localDecl == null)
         {
@@ -132,8 +133,8 @@ public sealed class IntroduceParameterOperation : RefactoringOperationBase<Intro
         }
 
         // 1. Add parameter to method signature
-        var newParam = SyntaxFactory.Parameter(SyntaxFactory.Identifier(@params.VariableName))
-            .WithType(paramType.WithTrailingTrivia(SyntaxFactory.Space));
+        var newParam = SyntaxFactory.Parameter(localDecl.Identifier.WithoutTrivia())
+            .WithType(paramType.WithoutTrivia().WithTrailingTrivia(SyntaxFactory.Space));
 
         var newParameterList = containingMethod.ParameterList.AddParameters(newParam);
 

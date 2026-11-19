@@ -132,7 +132,7 @@ public sealed class GenerateToStringOperation : RefactoringOperationBase<Generat
         {
             text += (i == 0 ? "" : ", ") + members[i].Name + " = ";
             parts.Add(InterpolatedText(text));
-            parts.Add(SyntaxFactory.Interpolation(SyntaxFactory.IdentifierName(members[i].Name)));
+            parts.Add(SyntaxFactory.Interpolation(IdentifierNames.Name(members[i].Name)));
             text = "";
         }
 
@@ -178,7 +178,7 @@ public sealed class GenerateToStringOperation : RefactoringOperationBase<Generat
             text += (i == 0 ? "" : ", ") + members[i].Name + " = ";
             statements.Add(Append(builder, SyntaxFactory.LiteralExpression(
                 SyntaxKind.StringLiteralExpression, SyntaxFactory.Literal(text))));
-            statements.Add(Append(builder, SyntaxFactory.IdentifierName(members[i].Name)));
+            statements.Add(Append(builder, IdentifierNames.Name(members[i].Name)));
             text = "";
         }
 

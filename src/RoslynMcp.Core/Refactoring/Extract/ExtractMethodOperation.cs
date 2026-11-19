@@ -519,9 +519,9 @@ public sealed class ExtractMethodOperation : RefactoringOperationBase<ExtractMet
 
             if (type != null)
             {
-                parameters.Add(SyntaxFactory.Parameter(SyntaxFactory.Identifier(param.Name))
+                parameters.Add(SyntaxFactory.Parameter(IdentifierNames.Token(param.Name))
                     .WithType(SyntaxFactory.ParseTypeName(type.ToDisplayString())));
-                arguments.Add(SyntaxFactory.Argument(SyntaxFactory.IdentifierName(param.Name)));
+                arguments.Add(SyntaxFactory.Argument(IdentifierNames.Name(param.Name)));
             }
         }
 

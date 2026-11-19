@@ -1,6 +1,7 @@
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using Microsoft.CodeAnalysis.Simplification;
 
 namespace RoslynMcp.Core.Refactoring.Utilities;
 
@@ -19,12 +20,12 @@ public static class NullCheckGenerator
             SyntaxFactory.InvocationExpression(
                 SyntaxFactory.MemberAccessExpression(
                     SyntaxKind.SimpleMemberAccessExpression,
-                    SyntaxFactory.IdentifierName("ArgumentNullException"),
+                    ArgumentNullExceptionType(),
                     SyntaxFactory.IdentifierName("ThrowIfNull")))
             .WithArgumentList(SyntaxFactory.ArgumentList(
                 SyntaxFactory.SingletonSeparatedList(
                     SyntaxFactory.Argument(
-                        SyntaxFactory.IdentifierName(parameterName))))));
+                        IdentifierNames.Name(parameterName))))));
     }
 
     /// <summary>
@@ -35,11 +36,10 @@ public static class NullCheckGenerator
         // if (paramName is null) throw new ArgumentNullException(nameof(paramName));
         return SyntaxFactory.IfStatement(
             SyntaxFactory.IsPatternExpression(
-                SyntaxFactory.IdentifierName(parameterName),
+                IdentifierNames.Name(parameterName),
                 SyntaxFactory.ConstantPattern(SyntaxFactory.LiteralExpression(SyntaxKind.NullLiteralExpression))),
             SyntaxFactory.ThrowStatement(
-                SyntaxFactory.ObjectCreationExpression(
-                    SyntaxFactory.IdentifierName("ArgumentNullException"))
+                SyntaxFactory.ObjectCreationExpression(ArgumentNullExceptionType())
                 .WithArgumentList(SyntaxFactory.ArgumentList(
                     SyntaxFactory.SingletonSeparatedList(
                         SyntaxFactory.Argument(
@@ -48,8 +48,16 @@ public static class NullCheckGenerator
                             .WithArgumentList(SyntaxFactory.ArgumentList(
                                 SyntaxFactory.SingletonSeparatedList(
                                     SyntaxFactory.Argument(
-                                        SyntaxFactory.IdentifierName(parameterName)))))))))));
+                                        IdentifierNames.Name(parameterName)))))))))));
     }
+
+    /// <summary>
+    /// <c>System.ArgumentNullException</c>, marked for the simplifier: written
+    /// <c>ArgumentNullException</c> only where <c>using System;</c> (or an implicit global
+    /// using) allows it.
+    /// </summary>
+    internal static TypeSyntax ArgumentNullExceptionType() =>
+        SyntaxFactory.ParseTypeName("global::System.ArgumentNullException").WithAdditionalAnnotations(Simplifier.Annotation);
 
     /// <summary>
     /// Determines whether a parameter type should have a null check.

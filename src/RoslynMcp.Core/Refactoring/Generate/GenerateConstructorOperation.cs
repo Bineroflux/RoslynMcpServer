@@ -238,7 +238,7 @@ public sealed class GenerateConstructorOperation : RefactoringOperationBase<Gene
             var type = GetMemberType(member);
             var paramName = ToCamelCase(member.Name);
 
-            var parameter = SyntaxFactory.Parameter(SyntaxFactory.Identifier(paramName))
+            var parameter = SyntaxFactory.Parameter(IdentifierNames.Token(paramName))
                 .WithType(SyntaxFactory.ParseTypeName(type.ToDisplayString())
                     .WithAdditionalAnnotations(Simplifier.Annotation)
                     .WithTrailingTrivia(SyntaxFactory.Space));
@@ -266,11 +266,10 @@ public sealed class GenerateConstructorOperation : RefactoringOperationBase<Gene
                 var nullCheck = SyntaxFactory.IfStatement(
                     SyntaxFactory.BinaryExpression(
                         SyntaxKind.EqualsExpression,
-                        SyntaxFactory.IdentifierName(paramName),
+                        IdentifierNames.Name(paramName),
                         SyntaxFactory.LiteralExpression(SyntaxKind.NullLiteralExpression)),
                     SyntaxFactory.ThrowStatement(
-                        SyntaxFactory.ObjectCreationExpression(
-                            SyntaxFactory.IdentifierName("ArgumentNullException"))
+                        SyntaxFactory.ObjectCreationExpression(NullCheckGenerator.ArgumentNullExceptionType())
                         .WithArgumentList(SyntaxFactory.ArgumentList(
                             SyntaxFactory.SingletonSeparatedList(
                                 SyntaxFactory.Argument(
@@ -279,7 +278,7 @@ public sealed class GenerateConstructorOperation : RefactoringOperationBase<Gene
                                     .WithArgumentList(SyntaxFactory.ArgumentList(
                                         SyntaxFactory.SingletonSeparatedList(
                                             SyntaxFactory.Argument(
-                                                SyntaxFactory.IdentifierName(paramName)))))))))));
+                                                IdentifierNames.Name(paramName)))))))))));
 
                 statements.Add(nullCheck);
             }
@@ -292,18 +291,18 @@ public sealed class GenerateConstructorOperation : RefactoringOperationBase<Gene
                 left = SyntaxFactory.MemberAccessExpression(
                     SyntaxKind.SimpleMemberAccessExpression,
                     SyntaxFactory.ThisExpression(),
-                    SyntaxFactory.IdentifierName(member.Name));
+                    IdentifierNames.Name(member.Name));
             }
             else
             {
-                left = SyntaxFactory.IdentifierName(member.Name);
+                left = IdentifierNames.Name(member.Name);
             }
 
             var assignment = SyntaxFactory.ExpressionStatement(
                 SyntaxFactory.AssignmentExpression(
                     SyntaxKind.SimpleAssignmentExpression,
                     left,
-                    SyntaxFactory.IdentifierName(paramName)));
+                    IdentifierNames.Name(paramName)));
 
             statements.Add(assignment);
         }

@@ -55,7 +55,7 @@ public class QueryFilterOptionsTests
         {
             ["diagnostic-ids"] = """["CS0168","CS0219"]""",
             ["exclude-diagnostic-ids"] = """["CS0219"]""",
-            ["project-path"] = @"C:\src\App\App.csproj",
+            ["project-path"] = ProjectPath,
             ["max-results"] = "5"
         }, ParamsSchema.For(typeof(GetDiagnosticsParams)));
 
@@ -63,9 +63,11 @@ public class QueryFilterOptionsTests
 
         Assert.Equal(["CS0168", "CS0219"], @params.DiagnosticIds);
         Assert.Equal(["CS0219"], @params.ExcludeDiagnosticIds);
-        Assert.Equal(@"C:\src\App\App.csproj", @params.ProjectPath);
+        Assert.Equal(ProjectPath, @params.ProjectPath);
         Assert.Equal(5, @params.MaxResults);
     }
+
+    private static readonly string ProjectPath = Path.Combine(Path.GetTempPath(), "src", "App", "App.csproj");
 
     // The options the CLI's registry deserializes params with.
     private static readonly JsonSerializerOptions JsonOptions = new()

@@ -23,11 +23,17 @@ public static class ArgsToJsonConverter
     ///   (case-insensitive), anything else is refused
     /// - A list parameter takes a JSON array (<c>--members '["A","B"]'</c>), passed on as it is;
     ///   the keys of the objects in it must be keys the tool takes there
+    /// - A path parameter (<see cref="ArgumentSchema.IsPathProperty"/>) that is relative is
+    ///   resolved against <paramref name="baseDirectory"/>, the way a command line names files;
+    ///   the tools take only absolute paths
     /// </remarks>
+    /// <param name="options">The tool options, kebab-case keys.</param>
+    /// <param name="schema">The tool's schema (<see cref="ParamsSchema.For"/>).</param>
+    /// <param name="baseDirectory">The directory relative paths are resolved against; null for the current directory.</param>
     /// <exception cref="CliOptionException">
     /// An option, or a key inside a JSON value, the tool does not take, or a value its parameter cannot take.
     /// </exception>
-    public static string Convert(Dictionary<string, string> options, JsonElement schema)
+    public static string Convert(Dictionary<string, string> options, JsonElement schema, string? baseDirectory = null)
     {
         using var stream = new MemoryStream();
         using var writer = new Utf8JsonWriter(stream, new JsonWriterOptions { Indented = false });
@@ -90,6 +96,10 @@ public static class ArgsToJsonConverter
                     invalidValues.Add($"--{kebabKey} takes a JSON object, not '{value}'.");
                     break;
 
+                case "string" when ArgumentSchema.IsPathProperty(camelKey, propertySchema):
+                    writer.WriteString(camelKey, ResolvePath(value, baseDirectory));
+                    break;
+
                 default:
                     writer.WriteString(camelKey, value);
                     break;
@@ -109,6 +119,15 @@ public static class ArgsToJsonConverter
 
         return System.Text.Encoding.UTF8.GetString(stream.ToArray());
     }
+
+    /// <summary>
+    /// <paramref name="path"/> resolved against <paramref name="baseDirectory"/> (or the current
+    /// directory) unless it is already absolute; an empty value stays empty.
+    /// </summary>
+    public static string ResolvePath(string path, string? baseDirectory = null) =>
+        string.IsNullOrWhiteSpace(path) || Path.IsPathFullyQualified(path)
+            ? path
+            : Path.GetFullPath(path, baseDirectory ?? Environment.CurrentDirectory);
 
     /// <summary>
     /// Parses an integer in the range of the parameter: 64-bit where the schema says

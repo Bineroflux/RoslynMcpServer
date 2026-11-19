@@ -41,7 +41,7 @@ public sealed class DiagnoseTool : IToolHandler
             solutionPath = new
             {
                 type = "string",
-                description = "Optional: solution to test loading"
+                description = "Absolute path to a .sln, .slnx, .csproj or standalone .cs file to test loading (optional)"
             },
             verbose = new
             {

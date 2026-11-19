@@ -80,6 +80,18 @@ public static class ArgumentSchema
             : null;
 
     /// <summary>
+    /// Whether a property takes a file or directory path: a string whose name ends in
+    /// <c>File</c> or <c>Path</c> (<c>sourceFile</c>, <c>targetFile</c>, <c>callerFile</c>,
+    /// <c>projectPath</c>, <c>solutionPath</c>). Every tool names its path parameters that way
+    /// and describes them as absolute paths; a test keeps the two in step.
+    /// </summary>
+    /// <param name="name">The property name, camelCase.</param>
+    /// <param name="schema">The property's schema.</param>
+    public static bool IsPathProperty(string name, JsonElement schema) =>
+        TypeOf(schema) == "string" &&
+        (name.EndsWith("File", StringComparison.Ordinal) || name.EndsWith("Path", StringComparison.Ordinal));
+
+    /// <summary>
     /// The valid key that <paramref name="key"/> probably means: the one it equals ignoring case
     /// and the separators <c>_</c> and <c>-</c> (<c>MaxResults</c>, <c>max_results</c>), or else
     /// the closest one at an edit distance of at most 2 (and less than half the key's length).

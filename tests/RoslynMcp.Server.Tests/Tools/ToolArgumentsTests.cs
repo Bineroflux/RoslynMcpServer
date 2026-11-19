@@ -20,7 +20,7 @@ public sealed class ToolArgumentsTests
     [Fact]
     public async Task MisspelledArgument_IsRefused_WithTheClosestKeyAndTheValidOnes()
     {
-        var error = await CallForErrorAsync("search_symbols", """{"solutionPath": "C:\\s.sln", "querry": "Foo"}""");
+        var error = await CallForErrorAsync("search_symbols", $$"""{"solutionPath": {{Sln}}, "querry": "Foo"}""");
 
         Assert.Equal(ErrorCodes.UnknownParameter, error.GetProperty("code").GetString());
         Assert.Equal(
@@ -36,7 +36,7 @@ public sealed class ToolArgumentsTests
     {
         var error = await CallForErrorAsync(
             "find_references",
-            """{"solutionPath": "C:\\s.sln", "sourceFile": "C:\\a.cs", "line": 3, "MaxResults": 5, "SymbolName": "X", "colour": 1}""");
+            $$"""{"solutionPath": {{Sln}}, "sourceFile": {{Cs}}, "line": 3, "MaxResults": 5, "SymbolName": "X", "colour": 1}""");
 
         var message = error.GetProperty("message").GetString()!;
         Assert.StartsWith(
@@ -50,8 +50,8 @@ public sealed class ToolArgumentsTests
     {
         var error = await CallForErrorAsync(
             "change_signature",
-            """
-            {"solutionPath": "C:\\s.sln", "sourceFile": "C:\\a.cs", "methodName": "M",
+            $$"""
+            {"solutionPath": {{Sln}}, "sourceFile": {{Cs}}, "methodName": "M",
              "parameters": [{"originalName": "a"}, {"orignalName": "b", "remove": true}]}
             """);
 
@@ -78,13 +78,60 @@ public sealed class ToolArgumentsTests
         // The fake provider refuses to load anything, so a call that passes the check fails there.
         var result = await CallAsync(
             "change_signature",
-            """
-            {"solutionPath": "C:\\s.sln", "sourceFile": "C:\\a.cs", "methodName": "M", "line": 3, "preview": true,
+            $$"""
+            {"solutionPath": {{Sln}}, "sourceFile": {{Cs}}, "methodName": "M", "line": 3, "preview": true,
              "parameters": [{"originalName": "a", "name": "b", "type": "int", "defaultValue": "0", "newPosition": 1, "remove": false}]}
             """);
 
         Assert.True(result.IsError);
         Assert.Contains("No workspace in this test.", result.Content[0].Text);
+    }
+
+    [Fact]
+    public async Task RelativePaths_AreRefused_SayingTheServerCannotResolveThem()
+    {
+        var error = await CallForErrorAsync(
+            "find_references",
+            $$"""{"solutionPath": {{Sln}}, "sourceFile": "Foo.cs", "referenceFile": "sub/Bar.cs", "symbolName": "X"}""");
+
+        Assert.Equal(ErrorCodes.InvalidSourcePath, error.GetProperty("code").GetString());
+        Assert.Equal(
+            "sourceFile ('Foo.cs'), referenceFile ('sub/Bar.cs') must be absolute paths: the server does not know the " +
+            "caller's current directory, so it cannot resolve a relative path.",
+            error.GetProperty("message").GetString());
+    }
+
+    [Fact]
+    public async Task RelativeTargetFile_IsAnInvalidTargetPath()
+    {
+        var error = await CallForErrorAsync(
+            "move_type_to_file",
+            $$"""{"solutionPath": {{Sln}}, "sourceFile": {{Cs}}, "symbolName": "T", "targetFile": "T.cs"}""");
+
+        Assert.Equal(ErrorCodes.InvalidTargetPath, error.GetProperty("code").GetString());
+        Assert.StartsWith("targetFile ('T.cs') must be an absolute path:", error.GetProperty("message").GetString());
+    }
+
+    [Fact]
+    public void PathParameters_AreExactlyTheOnesDescribedAsAbsolutePaths()
+    {
+        // The server refuses, and the CLI resolves, relative values of the string parameters
+        // named *File or *Path; each tool describes exactly those as absolute paths.
+        var problems = new List<string>();
+        foreach (var tool in CreateAllTools())
+        {
+            var schema = JsonSerializer.SerializeToElement(tool.InputSchema);
+            foreach (var property in schema.GetProperty("properties").EnumerateObject())
+            {
+                var isPath = RoslynMcp.Core.Arguments.ArgumentSchema.IsPathProperty(property.Name, property.Value);
+                var describedAsPath = property.Value.TryGetProperty("description", out var description) &&
+                    description.GetString()!.StartsWith("Absolute path", StringComparison.Ordinal);
+                if (isPath != describedAsPath)
+                    problems.Add($"{tool.Name}.{property.Name}: named like a path {isPath}, described as an absolute path {describedAsPath}");
+            }
+        }
+
+        Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
     }
 
     [Fact]
@@ -176,6 +223,11 @@ public sealed class ToolArgumentsTests
         : type.IsGenericType && type.GetGenericArguments() is [var argument] &&
           typeof(IEnumerable<>).MakeGenericType(argument).IsAssignableFrom(type) ? argument
         : null;
+
+    /// <summary>Absolute paths on any platform, as JSON strings.</summary>
+    private static readonly string Sln = JsonSerializer.Serialize(Path.Combine(Path.GetTempPath(), "s.sln"));
+
+    private static readonly string Cs = JsonSerializer.Serialize(Path.Combine(Path.GetTempPath(), "a.cs"));
 
     /// <summary>One instance of every tool the server assembly declares.</summary>
     internal static List<IToolHandler> CreateAllTools()

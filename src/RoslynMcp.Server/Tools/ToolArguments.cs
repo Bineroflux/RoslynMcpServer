@@ -1,6 +1,7 @@
 using System.Text.Json;
 using RoslynMcp.Contracts.Errors;
 using RoslynMcp.Core.Arguments;
+using RoslynMcp.Core.FileSystem;
 using RoslynMcp.Server.Transport;
 
 namespace RoslynMcp.Server.Tools;
@@ -9,13 +10,14 @@ namespace RoslynMcp.Server.Tools;
 /// Checks the arguments of a tool call against the tool's input schema before the tool runs.
 /// A tool deserializes its arguments leniently, so a key it does not know (a typo, or
 /// <c>MaxResults</c> for <c>maxResults</c>) would silently be dropped and the option take its
-/// default; such a call is refused instead.
+/// default; such a call is refused instead. So is a relative path, which the server cannot
+/// resolve.
 /// </summary>
 public static class ToolArguments
 {
     /// <summary>
-    /// The error result for arguments the schema does not allow, or null when they are fine.
-    /// Missing arguments are left to the tool, which reports them as before.
+    /// The error result for arguments the schema does not allow or for a relative path, or null
+    /// when they are fine. Missing arguments are left to the tool, which reports them as before.
     /// </summary>
     /// <param name="toolName">The tool's name, for the message.</param>
     /// <param name="schema">The tool's input schema.</param>
@@ -34,17 +36,44 @@ public static class ToolArguments
         }
 
         var unknown = ArgumentSchema.FindUnknownArguments(schema, value);
-        if (unknown.Count == 0)
+        if (unknown.Count > 0)
+        {
+            return Error(
+                ErrorCodes.UnknownParameter,
+                DescribeUnknown(toolName, unknown),
+                new Dictionary<string, object>
+                {
+                    ["unknownArguments"] = unknown.Select(u => u.FullPath).ToList(),
+                    ["validArguments"] = ArgumentSchema.PropertyNames(schema)
+                });
+        }
+
+        return CheckPaths(schema, value);
+    }
+
+    /// <summary>
+    /// Refuses relative paths: the server does not know the caller's current directory, so it
+    /// cannot tell what a relative path means (the CLI resolves them against its own).
+    /// </summary>
+    private static ToolResult? CheckPaths(JsonElement schema, JsonElement arguments)
+    {
+        var relative = arguments.EnumerateObject()
+            .Where(a => a.Value.ValueKind == JsonValueKind.String &&
+                ArgumentSchema.FindProperty(schema, a.Name) is { } property &&
+                ArgumentSchema.IsPathProperty(property.Name, property.Schema) &&
+                !string.IsNullOrWhiteSpace(a.Value.GetString()) &&
+                !PathResolver.IsAbsolutePath(a.Value.GetString()!))
+            .Select(a => (a.Name, Path: a.Value.GetString()!))
+            .ToList();
+        if (relative.Count == 0)
             return null;
 
+        var names = string.Join(", ", relative.Select(r => $"{r.Name} ('{r.Path}')"));
         return Error(
-            ErrorCodes.UnknownParameter,
-            DescribeUnknown(toolName, unknown),
-            new Dictionary<string, object>
-            {
-                ["unknownArguments"] = unknown.Select(u => u.FullPath).ToList(),
-                ["validArguments"] = ArgumentSchema.PropertyNames(schema)
-            });
+            relative.All(r => r.Name == "targetFile") ? ErrorCodes.InvalidTargetPath : ErrorCodes.InvalidSourcePath,
+            $"{names} must be {(relative.Count == 1 ? "an absolute path" : "absolute paths")}: the server does not know " +
+            "the caller's current directory, so it cannot resolve a relative path.",
+            new Dictionary<string, object> { ["relativePaths"] = relative.Select(r => r.Name).ToList() });
     }
 
     /// <summary>

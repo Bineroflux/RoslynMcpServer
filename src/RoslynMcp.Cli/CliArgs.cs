@@ -111,9 +111,7 @@ public static class CliArgs
     /// absolute paths. Null stays null.
     /// </summary>
     public static string? ResolveSolutionPath(string? solutionPath) =>
-        string.IsNullOrWhiteSpace(solutionPath) || Path.IsPathRooted(solutionPath)
-            ? solutionPath
-            : Path.GetFullPath(solutionPath);
+        solutionPath == null ? null : ArgsToJsonConverter.ResolvePath(solutionPath);
 
     private static (Dictionary<string, string> options, string format, bool verbose) ParseOptions(
         string[] args, int startIndex)

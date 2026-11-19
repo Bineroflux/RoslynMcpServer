@@ -44,6 +44,8 @@ public static class HelpGenerator
 
         sb.AppendLine($"Total: {tools.Count} tools");
         sb.AppendLine();
+        sb.AppendLine("Paths (the solution path, --source-file, --project-path, ...) may be relative to the current directory.");
+        sb.AppendLine();
         sb.AppendLine("EXAMPLES:");
         sb.AppendLine("  roslyn-cli MySolution.sln rename-symbol --source-file Foo.cs --symbol-name Bar --new-name Baz");
         sb.AppendLine("  roslyn-cli MySolution.sln get-diagnostics --severity-filter Error --format text");

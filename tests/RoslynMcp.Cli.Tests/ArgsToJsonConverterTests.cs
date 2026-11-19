@@ -1,6 +1,7 @@
 using System.Text.Json;
 using RoslynMcp.Cli;
 using RoslynMcp.Contracts.Models;
+using RoslynMcp.Core.Arguments;
 using Xunit;
 
 namespace RoslynMcp.Cli.Tests;
@@ -8,6 +9,9 @@ namespace RoslynMcp.Cli.Tests;
 public class ArgsToJsonConverterTests
 {
     private static readonly JsonElement RenameSchema = ParamsSchema.For(typeof(RenameSymbolParams));
+
+    /// <summary>An absolute path on any platform.</summary>
+    private static readonly string FooFile = Path.Combine(Path.GetTempPath(), "Code", "Foo.cs");
 
     [Fact]
     public void EmptyDictionary_ReturnsEmptyJsonObject()
@@ -19,10 +23,10 @@ public class ArgsToJsonConverterTests
     [Fact]
     public void StringValue_SerializedAsJsonString()
     {
-        var dict = new Dictionary<string, string> { ["source-file"] = @"C:\Code\Foo.cs" };
+        var dict = new Dictionary<string, string> { ["symbol-name"] = "Foo" };
         var json = ArgsToJsonConverter.Convert(dict, RenameSchema);
         var doc = JsonDocument.Parse(json);
-        Assert.Equal(@"C:\Code\Foo.cs", doc.RootElement.GetProperty("sourceFile").GetString());
+        Assert.Equal("Foo", doc.RootElement.GetProperty("symbolName").GetString());
     }
 
     [Fact]
@@ -75,7 +79,7 @@ public class ArgsToJsonConverterTests
     {
         var dict = new Dictionary<string, string>
         {
-            ["source-file"] = "C:/Code/Foo.cs",
+            ["source-file"] = FooFile,
             ["symbol-name"] = "Bar",
             ["line"] = "10",
             ["preview"] = "true"
@@ -83,7 +87,7 @@ public class ArgsToJsonConverterTests
         var json = ArgsToJsonConverter.Convert(dict, RenameSchema);
         var doc = JsonDocument.Parse(json);
 
-        Assert.Equal("C:/Code/Foo.cs", doc.RootElement.GetProperty("sourceFile").GetString());
+        Assert.Equal(FooFile, doc.RootElement.GetProperty("sourceFile").GetString());
         Assert.Equal("Bar", doc.RootElement.GetProperty("symbolName").GetString());
         Assert.Equal(10, doc.RootElement.GetProperty("line").GetInt32());
         Assert.True(doc.RootElement.GetProperty("preview").GetBoolean());
@@ -109,21 +113,62 @@ public class ArgsToJsonConverterTests
     }
 
     [Fact]
-    public void PathWithBackslash_PreservedAsString()
+    public void AbsolutePath_IsPassedAsItIs()
     {
-        var dict = new Dictionary<string, string> { ["source-file"] = @"C:\Code\Foo.cs" };
-        var json = ArgsToJsonConverter.Convert(dict, RenameSchema);
+        var dict = new Dictionary<string, string> { ["source-file"] = FooFile };
+        var json = ArgsToJsonConverter.Convert(dict, RenameSchema, baseDirectory: Path.Combine(Path.GetTempPath(), "elsewhere"));
         var doc = JsonDocument.Parse(json);
-        Assert.Equal(@"C:\Code\Foo.cs", doc.RootElement.GetProperty("sourceFile").GetString());
+        Assert.Equal(FooFile, doc.RootElement.GetProperty("sourceFile").GetString());
+    }
+
+    [Fact]
+    public void RelativePaths_AreResolvedAgainstTheBaseDirectory()
+    {
+        // The help's own example, --source-file Foo.cs, was refused by the operations, which
+        // take only absolute paths; only the solution path was resolved.
+        var baseDirectory = Path.Combine(Path.GetTempPath(), "repo", "src");
+        var json = ArgsToJsonConverter.Convert(
+            new Dictionary<string, string>
+            {
+                ["source-file"] = "Foo.cs",
+                ["reference-file"] = Path.Combine("..", "tests", "FooTests.cs"),
+                ["project-path"] = Path.Combine("App", "App.csproj"),
+                ["symbol-name"] = "Foo.cs"
+            },
+            ParamsSchema.For(typeof(FindReferencesParams)),
+            baseDirectory);
+
+        var doc = JsonDocument.Parse(json).RootElement;
+        Assert.Equal(Path.Combine(baseDirectory, "Foo.cs"), doc.GetProperty("sourceFile").GetString());
+        Assert.Equal(Path.Combine(Path.GetTempPath(), "repo", "tests", "FooTests.cs"), doc.GetProperty("referenceFile").GetString());
+        Assert.Equal(Path.Combine(baseDirectory, "App", "App.csproj"), doc.GetProperty("projectPath").GetString());
+        Assert.Equal("Foo.cs", doc.GetProperty("symbolName").GetString());
+    }
+
+    [Fact]
+    public void PathOptions_AreTheToolsFileAndPathParameters()
+    {
+        // The CLI resolves the string parameters named *File or *Path; these are all of them.
+        var paths = ToolRegistry.BuildDefault().GetAllTools()
+            .SelectMany(t =>
+            {
+                var schema = ParamsSchema.For(t.ParamsType);
+                return ArgumentSchema.PropertyNames(schema)
+                    .Where(n => ArgumentSchema.IsPathProperty(n, schema.GetProperty("properties").GetProperty(n)));
+            })
+            .Distinct()
+            .Order(StringComparer.Ordinal);
+
+        Assert.Equal(["callFile", "callerFile", "projectPath", "referenceFile", "solutionPath", "sourceFile", "targetFile"], paths);
     }
 
     [Fact]
     public void OptionInAnotherCase_IsTheToolsOption()
     {
         // The CLI reads parameters case-insensitively, so --Source-File still reaches sourceFile.
-        var json = ArgsToJsonConverter.Convert(new Dictionary<string, string> { ["Source-File"] = @"C:\Code\Foo.cs" }, RenameSchema);
+        var json = ArgsToJsonConverter.Convert(new Dictionary<string, string> { ["Source-File"] = FooFile }, RenameSchema);
 
-        Assert.Equal(@"C:\Code\Foo.cs", JsonDocument.Parse(json).RootElement.GetProperty("sourceFile").GetString());
+        Assert.Equal(FooFile, JsonDocument.Parse(json).RootElement.GetProperty("sourceFile").GetString());
     }
 
     [Fact]

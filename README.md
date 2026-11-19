@@ -21,6 +21,7 @@ Roslyn MCP Server is a [Model Context Protocol (MCP)](https://modelcontextprotoc
 - [Configuration](#configuration)
 - [Available Tools](#available-tools)
 - [Preview Mode](#preview-mode)
+- [File Encodings and Line Endings](#file-encodings-and-line-endings)
 - [Analyzer Shadow Copying](#analyzer-shadow-copying)
 - [Troubleshooting](#troubleshooting)
 - [NuGet Libraries](#nuget-libraries)
@@ -327,6 +328,16 @@ Example (as a natural language prompt to Claude):
 > "Preview what would happen if I renamed OrderProcessor to OrderHandler in C:/path/to/MySolution.sln"
 
 Claude will call `rename_symbol` with `preview: true` and show you the affected files and diffs.
+
+---
+
+## File Encodings and Line Endings
+
+Files are read the way the compiler reads them (byte order mark, else the project's `<CodePage>`, else UTF-8 when the bytes are valid UTF-8, else the system's ANSI code page), and a file a refactoring edits keeps its encoding and line endings, so only the text it changes changes. A renamed or moved file keeps them too.
+
+A file a refactoring creates (`move_type_to_file`, `extract_interface` / `extract_base_class` with a new `targetFile`) is written in the `.editorconfig` `charset` that applies to its path; else in the encoding of the file its content comes from (`move_type_to_file`); else in the encoding most of the project's files are in; else as UTF-8 with BOM. Generated text uses the file's line ending; a new file's comes from `end_of_line`, else from most of the project's files.
+
+When a file's code page cannot hold the new text (a `→` in a windows-1252 file), the file is saved as UTF-8 with BOM instead and the result's `warnings` say so. A file whose bytes are not valid in its own encoding is not rewritten: the refactoring fails with `FilesystemError` (4002) before writing anything.
 
 ---
 

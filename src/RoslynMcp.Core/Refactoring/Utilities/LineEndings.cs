@@ -1,5 +1,6 @@
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.Text;
+using RoslynMcp.Core.Workspace;
 
 namespace RoslynMcp.Core.Refactoring.Utilities;
 
@@ -11,8 +12,8 @@ internal static class LineEndings
 {
     /// <summary>
     /// The document's line ending: its first line break. A document without one (empty or
-    /// new) uses the <c>end_of_line</c> of its <c>.editorconfig</c>, else
-    /// <see cref="Environment.NewLine"/>.
+    /// new) uses the <c>end_of_line</c> of its <c>.editorconfig</c>, else the line ending most
+    /// of its project's files use, else <see cref="Environment.NewLine"/>.
     /// </summary>
     public static async Task<string> GetAsync(Document document, CancellationToken cancellationToken)
     {
@@ -25,22 +26,8 @@ internal static class LineEndings
             }
         }
 
-        var tree = await document.GetSyntaxTreeAsync(cancellationToken);
-        if (tree != null &&
-            document.Project.AnalyzerOptions.AnalyzerConfigOptionsProvider.GetOptions(tree)
-                .TryGetValue("end_of_line", out var endOfLine))
-        {
-            switch (endOfLine.Trim().ToLowerInvariant())
-            {
-                case "lf":
-                    return "\n";
-                case "crlf":
-                    return "\r\n";
-                case "cr":
-                    return "\r";
-            }
-        }
-
-        return Environment.NewLine;
+        return await ProjectFileConventions.GetEditorConfigLineEndingAsync(document, cancellationToken)
+            ?? await ProjectFileConventions.GetPrevailingLineEndingAsync(document.Project, cancellationToken)
+            ?? Environment.NewLine;
     }
 }

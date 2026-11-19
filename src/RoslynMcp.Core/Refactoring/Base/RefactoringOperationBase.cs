@@ -113,12 +113,12 @@ public abstract class RefactoringOperationBase<TParams> : IRefactoringOperation<
 
     /// <summary>
     /// Commits solution changes to the filesystem; a file the commit creates takes the
-    /// encoding of <paramref name="newFilesEncodingFrom"/> (see
-    /// <see cref="WorkspaceContext.CommitChangesAsync(Solution, string?, CancellationToken)"/>).
+    /// encoding of <paramref name="newFilesEncodingFrom"/> unless an <c>.editorconfig</c> names
+    /// one (see <see cref="WorkspaceContext.CommitChangesAsync(Solution, string?, CancellationToken)"/>).
     /// The commit's warnings are added to the operation's result.
     /// </summary>
     /// <param name="newSolution">Solution with changes.</param>
-    /// <param name="newFilesEncodingFrom">Existing file whose encoding added documents take.</param>
+    /// <param name="newFilesEncodingFrom">File the content of added documents comes from.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>Commit result.</returns>
     protected async Task<CommitResult> CommitChangesAsync(

@@ -60,7 +60,8 @@ public sealed class MoveTypeToFileOperation : RefactoringOperationBase<MoveTypeT
             return CreatePreviewResult(operationId, changeInfo, resolution);
         }
 
-        // Commit changes; a new target file takes the encoding of the file the type comes from.
+        // Commit changes; a new target file takes the encoding of the file the type comes from,
+        // unless its .editorconfig names one.
         var commitResult = await CommitChangesAsync(newSolution, resolution.Document.FilePath, cancellationToken);
 
         return new RefactoringResult

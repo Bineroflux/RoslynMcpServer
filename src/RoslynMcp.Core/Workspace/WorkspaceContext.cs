@@ -1290,9 +1290,11 @@ public sealed class WorkspaceContext : IDisposable
     /// Commits all pending changes to the filesystem. A file is written in the encoding its
     /// text was decoded with (see <see cref="SourceFileEncoding.ForRewrite"/>), so the bytes
     /// of the text a change leaves alone stay as they were — a windows-1252 file stays
-    /// windows-1252. A file the commit creates takes the encoding of an existing file: a
-    /// document moved to a new path that of its old path, an added document that of
-    /// <paramref name="newFilesEncodingFrom"/> (e.g. the file a type was split off from).
+    /// windows-1252. A document moved to a new path keeps the encoding of its old file. An
+    /// added document takes the <c>.editorconfig</c> <c>charset</c> of its path, else the
+    /// encoding of <paramref name="newFilesEncodingFrom"/> (e.g. the file a type was split off
+    /// from), else the encoding most of its project's files are in, else UTF-8 with BOM (see
+    /// <see cref="NewFileEncodings"/>).
     /// Text a file's code page cannot represent is saved as UTF-8 with BOM instead, which
     /// <see cref="CommitResult.Warnings"/> reports. Encodings are read before anything is
     /// written or deleted; a file whose bytes are not valid in its own encoding fails the
@@ -1302,7 +1304,9 @@ public sealed class WorkspaceContext : IDisposable
     /// Solution with changes to commit, derived from <see cref="Solution"/> as read inside the
     /// running writer section.
     /// </param>
-    /// <param name="newFilesEncodingFrom">Existing file whose encoding added documents take.</param>
+    /// <param name="newFilesEncodingFrom">
+    /// Existing file whose encoding added documents take unless an <c>.editorconfig</c> names one.
+    /// </param>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <remarks>
     /// The change is everything that differs between <paramref name="newSolution"/> and the
@@ -1347,13 +1351,12 @@ public sealed class WorkspaceContext : IDisposable
             // created, deleted or moved may change what a project compiles.
             var files = new List<(string Path, bool Structural)>();
 
-            Encoding? sourceEncoding = null;
-            var sourceEncodingRead = false;
+            var newFileEncodings = new NewFileEncodings(this, newFilesEncodingFrom);
 
             foreach (var projectChanges in changes.GetProjectChanges())
             {
-                // Handle added documents. A file one replaces keeps its encoding; a new one
-                // takes that of newFilesEncodingFrom, else UTF-8 with BOM.
+                // Handle added documents. A file one replaces keeps its encoding; a new one is
+                // written as NewFileEncodings decides.
                 foreach (var docId in projectChanges.GetAddedDocuments())
                 {
                     var doc = newSolution.GetDocument(docId);
@@ -1361,16 +1364,10 @@ public sealed class WorkspaceContext : IDisposable
 
                     var filePath = doc.FilePath;
                     var content = (await doc.GetTextAsync(cancellationToken)).ToString();
-                    if (!sourceEncodingRead && newFilesEncodingFrom != null)
-                    {
-                        sourceEncoding = await GetEncodingToKeepAsync(newFilesEncodingFrom, cancellationToken);
-                        sourceEncodingRead = true;
-                    }
-
                     var encoding = Representable(
                         filePath,
                         content,
-                        GetEncodingOfReplacedFile(filePath) ?? sourceEncoding ?? SourceFileEncoding.Utf8WithBom,
+                        GetEncodingOfReplacedFile(filePath) ?? await newFileEncodings.GetAsync(doc, cancellationToken),
                         warnings);
                     fileOperations.Add((filePath, () => _s.FileWriter.WriteAsync(filePath, content, encoding, cancellationToken), "created"));
                     written.Add((docId, encoding));
@@ -1480,6 +1477,59 @@ public sealed class WorkspaceContext : IDisposable
         var document = GetDocumentByPath(filePath);
         var decodedWith = document == null ? null : (await document.GetTextAsync(cancellationToken)).Encoding;
         return _s.FileWriter.GetEncoding(filePath, decodedWith);
+    }
+
+    /// <summary>
+    /// The encoding of each file a commit creates (an added document; one that replaces an
+    /// existing file keeps that file's encoding instead), decided in this order:
+    /// <list type="number">
+    /// <item>the <c>.editorconfig</c> <c>charset</c> that applies to its path, as an IDE does;</item>
+    /// <item>the encoding of the file its content comes from (the commit's
+    /// <c>newFilesEncodingFrom</c>, e.g. the file a type was split off from);</item>
+    /// <item>the encoding most of its project's files were read in (see
+    /// <see cref="ProjectFileConventions.GetPrevailingEncodingAsync"/>);</item>
+    /// <item>UTF-8 with BOM.</item>
+    /// </list>
+    /// A renamed or moved file is no new file: it keeps its own encoding, like any file a
+    /// refactoring edits. Each source of an answer is read once per commit, before anything is
+    /// written.
+    /// </summary>
+    private sealed class NewFileEncodings(WorkspaceContext context, string? contentFrom)
+    {
+        private readonly Dictionary<ProjectId, Encoding?> _prevailing = [];
+        private Encoding? _contentFromEncoding;
+        private bool _contentFromRead;
+
+        public async Task<Encoding> GetAsync(Document document, CancellationToken cancellationToken)
+        {
+            if (await ProjectFileConventions.GetEditorConfigEncodingAsync(document, cancellationToken) is { } configured)
+                return configured;
+
+            if (contentFrom != null)
+            {
+                if (!_contentFromRead)
+                {
+                    _contentFromEncoding = await context.GetEncodingToKeepAsync(contentFrom, cancellationToken);
+                    _contentFromRead = true;
+                }
+
+                if (_contentFromEncoding != null)
+                    return _contentFromEncoding;
+            }
+
+            // The project as it was: the files the commit adds have no recorded encoding yet.
+            var projectId = document.Project.Id;
+            if (!_prevailing.TryGetValue(projectId, out var prevailing))
+            {
+                var project = context._s.Solution.GetProject(projectId);
+                prevailing = project == null
+                    ? null
+                    : await ProjectFileConventions.GetPrevailingEncodingAsync(project, cancellationToken);
+                _prevailing[projectId] = prevailing;
+            }
+
+            return prevailing ?? SourceFileEncoding.Utf8WithBom;
+        }
     }
 
     /// <summary>

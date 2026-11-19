@@ -133,6 +133,27 @@ public class SourceFileEncodingTests
         Assert.Equal("UTF-16 LE with BOM", SourceFileEncoding.Describe(Encoding.Unicode));
     }
 
+    [Theory]
+    [InlineData("utf-8", 65001, false)]
+    [InlineData("UTF-8-BOM", 65001, true)]
+    [InlineData(" latin1 ", 28591, false)]
+    [InlineData("utf-16le", 1200, true)]
+    [InlineData("utf-16be", 1201, true)]
+    public void FromEditorConfigCharset_NamesTheEncoding(string charset, int codePage, bool bom)
+    {
+        var encoding = SourceFileEncoding.FromEditorConfigCharset(charset)!;
+
+        Assert.Equal(codePage, encoding.CodePage);
+        Assert.Equal(bom, encoding.GetPreamble().Length > 0);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("unset")]
+    [InlineData("utf-32")]
+    public void FromEditorConfigCharset_AnythingElse_IsNull(string? charset) =>
+        Assert.Null(SourceFileEncoding.FromEditorConfigCharset(charset));
+
     private static Encoding GetWindows1252()
     {
         Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);

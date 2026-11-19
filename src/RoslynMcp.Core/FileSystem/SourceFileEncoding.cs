@@ -24,7 +24,10 @@ namespace RoslynMcp.Core.FileSystem;
 /// </remarks>
 public static class SourceFileEncoding
 {
-    /// <summary>UTF-8 with a byte order mark: what new files and converted files are written in.</summary>
+    /// <summary>
+    /// UTF-8 with a byte order mark: what converted files are written in, and new files when
+    /// neither an <c>.editorconfig</c> nor the project's other files say otherwise.
+    /// </summary>
     public static Encoding Utf8WithBom { get; } = new UTF8Encoding(encoderShouldEmitUTF8Identifier: true);
 
     /// <summary>UTF-8 without a byte order mark.</summary>
@@ -190,6 +193,23 @@ public static class SourceFileEncoding
             return $"'{character}' (U+{codePoint:X4})";
         }
     }
+
+    /// <summary>
+    /// The encoding an <c>.editorconfig</c> <c>charset</c> value names: <c>utf-8</c> (without
+    /// BOM), <c>utf-8-bom</c>, <c>latin1</c> (ISO-8859-1), <c>utf-16le</c> and <c>utf-16be</c>
+    /// (with BOM, without which no compiler could tell them); null for anything else, such as
+    /// <c>unset</c>. Case and surrounding spaces don't matter.
+    /// </summary>
+    public static Encoding? FromEditorConfigCharset(string? charset) =>
+        charset?.Trim().ToLowerInvariant() switch
+        {
+            "utf-8" => Utf8WithoutBom,
+            "utf-8-bom" => Utf8WithBom,
+            "latin1" => Encoding.Latin1,
+            "utf-16le" => new UnicodeEncoding(bigEndian: false, byteOrderMark: true),
+            "utf-16be" => new UnicodeEncoding(bigEndian: true, byteOrderMark: true),
+            _ => null,
+        };
 
     /// <summary>
     /// The encoding the byte order mark at the start of <paramref name="bytes"/> identifies,

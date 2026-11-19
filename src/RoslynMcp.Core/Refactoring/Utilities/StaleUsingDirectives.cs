@@ -10,7 +10,8 @@ namespace RoslynMcp.Core.Refactoring.Utilities;
 /// Cleans up using directives that a change of namespaces broke: a directive that named
 /// something in the old namespace (the namespace itself, a namespace below it or a type in it)
 /// and bound before the change, but no longer binds after it. Directives that still bind, or
-/// that did not bind before either, are left as they are.
+/// that did not bind before either, are left as they are, and so are generated files (the
+/// build writes them anew).
 /// </summary>
 internal static class StaleUsingDirectives
 {
@@ -55,7 +56,8 @@ internal static class StaleUsingDirectives
             var document = solution.GetDocument(documentId);
             var original = before.GetDocument(documentId);
             if (document == null || original == null ||
-                await document.GetSyntaxRootAsync(cancellationToken) is not CompilationUnitSyntax root)
+                await document.GetSyntaxRootAsync(cancellationToken) is not CompilationUnitSyntax root ||
+                GeneratedCode.IsGenerated(root.SyntaxTree, cancellationToken))
             {
                 continue;
             }

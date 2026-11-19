@@ -31,7 +31,7 @@ public sealed class RenameNamespaceTool : IToolHandler
     public string Description =>
         "Rename a namespace declared in source, and its sub-namespaces, across the solution; the new name may have a " +
         "different depth (App.Old -> Company.App.New). Rewrites block and file-scoped declarations, usings (global, " +
-        "static, alias), qualified and global:: names and crefs; not comments or strings. Refused when a type would " +
+        "static, alias), qualified and global:: names and crefs; not comments or strings. Removes usings it makes duplicates. Refused when a type would " +
         "collide with an existing one, or an enclosing namespace block that also declares other things would have to " +
         "change. Generated files and project-level <Using>/<RootNamespace> are not changed; 'warnings' names them and " +
         "the compiler errors left behind. updateFolders moves the files that sit in their old namespace's folder into the new one's, where that is safe.";

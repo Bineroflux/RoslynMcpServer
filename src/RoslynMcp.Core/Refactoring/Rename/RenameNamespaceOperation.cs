@@ -34,7 +34,10 @@ namespace RoslynMcp.Core.Refactoring.Rename;
 /// A name inside a renamed declaration that found a namespace or type through an enclosing
 /// namespace the declaration leaves (<c>Sibling.Part</c> inside <c>namespace Company.Old</c>
 /// for <c>Company.Sibling.Part</c>, renamed to <c>Other.New</c>), or that a type of the new
-/// surroundings would shadow, is qualified as far as needed to bind as before.
+/// surroundings would shadow, is qualified as far as needed to bind as before. A using directive
+/// the rename makes a duplicate of another in its scope (CS0105) or of a global using (CS8933)
+/// is removed, and so is an import of an enclosing namespace of the old one that the rename
+/// empties; duplicates that were there before stay.
 /// </para>
 /// <para>
 /// A declaration whose enclosing declaration stays (<c>namespace A { namespace B }</c> with
@@ -98,6 +101,7 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
         }
 
         var newSolution = await ApplyAsync(solution, scan, cancellationToken);
+        (newSolution, var usingsRemoved, var vanished) = await RemoveRedundantUsingsAsync(rename, solution, newSolution, scan, cancellationToken);
 
         var warnings = ProjectFileWarnings(rename, solution, out var projectsWithUsings);
         warnings.AddRange(scan.Generated.Select(path =>
@@ -108,6 +112,8 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
             warnings.AddRange(PlanMoves(scan, solution, plans));
 
         var affected = new HashSet<DocumentId>(scan.Files.SelectMany(f => DocumentIds(solution, f.Document)));
+        affected.UnionWith(ChangedDocuments(solution, newSolution));
+        affected.UnionWith(await DocumentsMentioningAsync(newSolution, vanished, cancellationToken));
         foreach (var projectId in scan.ProjectsWithGenerated.Concat(projectsWithUsings))
             affected.UnionWith(solution.GetProject(projectId)?.DocumentIds ?? []);
         warnings.AddRange(await IntroducedErrors.FindAsync(solution, newSolution, affected, cancellationToken) ?? []);
@@ -121,8 +127,9 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
                 Success = true,
                 OperationId = operationId,
                 Preview = true,
-                PendingChanges = await CreatePendingChangesAsync(rename, scan, newSolution, plans, cancellationToken),
+                PendingChanges = await CreatePendingChangesAsync(rename, scan, solution, newSolution, plans, cancellationToken),
                 ReferencesUpdated = references,
+                UsingDirectivesRemoved = usingsRemoved,
                 Warnings = warnings.Count == 0 ? null : warnings
             };
         }
@@ -184,6 +191,7 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
                 NewNamespace = rename.New
             },
             ReferencesUpdated = references,
+            UsingDirectivesRemoved = usingsRemoved,
             Error = partial,
             Warnings = warnings.Count == 0 ? null : warnings
         };
@@ -788,6 +796,121 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
     private static IEnumerable<DocumentId> DocumentIds(Solution solution, Document document) =>
         document.FilePath == null ? [document.Id] : solution.GetDocumentIdsWithFilePath(document.FilePath);
 
+    /// <summary>The documents whose text differs between the two solutions.</summary>
+    private static IEnumerable<DocumentId> ChangedDocuments(Solution solution, Solution newSolution) =>
+        newSolution.GetChanges(solution).GetProjectChanges()
+            .SelectMany(p => p.GetChangedDocuments(onlyGetDocumentsWithTextChanges: true));
+
+    /// <summary>
+    /// Removes the using directives the rewrite made redundant or broke: one that now duplicates
+    /// another in its scope (CS0105, a warning) or a global using of its project (CS8933), and an
+    /// import of an enclosing namespace of the old one that the rename emptied, which no longer
+    /// exists (CS0246; see <see cref="StaleUsingDirectives"/>). Duplicates there were before stay.
+    /// Returns the namespaces that vanished, whose remaining imports are checked for errors.
+    /// </summary>
+    private static async Task<(Solution Solution, int Removed, List<string> Vanished)> RemoveRedundantUsingsAsync(
+        NamespaceRename rename,
+        Solution solution,
+        Solution newSolution,
+        Scan scan,
+        CancellationToken cancellationToken)
+    {
+        var documents = new List<DocumentId>(ChangedDocuments(solution, newSolution));
+
+        // A global using renamed into one its project has already makes the other files' plain
+        // usings of that namespace redundant too.
+        var newSegment = rename.NewSegments[^1];
+        var projectsWithRenamedGlobalUsings = scan.Files.SelectMany(f => f.Versions)
+            .Where(v => v.Replacements.Keys.Any(k => k.FirstAncestorOrSelf<UsingDirectiveSyntax>() is { } u &&
+                u.GlobalKeyword.IsKind(SyntaxKind.GlobalKeyword)))
+            .Select(v => v.Document.Project.Id)
+            .ToHashSet();
+        foreach (var project in projectsWithRenamedGlobalUsings.Select(newSolution.GetProject).OfType<Project>())
+        {
+            foreach (var document in project.Documents)
+            {
+                var text = (await document.GetTextAsync(cancellationToken)).ToString();
+                if (text.Contains("using", StringComparison.Ordinal) && text.Contains(newSegment, StringComparison.Ordinal))
+                    documents.Add(document.Id);
+            }
+        }
+
+        var (result, removed) = await NewlyReportedUsings.RemoveAsync(
+            solution,
+            newSolution,
+            documents,
+            [NewlyReportedUsings.DuplicateUsing, NewlyReportedUsings.DuplicateOfGlobalUsing],
+            includeGlobal: true,
+            cancellationToken);
+        var count = removed.Count;
+        var vanished = new List<string>();
+
+        // An enclosing namespace of the old one that held nothing else is gone with it.
+        var declaring = scan.Files.Where(f => f.Declarations > 0).SelectMany(f => f.Versions).Select(v => v.Document.Project.Id).ToHashSet();
+        for (var length = rename.OldSegments.Length - 1; length > 0; length--)
+        {
+            var parent = string.Join('.', rename.OldSegments.Take(length));
+            if (!await VanishesAsync(parent, declaring, solution, result, cancellationToken))
+                break;
+
+            var stale = await StaleUsingDirectives.FixAsync(solution, result, parent, _ => null, cancellationToken);
+            result = stale.Solution;
+            count += stale.Removed;
+            vanished.Add(parent);
+        }
+
+        return (result, count, vanished);
+    }
+
+    /// <summary>
+    /// The documents with a using directive that may name one of <paramref name="namespaces"/>:
+    /// those the cleanup leaves (aliases, generated files) are checked for the errors they get.
+    /// </summary>
+    private static async Task<List<DocumentId>> DocumentsMentioningAsync(
+        Solution solution,
+        List<string> namespaces,
+        CancellationToken cancellationToken)
+    {
+        var documents = new List<DocumentId>();
+        if (namespaces.Count == 0)
+            return documents;
+
+        var segments = namespaces.Select(n => n[(n.LastIndexOf('.') + 1)..]).Distinct(StringComparer.Ordinal).ToList();
+        foreach (var document in solution.Projects.SelectMany(p => p.Documents))
+        {
+            var text = (await document.GetTextAsync(cancellationToken)).ToString();
+            if (text.Contains("using", StringComparison.Ordinal) && segments.Any(s => text.Contains(s, StringComparison.Ordinal)))
+                documents.Add(document.Id);
+        }
+
+        return documents;
+    }
+
+    /// <summary>
+    /// Whether namespace <paramref name="name"/> exists in one of <paramref name="projects"/>
+    /// before the rename but not after it.
+    /// </summary>
+    private static async Task<bool> VanishesAsync(
+        string name,
+        IEnumerable<ProjectId> projects,
+        Solution solution,
+        Solution newSolution,
+        CancellationToken cancellationToken)
+    {
+        foreach (var id in projects)
+        {
+            if (solution.GetProject(id) is { } before && await before.GetCompilationAsync(cancellationToken) is { } beforeCompilation &&
+                FindNamespace(beforeCompilation.GlobalNamespace, name) != null &&
+                newSolution.GetProject(id) is { } after && await after.GetCompilationAsync(cancellationToken) is { } afterCompilation &&
+                FindNamespace(afterCompilation.GlobalNamespace, name) == null)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     /// <summary>
     /// Warns about project-level usings and root namespaces under the old name, which are not
     /// rewritten, in the project files and the <c>Directory.Build.props</c>/<c>.targets</c> above
@@ -934,24 +1057,33 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
     private static async Task<List<PendingChange>> CreatePendingChangesAsync(
         NamespaceRename rename,
         Scan scan,
+        Solution solution,
         Solution newSolution,
         List<PlannedMove> plans,
         CancellationToken cancellationToken)
     {
         var changes = new List<PendingChange>();
-        foreach (var file in scan.Files.Where(f => f.Versions.Any(v => v.Replacements.Count > 0)))
+        var files = scan.Files.Where(f => f.Document.FilePath != null)
+            .ToDictionary(f => PathResolver.NormalizePath(f.Document.FilePath!), PathResolver.PathComparer);
+        var paths = new HashSet<string>(PathResolver.PathComparer);
+        foreach (var id in ChangedDocuments(solution, newSolution))
         {
-            var before = await file.Document.GetTextAsync(cancellationToken);
-            var after = await newSolution.GetDocument(file.Document.Id)!.GetTextAsync(cancellationToken);
+            var document = solution.GetDocument(id)!;
+            if (document.FilePath != null && !paths.Add(PathResolver.NormalizePath(document.FilePath)))
+                continue;
+
+            var before = await document.GetTextAsync(cancellationToken);
+            var after = await newSolution.GetDocument(id)!.GetTextAsync(cancellationToken);
             var line = Enumerable.Range(0, Math.Min(before.Lines.Count, after.Lines.Count))
                 .FirstOrDefault(i => before.Lines[i].ToString() != after.Lines[i].ToString());
 
             changes.Add(new PendingChange
             {
-                File = file.Document.FilePath ?? file.Document.Name,
+                File = document.FilePath ?? document.Name,
                 ChangeType = ChangeKind.Modify,
-                Description = $"Rename namespace '{rename.Old}' to '{rename.New}': " +
-                    $"{file.Declarations} declaration(s), {file.References} reference(s)",
+                Description = document.FilePath != null && files.TryGetValue(PathResolver.NormalizePath(document.FilePath), out var file)
+                    ? $"Rename namespace '{rename.Old}' to '{rename.New}': {file.Declarations} declaration(s), {file.References} reference(s)"
+                    : "Remove using directives the rename made redundant",
                 BeforeSnippet = before.Lines[line].ToString().Trim(),
                 AfterSnippet = after.Lines[line].ToString().Trim(),
                 StartLine = line + 1,

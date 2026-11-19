@@ -151,10 +151,17 @@ public sealed class ExtractBaseClassOperation : RefactoringOperationBase<Extract
                 new Dictionary<string, object> { ["dependencies"] = dependencies.Select(d => d.Name).Distinct().ToList() });
         }
 
+        // The members keep the layout they are written with (only re-indented); their comments
+        // come along, the blank lines and directives before them stay.
         var membersToExtract = selected
             .Select(s => s.Chosen(s.Declaration))
-            .Select((member, i) => member.WithModifiers(
-                MovedMembers.MovedModifiers(member.Modifiers, selected[i].Symbols[0], @params.BaseClassName, sameAssembly: true).Modifiers))
+            .Select((member, i) =>
+            {
+                var moved = member.WithModifiers(
+                    MovedMembers.MovedModifiers(member.Modifiers, selected[i].Symbols[0], @params.BaseClassName, sameAssembly: true).Modifiers);
+                var written = moved.WithLeadingTrivia(MovedMembers.CommentLines(selected[i].Declaration));
+                return GeneratedCodeFormatter.KeepLayout(moved, written, selected[i].Declaration);
+            })
             .ToList();
 
         // Generate base class
@@ -229,6 +236,8 @@ public sealed class ExtractBaseClassOperation : RefactoringOperationBase<Extract
         }
 
         newSolution = await GeneratedCodeFormatter.FormatAsync(newSolution, document, cancellationToken);
+        foreach (var target in @params.TargetFile == null ? [] : newSolution.GetDocumentIdsWithFilePath(@params.TargetFile).Where(id => id != document.Id))
+            newSolution = await GeneratedCodeFormatter.FormatAsync(newSolution, newSolution.GetDocument(target)!, cancellationToken);
 
         // Remove the extracted declarations (or variables) from the text, with their comments.
         var formatted = newSolution.GetDocument(document.Id)!;

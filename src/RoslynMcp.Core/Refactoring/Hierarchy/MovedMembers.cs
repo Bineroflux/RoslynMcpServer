@@ -176,7 +176,14 @@ internal static class MovedMembers
     /// The comments directly above a declaration (its documentation comment), without the blank
     /// lines, directives or indentation before them.
     /// </summary>
-    public static SyntaxTriviaList Comments(SyntaxNode declaration)
+    public static SyntaxTriviaList Comments(SyntaxNode declaration) =>
+        SyntaxFactory.TriviaList(CommentLines(declaration).Where(t => !t.IsKind(SyntaxKind.WhitespaceTrivia)));
+
+    /// <summary>
+    /// The lines of comments directly above a declaration and the indentation of its first line,
+    /// as written: its leading trivia after the last blank line or directive.
+    /// </summary>
+    public static SyntaxTriviaList CommentLines(SyntaxNode declaration)
     {
         var trivia = declaration.GetLeadingTrivia();
         var start = 0;
@@ -186,7 +193,7 @@ internal static class MovedMembers
                 start = i + 1;
         }
 
-        return SyntaxFactory.TriviaList(trivia.Skip(start).Where(t => !t.IsKind(SyntaxKind.WhitespaceTrivia)));
+        return SyntaxFactory.TriviaList(trivia.Skip(start));
 
         // An end of line with nothing but whitespace before it on its line: a blank line.
         static bool IsLineStart(SyntaxTriviaList list, int index)

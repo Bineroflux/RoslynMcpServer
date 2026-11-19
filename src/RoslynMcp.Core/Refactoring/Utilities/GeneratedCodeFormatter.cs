@@ -24,13 +24,13 @@ internal static class GeneratedCodeFormatter
     /// <summary>The code as written, for each node marked to keep its layout.</summary>
     private static readonly ConditionalWeakTable<SyntaxAnnotation, KeptLayout> KeptLayouts = new();
 
-    /// <summary>Moved code and where it sits: one of a run of whole statements, or an expression inside a line.</summary>
-    /// <param name="Original">The code as it was written.</param>
+    /// <summary>Moved code and where it sits: one of a run of whole lines (statements, members), or an expression inside a line.</summary>
+    /// <param name="Original">The code as it is to be written.</param>
     /// <param name="Indentation">The indentation of the line it started on.</param>
-    /// <param name="FirstStatement">The first of a run of statements: it starts a line, without the blank lines before it.</param>
-    /// <param name="LastStatement">The last of a run of statements: it ends its line.</param>
+    /// <param name="First">The first of a run of statements or members: it starts a line; the blank lines before it are the formatter's.</param>
+    /// <param name="Last">The last of a run of statements or members: it ends its line.</param>
     /// <param name="Inline">An expression: its first line stays where the formatter put it, its other lines move along.</param>
-    private sealed record KeptLayout(SyntaxNode Original, string Indentation, bool FirstStatement, bool LastStatement, bool Inline);
+    private sealed record KeptLayout(SyntaxNode Original, string Indentation, bool First, bool Last, bool Inline);
 
     /// <summary>
     /// Marks a statement an operation moves into generated code (a node <see cref="FormatAsync"/>
@@ -48,6 +48,19 @@ internal static class GeneratedCodeFormatter
         KeepLayout(node, new KeptLayout(original, IndentationOf(original), first, last, Inline: false));
 
     /// <summary>
+    /// Marks a member (or statement) an operation moves and changes a little (e.g. its modifiers)
+    /// for <see cref="FormatAsync"/> to put back as <paramref name="written"/> after formatting,
+    /// re-indented like <see cref="KeepLayout{TNode}(TNode, StatementSyntax, bool, bool)"/>. The
+    /// blank lines before it are the formatter's.
+    /// </summary>
+    /// <param name="node">The member as it goes into the new tree (it may be laid out anew there).</param>
+    /// <param name="written">The member as it is to be written: the original with its changes, its leading trivia from its first comment on.</param>
+    /// <param name="original">The member in its original tree, which tells the indentation it was written at.</param>
+    public static TNode KeepLayout<TNode>(TNode node, SyntaxNode written, MemberDeclarationSyntax original)
+        where TNode : SyntaxNode =>
+        KeepLayout(node, new KeptLayout(written, IndentationOf(original), First: true, Last: true, Inline: false));
+
+    /// <summary>
     /// Marks an expression an operation moves into generated code: after formatting, it is put
     /// back as written; its first line stays where the formatter put it, its other lines move
     /// with it.
@@ -57,13 +70,22 @@ internal static class GeneratedCodeFormatter
     /// <param name="original">The expression in its original tree, which tells the indentation it was written at.</param>
     public static TNode KeepLayout<TNode>(TNode node, ExpressionSyntax written, ExpressionSyntax original)
         where TNode : SyntaxNode =>
-        KeepLayout(node, new KeptLayout(written, IndentationOf(original), FirstStatement: false, LastStatement: false, Inline: true));
+        KeepLayout(node, new KeptLayout(written, IndentationOf(original), First: false, Last: false, Inline: true));
 
     private static TNode KeepLayout<TNode>(TNode node, KeptLayout layout)
         where TNode : SyntaxNode
     {
         var annotation = new SyntaxAnnotation(KeepLayoutKind);
         KeptLayouts.AddOrUpdate(annotation, layout);
+
+        // The comments and directives before a statement or member come back from the code as
+        // written; without them, the formatter places its first line where it belongs.
+        if (!layout.Inline)
+        {
+            node = node.WithLeadingTrivia(node.GetLeadingTrivia().Where(t =>
+                t.IsKind(SyntaxKind.WhitespaceTrivia) || t.IsKind(SyntaxKind.EndOfLineTrivia)));
+        }
+
         return node.WithAdditionalAnnotations(annotation);
     }
 
@@ -170,9 +192,13 @@ internal static class GeneratedCodeFormatter
             }
             else
             {
-                if (layout.FirstStatement)
-                    restored = restored.WithLeadingTrivia(FromFirstContentLine(restored.GetLeadingTrivia(), indentation));
-                if (layout.LastStatement && !restored.GetTrailingTrivia().Any(t => t.IsKind(SyntaxKind.EndOfLineTrivia)))
+                if (layout.First)
+                {
+                    restored = restored.WithLeadingTrivia(BlankLines(formatted.GetLeadingTrivia())
+                        .AddRange(FromFirstContentLine(restored.GetLeadingTrivia(), indentation)));
+                }
+
+                if (layout.Last && !restored.GetTrailingTrivia().Any(t => t.IsKind(SyntaxKind.EndOfLineTrivia)))
                     restored = restored.WithTrailingTrivia(formatted.GetTrailingTrivia());
             }
 
@@ -215,13 +241,34 @@ internal static class GeneratedCodeFormatter
                 Visit(trivia);
         }
 
-        return node.ReplaceTrivia(lineStarts, (original, _) =>
+        // The lines of a documentation comment after its first start with its exterior
+        // (indentation and ///), inside the comment's structure.
+        var exteriors = node.DescendantTrivia(descendIntoTrivia: true)
+            .Where(t => t.IsKind(SyntaxKind.DocumentationCommentExteriorTrivia) && t.ToString().StartsWith(from, StringComparison.Ordinal) && from.Length > 0);
+
+        return node.ReplaceTrivia(lineStarts.Concat(exteriors), (original, _) =>
         {
-            var whitespace = original.ToString();
-            return whitespace.StartsWith(from, StringComparison.Ordinal)
-                ? SyntaxFactory.Whitespace(to + whitespace[from.Length..])
-                : original;
+            var text = original.ToString();
+            if (!text.StartsWith(from, StringComparison.Ordinal))
+                return original;
+            return original.IsKind(SyntaxKind.DocumentationCommentExteriorTrivia)
+                ? SyntaxFactory.DocumentationCommentExterior(to + text[from.Length..])
+                : SyntaxFactory.Whitespace(to + text[from.Length..]);
         });
+    }
+
+    /// <summary>The blank lines at the start of leading trivia: everything up to the line its first comment or token is on.</summary>
+    private static SyntaxTriviaList BlankLines(SyntaxTriviaList trivia)
+    {
+        var content = 0;
+        while (content < trivia.Count && (trivia[content].IsKind(SyntaxKind.WhitespaceTrivia) || trivia[content].IsKind(SyntaxKind.EndOfLineTrivia)))
+            content++;
+
+        var lineStart = content;
+        while (lineStart > 0 && !trivia[lineStart - 1].IsKind(SyntaxKind.EndOfLineTrivia))
+            lineStart--;
+
+        return SyntaxFactory.TriviaList(trivia.Take(lineStart));
     }
 
     /// <summary>Leading trivia without the blank lines before the first comment or token, starting with <paramref name="indentation"/>.</summary>

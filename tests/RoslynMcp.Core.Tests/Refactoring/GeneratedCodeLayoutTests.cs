@@ -265,10 +265,11 @@ public sealed class GeneratedCodeLayoutTests
             },
             Ct));
 
+        // The moved member keeps the layout it was written with.
         AssertLayout("""
                 public class PersonBase
                 {
-                    public int Odd() => 1;
+                    public int  Odd( )  =>  1;
                 }
 
                 public class Person : PersonBase

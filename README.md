@@ -140,6 +140,8 @@ roslyn-cli C:/path/to/MySolution.sln extract-method --source-file Foo.cs --start
 
 Output is JSON by default (pipeable to `jq`). Use `--format text` for human-readable output. Exit codes: 0=success, 1=tool error, 2=CLI error, 3=environment error.
 
+`roslyn-cli <tool-name> --help` lists a tool's options. An option the tool does not take (`--max-result`, or a key inside a JSON value such as `--parameters '[{"orignalName": ...}]'`) is an error (exit code 2) that names it, suggests the closest valid one and lists the valid options; it used to be ignored silently.
+
 ---
 
 ## Configuration
@@ -193,6 +195,8 @@ Config file locations:
 ## Available Tools
 
 All tools accept a `solutionPath` parameter (absolute path to a `.sln`, `.slnx`, or `.csproj` file). You can also point it at a single standalone `.cs` file — for example a .NET 10 [file-based program](https://learn.microsoft.com/dotnet/core/whats-new/dotnet-10/sdk#file-based-apps) you'd run with `dotnet run file.cs`. The SDK turns it into a project (via `dotnet run-api`) which is loaded through MSBuildWorkspace, so it behaves like a real project: the SDK's default analyzers and source generators run (`[GeneratedRegex]` works even with no directives), and `#:package`/`#:project`/`#:sdk`/`#:property` directives resolve — with `#:project` references navigable as source, and the repo's full MSBuild context (`Directory.Build.props`, `global.json`, `NuGet.config`, …) honored exactly as `dotnet run` does. The transient `<file>.cs.csproj` is created next to the file only while it loads (git-ignored via `.git/info/exclude`, then deleted). The first load builds/restores once (then it's cached); a .NET 10 or later SDK is required for directive resolution. Refactoring tools also accept a `preview` parameter (set to `true` to see changes without applying them).
+
+Every call's arguments are checked against the tool's input schema before the tool runs. A key the tool does not take — misspelled, or in another case (argument names are case-sensitive camelCase: `maxResults`, not `MaxResults`), also inside `change_signature`'s `parameters` entries — fails the call with a tool error (code `1018`, `UnknownParameter`) that names each such key, suggests the key it probably means, and lists the valid ones. Such keys used to be dropped silently, so the option took its default.
 
 ### Move and Rename
 

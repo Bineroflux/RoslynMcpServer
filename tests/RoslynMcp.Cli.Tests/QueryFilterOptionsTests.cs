@@ -57,7 +57,7 @@ public class QueryFilterOptionsTests
             ["exclude-diagnostic-ids"] = """["CS0219"]""",
             ["project-path"] = @"C:\src\App\App.csproj",
             ["max-results"] = "5"
-        });
+        }, ParamsSchema.For(typeof(GetDiagnosticsParams)));
 
         var @params = JsonSerializer.Deserialize<GetDiagnosticsParams>(json, JsonOptions)!;
 

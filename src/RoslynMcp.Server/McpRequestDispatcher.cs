@@ -177,6 +177,13 @@ public sealed class McpRequestDispatcher
             return McpResponse.Failure(request.Id, -32602, $"Unknown tool: {callParams.Name}");
         }
 
+        // Refused like a missing argument, as a tool error the caller can correct the call from.
+        if (ToolArguments.Check(handler.Name, _toolRegistry.GetInputSchema(handler.Name), callParams.Arguments) is { } invalid)
+        {
+            FileLogger.LogWarning($"Refused arguments of {handler.Name}: {invalid.Content[0].Text}");
+            return McpResponse.Success(request.Id, invalid);
+        }
+
         // Open a timing scope so the workspace provider can record load time
         // through WorkspaceTimingContext and the operation bases can observe it.
         // Established here (synchronously, before any await on handler.ExecuteAsync)

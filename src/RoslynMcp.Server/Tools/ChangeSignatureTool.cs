@@ -103,7 +103,8 @@ public sealed class ChangeSignatureTool : IToolHandler
                             @default = false
                         }
                     },
-                    required = new[] { "name" }
+                    required = new[] { "name" },
+                    additionalProperties = false
                 },
                 description = "Parameter changes to apply"
             },

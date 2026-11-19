@@ -70,6 +70,19 @@ if (tool.RequiresWorkspace && string.IsNullOrEmpty(parsed.SolutionPath))
     return ExitCliError;
 }
 
+// Convert the options to the tool's JSON parameters, refusing options it does not take.
+string json;
+try
+{
+    json = ArgsToJsonConverter.Convert(parsed.Options, ParamsSchema.For(tool.ParamsType));
+}
+catch (CliOptionException ex)
+{
+    Console.Error.WriteLine(ex.Message);
+    Console.Error.WriteLine($"Run 'roslyn-cli {tool.Name} --help' for its options.");
+    return ExitCliError;
+}
+
 // Set up cancellation
 using var cts = new CancellationTokenSource();
 Console.CancelKeyPress += (_, e) =>
@@ -89,9 +102,6 @@ try
         OutputResult(diagnoseResult, parsed.Format);
         return diagnoseResult is DiagnoseResult dr && dr.Healthy ? ExitSuccess : ExitToolError;
     }
-
-    // Convert args to JSON
-    var json = ArgsToJsonConverter.Convert(parsed.Options);
 
     if (parsed.Verbose)
         Console.Error.WriteLine($"[verbose] Params JSON: {json}");

@@ -1,3 +1,4 @@
+using System.Text.Json;
 using RoslynMcp.Server.Transport;
 
 namespace RoslynMcp.Server.Tools;
@@ -8,6 +9,7 @@ namespace RoslynMcp.Server.Tools;
 public sealed class ToolRegistry
 {
     private readonly Dictionary<string, IToolHandler> _handlers = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, JsonElement> _schemas = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// Registers a tool handler.
@@ -16,7 +18,14 @@ public sealed class ToolRegistry
     public void Register(IToolHandler handler)
     {
         _handlers[handler.Name] = handler;
+        _schemas[handler.Name] = JsonSerializer.SerializeToElement(handler.InputSchema);
     }
+
+    /// <summary>
+    /// The input schema of a registered tool as JSON, serialized once when it was registered.
+    /// </summary>
+    /// <param name="name">Tool name.</param>
+    public JsonElement GetInputSchema(string name) => _schemas[name];
 
     /// <summary>
     /// Gets a handler by tool name.

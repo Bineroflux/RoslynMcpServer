@@ -61,6 +61,12 @@ public static class ErrorCodes
     /// <summary>A parameter has a value outside the set the tool supports.</summary>
     public const string InvalidParameterValue = "1017";
 
+    /// <summary>
+    /// An argument the tool does not take: a misspelled key, or a key in another case (argument
+    /// names are case-sensitive). The message names each one and lists the valid keys.
+    /// </summary>
+    public const string UnknownParameter = "1018";
+
     // ============================================
     // Resource Errors (2xxx)
     // ============================================

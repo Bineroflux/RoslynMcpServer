@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.Json.Serialization.Metadata;
 using RoslynMcp.Contracts.Models;
 using RoslynMcp.Core.Query;
 using RoslynMcp.Core.Query.Base;
@@ -52,11 +53,16 @@ public sealed class ToolEntry
 /// </summary>
 public sealed class ToolRegistry
 {
-    private static readonly JsonSerializerOptions JsonOpts = new()
+    /// <summary>
+    /// How the CLI reads a tool's parameters from the JSON its options are converted to:
+    /// camelCase names, matched case-insensitively, enums by name.
+    /// </summary>
+    internal static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         PropertyNameCaseInsensitive = true,
-        Converters = { new JsonStringEnumConverter() }
+        Converters = { new JsonStringEnumConverter() },
+        TypeInfoResolver = new DefaultJsonTypeInfoResolver()
     };
 
     private readonly Dictionary<string, ToolEntry> _tools = new(StringComparer.OrdinalIgnoreCase);
@@ -77,7 +83,7 @@ public sealed class ToolRegistry
             Execute = async (ctx, json, ct) =>
             {
                 var op = (TOp)Activator.CreateInstance(typeof(TOp), ctx!)!;
-                var p = JsonSerializer.Deserialize<TParams>(json, JsonOpts)!;
+                var p = JsonSerializer.Deserialize<TParams>(json, JsonOptions)!;
                 return await op.ExecuteAsync(p, ct);
             }
         };
@@ -99,7 +105,7 @@ public sealed class ToolRegistry
             Execute = async (ctx, json, ct) =>
             {
                 var op = (TOp)Activator.CreateInstance(typeof(TOp), ctx!)!;
-                var p = JsonSerializer.Deserialize<TParams>(json, JsonOpts)!;
+                var p = JsonSerializer.Deserialize<TParams>(json, JsonOptions)!;
                 return await op.ExecuteAsync(p, ct);
             }
         };
@@ -237,7 +243,7 @@ public sealed class ToolRegistry
             async (ctx, json, ct) =>
             {
                 var op = new MoveTypeToFileOperation(ctx!);
-                var p = JsonSerializer.Deserialize<MoveTypeToFileParams>(json, JsonOpts)!;
+                var p = JsonSerializer.Deserialize<MoveTypeToFileParams>(json, JsonOptions)!;
                 return await op.ExecuteAsync(p, ct);
             });
 
@@ -247,7 +253,7 @@ public sealed class ToolRegistry
             async (ctx, json, ct) =>
             {
                 var op = new MoveTypeToNamespaceOperation(ctx!);
-                var p = JsonSerializer.Deserialize<MoveTypeToNamespaceParams>(json, JsonOpts)!;
+                var p = JsonSerializer.Deserialize<MoveTypeToNamespaceParams>(json, JsonOptions)!;
                 return await op.ExecuteAsync(p, ct);
             });
 

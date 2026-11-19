@@ -1,6 +1,7 @@
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using Microsoft.CodeAnalysis.Simplification;
 using RoslynMcp.Contracts.Errors;
 using RoslynMcp.Contracts.Models;
 using RoslynMcp.Core.FileSystem;
@@ -70,9 +71,11 @@ public sealed class GenerateEqualsHashCodeOperation : RefactoringOperationBase<G
         if (members.Count == 0)
             throw new RefactoringException(ErrorCodes.NoMembersToGenerate, "No fields or properties available for equality generation.");
 
-        // Generate Equals method
-        var equalsMethod = GenerateEquals(@params.TypeName, members);
-        var hashCodeMethod = GenerateGetHashCode(members);
+        // Generate Equals method. Framework types are written fully qualified and simplified
+        // to what the file's usings allow, so the code compiles without implicit usings too.
+        var nullable = semanticModel.GetNullableContext(typeDecl.CloseBraceToken.SpanStart).AnnotationsEnabled();
+        var equalsMethod = GenerateEquals(typeSymbol, members, semanticModel.Compilation, nullable);
+        var hashCodeMethod = GenerateGetHashCode(members, semanticModel.Compilation);
 
         if (@params.Preview)
         {
@@ -108,8 +111,14 @@ public sealed class GenerateEqualsHashCodeOperation : RefactoringOperationBase<G
             0, 0);
     }
 
-    private static MethodDeclarationSyntax GenerateEquals(string typeName, List<ISymbol> members)
+    private static MethodDeclarationSyntax GenerateEquals(
+        INamedTypeSymbol type,
+        List<ISymbol> members,
+        Compilation compilation,
+        bool nullableAnnotations)
     {
+        var comparerType = compilation.GetTypeByMetadataName("System.Collections.Generic.EqualityComparer`1");
+
         // Build equality comparisons: field1 == other.field1 && field2 == other.field2
         ExpressionSyntax? comparison = null;
         foreach (var member in members)
@@ -123,18 +132,19 @@ public sealed class GenerateEqualsHashCodeOperation : RefactoringOperationBase<G
             var memberType = EqualityMemberCollector.GetMemberType(member);
             ExpressionSyntax eq;
 
-            if (memberType.IsReferenceType)
+            if (!HasBuiltInEquality(memberType))
             {
                 // EqualityComparer<T>.Default.Equals(field, other.field)
+                var comparer = comparerType == null
+                    ? SyntaxFactory.ParseTypeName($"System.Collections.Generic.EqualityComparer<{memberType.ToDisplayString()}>")
+                        .WithAdditionalAnnotations(Simplifier.Annotation)
+                    : SyntaxGenerationHelper.CreateTypeSyntax(comparerType.Construct(memberType), nullableAnnotations);
                 eq = SyntaxFactory.InvocationExpression(
                     SyntaxFactory.MemberAccessExpression(
                         SyntaxKind.SimpleMemberAccessExpression,
                         SyntaxFactory.MemberAccessExpression(
                             SyntaxKind.SimpleMemberAccessExpression,
-                            SyntaxFactory.GenericName("EqualityComparer")
-                                .WithTypeArgumentList(SyntaxFactory.TypeArgumentList(
-                                    SyntaxFactory.SingletonSeparatedList<TypeSyntax>(
-                                        SyntaxFactory.ParseTypeName(memberType.ToDisplayString())))),
+                            comparer,
                             SyntaxFactory.IdentifierName("Default")),
                         SyntaxFactory.IdentifierName("Equals")))
                     .WithArgumentList(SyntaxFactory.ArgumentList(
@@ -163,9 +173,13 @@ public sealed class GenerateEqualsHashCodeOperation : RefactoringOperationBase<G
             SyntaxFactory.IsPatternExpression(
                 SyntaxFactory.IdentifierName("obj"),
                 SyntaxFactory.DeclarationPattern(
-                    SyntaxFactory.IdentifierName(typeName),
+                    SyntaxGenerationHelper.CreateTypeSyntax(type, nullableAnnotations: false),
                     SyntaxFactory.SingleVariableDesignation(SyntaxFactory.Identifier("other")))),
             comparison!);
+
+        TypeSyntax objectType = SyntaxFactory.PredefinedType(SyntaxFactory.Token(SyntaxKind.ObjectKeyword));
+        if (nullableAnnotations)
+            objectType = SyntaxFactory.NullableType(objectType);
 
         return SyntaxFactory.MethodDeclaration(
                 SyntaxFactory.PredefinedType(SyntaxFactory.Token(SyntaxKind.BoolKeyword)),
@@ -174,14 +188,37 @@ public sealed class GenerateEqualsHashCodeOperation : RefactoringOperationBase<G
                 SyntaxFactory.Token(SyntaxKind.PublicKeyword),
                 SyntaxFactory.Token(SyntaxKind.OverrideKeyword)))
             .WithParameterList(SyntaxFactory.ParameterList(SyntaxFactory.SingletonSeparatedList(
-                SyntaxFactory.Parameter(SyntaxFactory.Identifier("obj"))
-                    .WithType(SyntaxFactory.NullableType(SyntaxFactory.PredefinedType(SyntaxFactory.Token(SyntaxKind.ObjectKeyword)))))))
+                SyntaxFactory.Parameter(SyntaxFactory.Identifier("obj")).WithType(objectType))))
             .WithBody(SyntaxFactory.Block(SyntaxFactory.ReturnStatement(returnExpr)))
             .NormalizeWhitespace();
     }
 
-    private static MethodDeclarationSyntax GenerateGetHashCode(List<ISymbol> members)
+    /// <summary>
+    /// Whether <c>==</c> compares values of <paramref name="type"/> (also lifted, for
+    /// <c>int?</c>): numbers, <c>bool</c>, <c>char</c> and enums. Everything else, reference
+    /// types, structs and type parameters, is compared with <c>EqualityComparer&lt;T&gt;</c>,
+    /// where <c>==</c> compares references or does not compile (CS0019).
+    /// </summary>
+    private static bool HasBuiltInEquality(ITypeSymbol type)
     {
+        if (type is INamedTypeSymbol { OriginalDefinition.SpecialType: SpecialType.System_Nullable_T } nullable)
+            type = nullable.TypeArguments[0];
+
+        return type.TypeKind == TypeKind.Enum || type.SpecialType is
+            SpecialType.System_Boolean or SpecialType.System_Char or
+            SpecialType.System_SByte or SpecialType.System_Byte or SpecialType.System_Int16 or SpecialType.System_UInt16 or
+            SpecialType.System_Int32 or SpecialType.System_UInt32 or SpecialType.System_Int64 or SpecialType.System_UInt64 or
+            SpecialType.System_Decimal or SpecialType.System_Single or SpecialType.System_Double or
+            SpecialType.System_IntPtr or SpecialType.System_UIntPtr;
+    }
+
+    private static MethodDeclarationSyntax GenerateGetHashCode(List<ISymbol> members, Compilation compilation)
+    {
+        // System.HashCode, simplified to HashCode where `using System;` is in scope.
+        TypeSyntax HashCodeType() => compilation.GetTypeByMetadataName("System.HashCode") is { } hashCode
+            ? SyntaxGenerationHelper.CreateTypeSyntax(hashCode, nullableAnnotations: false)
+            : SyntaxFactory.ParseTypeName("System.HashCode").WithAdditionalAnnotations(Simplifier.Annotation);
+
         // Use HashCode.Combine(field1, field2, ...)
         var arguments = members.Select(m =>
             SyntaxFactory.Argument(SyntaxFactory.IdentifierName(m.Name)))
@@ -193,7 +230,7 @@ public sealed class GenerateEqualsHashCodeOperation : RefactoringOperationBase<G
             hashExpr = SyntaxFactory.InvocationExpression(
                 SyntaxFactory.MemberAccessExpression(
                     SyntaxKind.SimpleMemberAccessExpression,
-                    SyntaxFactory.IdentifierName("HashCode"),
+                    HashCodeType(),
                     SyntaxFactory.IdentifierName("Combine")))
                 .WithArgumentList(SyntaxFactory.ArgumentList(SyntaxFactory.SeparatedList(arguments)));
         }
@@ -208,7 +245,7 @@ public sealed class GenerateEqualsHashCodeOperation : RefactoringOperationBase<G
                     .WithVariables(SyntaxFactory.SingletonSeparatedList(
                         SyntaxFactory.VariableDeclarator("hash")
                             .WithInitializer(SyntaxFactory.EqualsValueClause(
-                                SyntaxFactory.ObjectCreationExpression(SyntaxFactory.IdentifierName("HashCode"))
+                                SyntaxFactory.ObjectCreationExpression(HashCodeType())
                                     .WithArgumentList(SyntaxFactory.ArgumentList())))))));
 
             // hash.Add(fieldN); for each member

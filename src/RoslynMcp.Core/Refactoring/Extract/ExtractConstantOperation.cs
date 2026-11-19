@@ -88,7 +88,7 @@ public sealed class ExtractConstantOperation : RefactoringOperationBase<ExtractC
         var endPosition = TextPositionHelper.GetPosition(sourceText, @params.EndLine, @params.EndColumn);
         var span = TextSpan.FromBounds(startPosition, endPosition);
 
-        // Find literal at span
+        // Find literal at span (a negative number with its sign)
         var node = root.FindNode(span);
         var literal = FindLiteralExpression(node, span);
 
@@ -136,14 +136,14 @@ public sealed class ExtractConstantOperation : RefactoringOperationBase<ExtractC
         }
 
         // Find all matching literals if ReplaceAll is true
-        List<LiteralExpressionSyntax> literalsToReplace;
+        List<ExpressionSyntax> literalsToReplace;
         if (@params.ReplaceAll)
         {
-            literalsToReplace = FindMatchingLiterals(containingType, typeInfo.Type, constantValue.Value, semanticModel, cancellationToken);
+            literalsToReplace = FindMatchingLiterals(containingType, literal, typeInfo.Type, constantValue.Value, semanticModel, cancellationToken);
         }
         else
         {
-            literalsToReplace = new List<LiteralExpressionSyntax> { literal };
+            literalsToReplace = new List<ExpressionSyntax> { literal };
         }
 
         // Create constant field
@@ -200,28 +200,43 @@ public sealed class ExtractConstantOperation : RefactoringOperationBase<ExtractC
             0);
     }
 
-    private static LiteralExpressionSyntax? FindLiteralExpression(SyntaxNode node, TextSpan span)
+    /// <summary>
+    /// The literal the selection is in, or a signed number (<c>-5</c>) the selection covers
+    /// with its sign. The operand of <c>-2147483648</c> or <c>-9223372036854775808L</c> comes
+    /// with its minus: on its own it is another type (<see cref="MinValueLiterals"/>).
+    /// </summary>
+    private static ExpressionSyntax? FindLiteralExpression(SyntaxNode node, TextSpan span)
     {
-        var current = node;
-        while (current != null)
+        for (var current = node; current != null; current = current.Parent)
         {
-            if (current is LiteralExpressionSyntax literal && current.Span.Contains(span))
-            {
-                return literal;
-            }
-            current = current.Parent;
+            if (!current.Span.Contains(span))
+                continue;
+
+            if (current is LiteralExpressionSyntax literal)
+                return MinValueLiterals.WithNegation(literal);
+
+            if (IsSignedNumber(current))
+                return (ExpressionSyntax)current;
         }
+
         return null;
     }
+
+    private static bool IsSignedNumber(SyntaxNode node) =>
+        node is PrefixUnaryExpressionSyntax { Operand: LiteralExpressionSyntax operand } signed &&
+        signed.Kind() is SyntaxKind.UnaryMinusExpression or SyntaxKind.UnaryPlusExpression &&
+        operand.IsKind(SyntaxKind.NumericLiteralExpression);
 
     /// <summary>
     /// The literals in the type that have the extracted literal's type and value, so the
     /// constant can replace each of them without changing what the code means: <c>1</c>,
     /// <c>1L</c> and <c>1.0</c> are different constants, while <c>1.0</c> and <c>1.00</c> or
-    /// <c>"a"</c> and <c>@"a"</c> are the same.
+    /// <c>"a"</c> and <c>@"a"</c> are the same. A signed number is matched with its sign when
+    /// the extracted one has a sign.
     /// </summary>
-    private static List<LiteralExpressionSyntax> FindMatchingLiterals(
+    private static List<ExpressionSyntax> FindMatchingLiterals(
         TypeDeclarationSyntax containingType,
+        ExpressionSyntax extracted,
         ITypeSymbol type,
         object? constantValue,
         SemanticModel semanticModel,
@@ -229,10 +244,13 @@ public sealed class ExtractConstantOperation : RefactoringOperationBase<ExtractC
     {
         return containingType.DescendantNodes()
             .OfType<LiteralExpressionSyntax>()
-            .Where(literal =>
-                semanticModel.GetConstantValue(literal, cancellationToken) is { HasValue: true } value &&
+            .Select(literal => IsSignedNumber(extracted) && literal.Parent is { } parent && parent.IsKind(extracted.Kind()) && IsSignedNumber(parent)
+                ? (ExpressionSyntax)parent
+                : MinValueLiterals.WithNegation(literal))
+            .Where(candidate =>
+                semanticModel.GetConstantValue(candidate, cancellationToken) is { HasValue: true } value &&
                 Equals(value.Value, constantValue) &&
-                SymbolEqualityComparer.Default.Equals(semanticModel.GetTypeInfo(literal, cancellationToken).Type, type))
+                SymbolEqualityComparer.Default.Equals(semanticModel.GetTypeInfo(candidate, cancellationToken).Type, type))
             .ToList();
     }
 
@@ -240,7 +258,7 @@ public sealed class ExtractConstantOperation : RefactoringOperationBase<ExtractC
         string name,
         string visibility,
         ITypeSymbol type,
-        LiteralExpressionSyntax initializer)
+        ExpressionSyntax initializer)
     {
         var modifiers = new List<SyntaxToken>();
 

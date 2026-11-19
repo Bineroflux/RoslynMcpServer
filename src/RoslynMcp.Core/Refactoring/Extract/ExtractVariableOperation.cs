@@ -82,7 +82,7 @@ public sealed class ExtractVariableOperation : RefactoringOperationBase<ExtractV
 
         // Find expression at span
         var node = root.FindNode(span);
-        var expression = FindEnclosingExpression(node, span);
+        var expression = FindEnclosingExpression(node, span) is { } found ? MinValueLiterals.WithNegation(found) : null;
 
         if (expression == null)
         {

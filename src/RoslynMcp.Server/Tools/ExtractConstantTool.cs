@@ -82,7 +82,7 @@ public sealed class ExtractConstantTool : IToolHandler
             replaceAll = new
             {
                 type = "boolean",
-                description = "Replace all occurrences of the same literal in the class",
+                description = "Also replace the other literals in the type with the same type and value (1, 1L and 1.0 differ)",
                 @default = false
             },
             preview = new

@@ -41,7 +41,8 @@ public sealed class ExtractConstantParams
     public string Visibility { get; init; } = "private";
 
     /// <summary>
-    /// Replace all occurrences of the same literal in the class. Default: false.
+    /// Also replace the other literals in the type with the same type and value (<c>1</c>,
+    /// <c>1L</c> and <c>1.0</c> differ). Default: false.
     /// </summary>
     public bool ReplaceAll { get; init; }
 

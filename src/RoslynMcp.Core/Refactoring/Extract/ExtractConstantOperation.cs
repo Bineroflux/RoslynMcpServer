@@ -139,7 +139,7 @@ public sealed class ExtractConstantOperation : RefactoringOperationBase<ExtractC
         List<LiteralExpressionSyntax> literalsToReplace;
         if (@params.ReplaceAll)
         {
-            literalsToReplace = FindMatchingLiterals(containingType, literal, constantValue.Value);
+            literalsToReplace = FindMatchingLiterals(containingType, typeInfo.Type, constantValue.Value, semanticModel, cancellationToken);
         }
         else
         {
@@ -214,21 +214,25 @@ public sealed class ExtractConstantOperation : RefactoringOperationBase<ExtractC
         return null;
     }
 
+    /// <summary>
+    /// The literals in the type that have the extracted literal's type and value, so the
+    /// constant can replace each of them without changing what the code means: <c>1</c>,
+    /// <c>1L</c> and <c>1.0</c> are different constants, while <c>1.0</c> and <c>1.00</c> or
+    /// <c>"a"</c> and <c>@"a"</c> are the same.
+    /// </summary>
     private static List<LiteralExpressionSyntax> FindMatchingLiterals(
         TypeDeclarationSyntax containingType,
-        LiteralExpressionSyntax originalLiteral,
-        object? constantValue)
+        ITypeSymbol type,
+        object? constantValue,
+        SemanticModel semanticModel,
+        CancellationToken cancellationToken)
     {
         return containingType.DescendantNodes()
             .OfType<LiteralExpressionSyntax>()
-            .Where(lit =>
-            {
-                // Match by kind and value
-                if (lit.Kind() != originalLiteral.Kind()) return false;
-
-                // Compare token text for precise matching
-                return lit.Token.ValueText == originalLiteral.Token.ValueText;
-            })
+            .Where(literal =>
+                semanticModel.GetConstantValue(literal, cancellationToken) is { HasValue: true } value &&
+                Equals(value.Value, constantValue) &&
+                SymbolEqualityComparer.Default.Equals(semanticModel.GetTypeInfo(literal, cancellationToken).Type, type))
             .ToList();
     }
 

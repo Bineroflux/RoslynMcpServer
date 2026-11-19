@@ -27,7 +27,7 @@ public sealed class MoveTypeToNamespaceTool : IToolHandler
     public string Name => "move_type_to_namespace";
 
     /// <inheritdoc />
-    public string Description => "Change the namespace of a C# type. Updates all using directives and qualified references; a Razor file using the type gets a @using of the new namespace (a name it qualifies itself is listed in 'warnings', with the compiler errors the move leaves). The type must be alone in its namespace declaration (otherwise refused with 3130: run move_type_to_file first).";
+    public string Description => "Change the namespace of a C# type. Updates all using directives and qualified references; a Razor file using the type gets a @using of the new namespace, and a component tag written with the old namespace (<Old.Panel />) the new one (another name it qualifies itself is listed in 'warnings', with the compiler errors the move leaves). The type must be alone in its namespace declaration (otherwise refused with 3130: run move_type_to_file first).";
 
     /// <inheritdoc />
     public object InputSchema => new

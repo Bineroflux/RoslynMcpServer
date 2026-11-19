@@ -120,7 +120,7 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
             $"'{path}' is generated and was not changed; it still refers to namespace '{rename.Old}'."));
         warnings.AddRange(extensionWarnings);
         warnings.AddRange(razor.Mentions.Select(line =>
-            $"{line}: still names namespace '{rename.Old}'; in Razor files only directives (@using, @namespace, and the qualified type names of @inherits, @inject, @model, @implements, @attribute, @typeparam, @layout) are rewritten."));
+            $"{line}: still names namespace '{rename.Old}'; in Razor files only directives (@using, @namespace, and the qualified type names of @inherits, @inject, @model, @implements, @attribute, @typeparam, @layout) and component tags are rewritten."));
 
         var plans = new List<PlannedMove>();
         if (@params.UpdateFolders)
@@ -1394,7 +1394,7 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
             {
                 File = file.Path,
                 ChangeType = ChangeKind.Modify,
-                Description = $"Rename namespace '{rename.Old}' to '{rename.New}': {file.Directives} name(s) in Razor directives",
+                Description = $"Rename namespace '{rename.Old}' to '{rename.New}': {file.Directives} name(s) in Razor directives and component tags",
                 BeforeSnippet = file.Text.Lines[line].ToString().Trim(),
                 AfterSnippet = file.NewText.Lines[line].ToString().Trim(),
                 StartLine = line + 1,

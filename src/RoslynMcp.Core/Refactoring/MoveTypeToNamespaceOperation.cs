@@ -230,16 +230,64 @@ public sealed class MoveTypeToNamespaceOperation : RefactoringOperationBase<Move
             stats.UsingsRemoved += stale.Removed;
         }
 
+        solution = await RewriteComponentTagsAsync(solution, resolution.Symbol, resolution.Document.Project.Id, newNamespace, stats, cancellationToken);
         solution = await UpdateGeneratedReferencesAsync(solution, resolution.Symbol, references, newNamespace, stats, cancellationToken);
         return (solution, stats);
     }
 
     /// <summary>
+    /// For a component, the tags of the Razor files of its project and the projects depending
+    /// on it that name it with its namespace (<c>&lt;Probe.Panel /&gt;</c>), rewritten to the new
+    /// one (<see cref="RazorComponentTags"/>): the Razor compiler binds them by that name, and
+    /// one that no longer binds silently becomes an HTML element.
+    /// </summary>
+    private static async Task<Solution> RewriteComponentTagsAsync(
+        Solution solution,
+        INamedTypeSymbol type,
+        ProjectId declaringProject,
+        string newNamespace,
+        ChangeStats stats,
+        CancellationToken cancellationToken)
+    {
+        if (type.ContainingType != null || type.ContainingNamespace.IsGlobalNamespace ||
+            !type.AllInterfaces.Any(i => i.ToDisplayString() == "Microsoft.AspNetCore.Components.IComponent"))
+        {
+            return solution;
+        }
+
+        var oldName = $"{type.ContainingNamespace.ToDisplayString()}.{type.Name}";
+        var newName = $"{newNamespace}.{type.Name}";
+        var projects = solution.GetProjectDependencyGraph().GetProjectsThatTransitivelyDependOnThisProject(declaringProject)
+            .Append(declaringProject)
+            .Select(solution.GetProject)
+            .OfType<Project>();
+        var files = projects
+            .SelectMany(p => p.AdditionalDocuments)
+            .Where(d => RazorNamespaceDirectives.IsRazorFile(d.FilePath))
+            .GroupBy(d => PathResolver.NormalizePath(d.FilePath!), PathResolver.PathComparer);
+        foreach (var file in files)
+        {
+            var text = await file.First().GetTextAsync(cancellationToken);
+            var changes = RazorComponentTags.Rewrite(text, oldName, newName, prefix: false);
+            if (changes.Count == 0)
+                continue;
+
+            var newText = text.WithChanges(changes);
+            foreach (var document in file)
+                solution = solution.WithAdditionalDocumentText(document.Id, newText, PreservationMode.PreserveIdentity);
+            stats.RazorTags[file.First().FilePath!] = changes.Count;
+        }
+
+        return solution;
+    }
+
+    /// <summary>
     /// The references in generated code, which is not edited. A Razor file whose generated code
-    /// names the type by its simple name, or as the Razor compiler binds a component
-    /// (<c>global::Old.Circle</c>, which the generated code does not map back to the file: the
-    /// file is the one its <c>#pragma checksum</c> names), gets a <c>@using</c> of the new
-    /// namespace (<see cref="RazorUsings"/>); a name the Razor file qualifies itself, and a
+    /// names the type by its simple name, or as the Razor compiler binds a component written as
+    /// a tag by its simple name (<c>&lt;Circle /&gt;</c> becomes <c>global::Old.Circle</c>, which
+    /// the generated code does not map back to the file: the file is the one its
+    /// <c>#pragma checksum</c> names), gets a <c>@using</c> of the new namespace
+    /// (<see cref="RazorUsings"/>); a name the Razor file qualifies itself, and a
     /// reference in other generated code, is reported in <see cref="ChangeStats.Warnings"/>, at
     /// its place after the <c>@using</c> was added.
     /// </summary>
@@ -273,7 +321,8 @@ public sealed class MoveTypeToNamespaceOperation : RefactoringOperationBase<Move
             {
                 qualified.Add((place.Path, place.Line, place.Column));
             }
-            else if (!razorFiles.Contains(razorFile, StringComparer.OrdinalIgnoreCase))
+            else if (!razorFiles.Contains(razorFile, StringComparer.OrdinalIgnoreCase) &&
+                     (place.Mapped || await HasSimpleTagAsync(solution, razorFile, type.Name, cancellationToken)))
             {
                 razorFiles.Add(razorFile);
             }
@@ -299,6 +348,17 @@ public sealed class MoveTypeToNamespaceOperation : RefactoringOperationBase<Move
         }
 
         return solution;
+    }
+
+    /// <summary>
+    /// Whether the Razor file <paramref name="path"/> writes a component tag by the simple name
+    /// <paramref name="name"/> (a tag written with its namespace was rewritten and needs no <c>@using</c>).
+    /// </summary>
+    private static async Task<bool> HasSimpleTagAsync(Solution solution, string path, string name, CancellationToken cancellationToken)
+    {
+        var document = solution.Projects.SelectMany(p => p.AdditionalDocuments)
+            .FirstOrDefault(d => d.FilePath != null && PathResolver.PathsEqual(d.FilePath, path));
+        return document != null && RazorComponentTags.HasTag(await document.GetTextAsync(cancellationToken), name);
     }
 
     /// <summary>
@@ -817,6 +877,16 @@ public sealed class MoveTypeToNamespaceOperation : RefactoringOperationBase<Move
             });
         }
 
+        foreach (var (razorFile, tags) in stats.RazorTags)
+        {
+            pendingChanges.Add(new PendingChange
+            {
+                File = razorFile,
+                ChangeType = ChangeKind.Modify,
+                Description = $"Write '{@params.TargetNamespace}.{resolution.Symbol.Name}' in {tags} component tag(s)"
+            });
+        }
+
         foreach (var razorFile in stats.RazorUsings)
         {
             pendingChanges.Add(new PendingChange
@@ -863,6 +933,9 @@ public sealed class MoveTypeToNamespaceOperation : RefactoringOperationBase<Move
 
         /// <summary>The Razor files that got a <c>@using</c> of the new namespace.</summary>
         public List<string> RazorUsings { get; } = [];
+
+        /// <summary>The Razor files whose component tags with the old full name were rewritten, with how many.</summary>
+        public Dictionary<string, int> RazorTags { get; } = new(StringComparer.OrdinalIgnoreCase);
 
         /// <summary>What the move leaves to do by hand (references in generated code).</summary>
         public List<string> Warnings { get; } = [];

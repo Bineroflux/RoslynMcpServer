@@ -14,9 +14,11 @@ namespace RoslynMcp.Core.Refactoring.Rename;
 /// <c>@using Company.New.Pages</c>, <c>@using Company.OldStuff</c> stays), and in the directives
 /// that take a type (<c>@inherits</c>, <c>@inject</c>, <c>@model</c>, <c>@implements</c>,
 /// <c>@attribute</c>, <c>@typeparam … where …</c>, <c>@layout</c>) the old namespace where it
-/// starts a qualified name (<c>@inherits Company.Old.BasePage</c>), outside string literals.
-/// Any other mention of the old name in a Razor file (C# in <c>@code</c> blocks, markup, a
-/// name relative to a <c>@using</c>) is left and reported by line.
+/// starts a qualified name (<c>@inherits Company.Old.BasePage</c>), outside string literals; and
+/// component tags written with the old namespace (<c>&lt;Company.Old.Panel /&gt;</c>,
+/// <see cref="RazorComponentTags"/>). Any other mention of the old name in a Razor file (C# in
+/// <c>@code</c> blocks, other markup, a name relative to a <c>@using</c>) is left and reported
+/// by line.
 /// </summary>
 internal static partial class RazorNamespaceDirectives
 {
@@ -59,7 +61,7 @@ internal static partial class RazorNamespaceDirectives
         RegexOptions.CultureInvariant);
 
     /// <summary>Whether <paramref name="index"/> of <paramref name="line"/> lies inside a string literal.</summary>
-    private static bool InString(string line, int index) => line[..index].Count(c => c == '"') % 2 == 1;
+    internal static bool InString(string line, int index) => line[..index].Count(c => c == '"') % 2 == 1;
 
     /// <summary>What the rename changes in Razor files, and what it leaves.</summary>
     /// <param name="Files">The files to rewrite.</param>
@@ -109,7 +111,13 @@ internal static partial class RazorNamespaceDirectives
                 continue;
 
             plan.Projects.UnionWith(documents.Select(d => d.Project.Id));
-            var changes = new List<TextChange>();
+            // Component tags; a directive line is rewritten as a directive below (its type
+            // arguments, <Company.Old.Model>, look like tags).
+            var changes = RazorComponentTags.Rewrite(text, string.Join('.', oldSegments), newName, prefix: true)
+                .Where(c => text.Lines.GetLineFromPosition(c.Span.Start).ToString() is var lineText &&
+                    !TypeDirective().IsMatch(lineText) && !Directive().IsMatch(lineText))
+                .ToList();
+            var tagsByLine = changes.ToLookup(c => text.Lines.GetLineFromPosition(c.Span.Start).LineNumber);
             var namespaces = 0;
             foreach (var line in text.Lines)
             {
@@ -147,7 +155,10 @@ internal static partial class RazorNamespaceDirectives
                     }
                 }
 
-                if (mention.IsMatch(lineText))
+                // A component tag written with the old namespace is rewritten; is anything left?
+                var untagged = SourceText.From(lineText).WithChanges(tagsByLine[line.LineNumber]
+                    .Select(c => new TextChange(new TextSpan(c.Span.Start - line.Start, c.Span.Length), c.NewText!))).ToString();
+                if (mention.IsMatch(untagged))
                     plan.Mentions.Add($"{documents[0].FilePath}({line.LineNumber + 1})");
             }
 

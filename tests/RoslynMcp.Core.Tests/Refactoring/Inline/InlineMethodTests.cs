@@ -130,7 +130,7 @@ public sealed class InlineMethodTests
         Assert.Equal(before, Run(ws, "Program", "Run"));
         Assert.Contains("int x = Next(\"square\");", after);
         Assert.Contains("var square = x * x;", after);
-        Assert.Contains("int value = Next(\"ignored\");", after);
+        Assert.Contains("        Next(\"ignored\");\n        var ignored = 42;\n", after);
         Assert.Contains("var twice = Next(\"twice\") * 2;", after);
         Assert.DoesNotContain("private static int Square", after);
     }

@@ -67,14 +67,17 @@ internal sealed class InlineCallPlanner
 
         var typeMap = TypeMap(operation.TargetMethod);
         var captured = CapturedSymbols(invocation, model, cancellationToken);
+        var inConstructor = InConstructor(invocation);
         var inputs = new List<CallInput>();
 
+        var receiverMayBeNull = false;
         if (receiver != null)
         {
             if (model.GetOperation(receiver, cancellationToken) is not { } receiverOperation || receiverType == null)
                 return Refuse("its receiver does not compile");
+            receiverMayBeNull = EvaluationOrder.MayBeNull(receiverOperation);
             inputs.Add(new CallInput(null, InputSource.ForReceiver(), receiverType, needsCast: false,
-                Classify(receiverOperation, captured), _body.This, Flow(model, [receiver], written: false), Flow(model, [receiver], written: true)));
+                Classify(receiverOperation, captured, inConstructor), _body.This, Flow(model, [receiver], written: false), Flow(model, [receiver], written: true)));
         }
 
         foreach (var argument in operation.Arguments)
@@ -86,7 +89,9 @@ internal sealed class InlineCallPlanner
             var value = argument.Value;
             switch (argument.ArgumentKind)
             {
-                case ArgumentKind.Explicit when argument.Syntax is ArgumentSyntax syntax:
+                // The operation of an argument like null! is its expression, not the argument.
+                case ArgumentKind.Explicit when argument.Syntax.AncestorsAndSelf().OfType<ArgumentSyntax>().FirstOrDefault() is { } syntax &&
+                    syntax.Parent == invocation.ArgumentList:
                     source = InputSource.ForArgument(invocation.ArgumentList.Arguments.IndexOf(syntax));
                     break;
                 case ArgumentKind.Explicit when invocation.Expression is MemberAccessExpressionSyntax extensionAccess && argument.Value.Syntax == extensionAccess.Expression:
@@ -114,7 +119,7 @@ internal sealed class InlineCallPlanner
             {
                 ArgumentKind.DefaultValue => ArgumentClass.Constant,
                 ArgumentKind.ParamArray => ArgumentClass.Impure,
-                _ => Classify(classOperand, captured)
+                _ => Classify(classOperand, captured, inConstructor)
             };
             IReadOnlyList<SyntaxNode> expressions = argument.ArgumentKind switch
             {
@@ -126,10 +131,30 @@ internal sealed class InlineCallPlanner
                 Flow(model, expressions, written: false), Flow(model, expressions, written: true)));
         }
 
-        Decide(inputs);
+        Decide(inputs, receiverMayBeNull);
+
+        // An input the body doesn't use is still evaluated when it has an effect or may throw (as
+        // a statement of its own, or into a local where '_' is a variable); otherwise it is dropped.
+        var discardIsVariable = model.LookupSymbols(invocation.SpanStart, name: "_").Length > 0;
+        foreach (var input in inputs.Where(i => i.Mode == InputMode.Temp && i.Uses.Count == 0))
+        {
+            input.Mode = input.Class != ArgumentClass.Impure ? InputMode.Drop
+                : discardIsVariable ? InputMode.Temp
+                : InputMode.Evaluate;
+        }
 
         if (receiver != null && inputs[0].Mode == InputMode.Temp && IsMutableStruct(method))
             return Refuse("its receiver is a struct that would have to be copied into a local first");
+
+        // A null receiver threw NullReferenceException at the call; the inlined code throws it
+        // only where it uses a member of the receiver.
+        var notes = new List<string>();
+        if (receiver != null && receiverMayBeNull && !_body.This.DereferencedFirst)
+        {
+            notes.Add($"inlined, but a null '{Shorten(receiver)}' no longer throws NullReferenceException" + (_body.This.Count == 0
+                ? ": the inlined code doesn't use it"
+                : " before the method's code runs: the inlined code uses it only later or conditionally"));
+        }
 
         // Where the replacement goes.
         var statement = invocation.Parent is ExpressionStatementSyntax expressionStatement && expressionStatement.Expression == invocation
@@ -137,11 +162,11 @@ internal sealed class InlineCallPlanner
             : null;
         CallForm form;
         StatementSyntax? hoistBefore = null;
-        var temps = inputs.Where(i => i.Mode == InputMode.Temp).ToList();
+        var temps = inputs.Where(i => i.Mode is InputMode.Temp or InputMode.Evaluate).ToList();
         if (statement != null)
         {
             form = method.ReturnsVoid ? CallForm.Statement : CallForm.Discard;
-            if (form == CallForm.Discard && !IsStatementExpression(_body.Root) && model.LookupSymbols(invocation.SpanStart, name: "_").Length > 0)
+            if (form == CallForm.Discard && !IsStatementExpression(_body.Root) && discardIsVariable)
                 return Refuse("its result would have to be discarded with '_', which is a variable here");
         }
         else if (_body.IsBlock)
@@ -178,7 +203,7 @@ internal sealed class InlineCallPlanner
                 renames[declared] = name;
         }
 
-        foreach (var temp in temps)
+        foreach (var temp in temps.Where(t => t.Mode == InputMode.Temp))
         {
             temp.TempName = Unique(temp.Parameter?.Name ?? ReceiverName(temp.Type), taken);
             newNames.Add(temp.TempName);
@@ -199,7 +224,8 @@ internal sealed class InlineCallPlanner
             NullableAnnotations = model.GetNullableContext(invocation.SpanStart).AnnotationsEnabled(),
             ReturnType = _body.NeedsReturnCast ? operation.TargetMethod.ReturnType : null,
             Namespaces = MissingNamespaces(model, invocation.SpanStart),
-            Body = _body
+            Body = _body,
+            Notes = notes
         };
 
         // A dry run finds types that can't be written here.
@@ -223,13 +249,15 @@ internal sealed class InlineCallPlanner
     /// <summary>
     /// Decides for each input whether it is substituted (inline), stored in a local first
     /// (temp), or dropped (unused, without side effects). Constants are always substituted, and
-    /// so are reads of the caller's own locals unless another argument writes them. Of the
-    /// rest, reads of other state are substituted when the body runs no side effect before
-    /// using them; a single argument with side effects is substituted when the body evaluates
-    /// it exactly once before anything else happens. Otherwise all of them get locals, in
-    /// their order of evaluation.
+    /// so are reads of what the body can't change (the caller's own locals, readonly fields)
+    /// unless another argument writes them. Of the rest, reads of other state are substituted
+    /// when the body runs no side effect before using them; a single argument with side effects
+    /// (or one that may throw) is substituted when the body evaluates it exactly once before
+    /// anything else happens or may throw, an access to a member of a receiver that may be null
+    /// (<paramref name="receiverMayBeNull"/>) included. Otherwise all of them get locals, in their
+    /// order of evaluation.
     /// </summary>
-    private void Decide(List<CallInput> inputs)
+    private void Decide(List<CallInput> inputs, bool receiverMayBeNull)
     {
         var undecided = new List<CallInput>();
         foreach (var input in inputs)
@@ -261,7 +289,7 @@ internal sealed class InlineCallPlanner
             foreach (var input in undecided)
                 input.Mode = input.Uses.Count == 0 ? InputMode.Drop : InputMode.Inline;
         }
-        else if (undecided is [{ Class: ArgumentClass.Impure } single] && single.Uses.OnceFirst &&
+        else if (undecided is [{ Class: ArgumentClass.Impure } single] && single.Uses.OnceFirst(receiverMayBeNull) &&
             inputs.Where(i => i.Mode == InputMode.Inline && i.Class != ArgumentClass.Constant).All(i => !single.Writes.Overlaps(i.Reads)))
         {
             single.Mode = InputMode.Inline;
@@ -274,11 +302,14 @@ internal sealed class InlineCallPlanner
     }
 
     /// <summary>
-    /// How an argument's value behaves when moved: a constant, a read of the caller's own
-    /// (uncaptured, non-ref) locals and parameters, a read of other state (fields, captured
-    /// locals), or anything with side effects or a possible exception.
+    /// How an argument's value behaves when moved: a constant; a read of what the body can't
+    /// change (the caller's own uncaptured, non-ref locals and parameters, and outside
+    /// constructors readonly fields and get-only auto-properties); a read of other state (fields,
+    /// auto-properties declared in source, captured locals); or anything with side effects or a
+    /// possible exception (calls, other properties, division, checked arithmetic, a member of
+    /// something that may be null).
     /// </summary>
-    private static ArgumentClass Classify(IOperation operation, HashSet<ISymbol> captured)
+    private static ArgumentClass Classify(IOperation operation, HashSet<ISymbol> captured, bool inConstructor)
     {
         if (operation.ConstantValue.HasValue)
             return ArgumentClass.Constant;
@@ -290,9 +321,9 @@ internal sealed class InlineCallPlanner
             case IDelegateCreationOperation { Target: IAnonymousFunctionOperation or IMethodReferenceOperation { Instance: null or IInstanceReferenceOperation } }:
                 return ArgumentClass.Constant;
             case IParenthesizedOperation parenthesized:
-                return Classify(parenthesized.Operand, captured);
+                return Classify(parenthesized.Operand, captured, inConstructor);
             case IConversionOperation { OperatorMethod: null, IsImplicit: true } conversion:
-                return Classify(conversion.Operand, captured);
+                return Classify(conversion.Operand, captured, inConstructor);
             case ILocalReferenceOperation local:
                 return local.Local.IsRef || captured.Contains(local.Local) ? ArgumentClass.StateRead : ArgumentClass.LocalRead;
             case IParameterReferenceOperation parameter:
@@ -300,15 +331,42 @@ internal sealed class InlineCallPlanner
                     ? ArgumentClass.StateRead
                     : ArgumentClass.LocalRead;
             case IFieldReferenceOperation field:
-                return field.Instance == null ? ArgumentClass.StateRead : Max(ArgumentClass.StateRead, Classify(field.Instance, captured));
-            case IUnaryOperation { OperatorMethod: null, IsChecked: false } unary:
-                return Classify(unary.Operand, captured);
-            case IBinaryOperation { OperatorMethod: null, IsChecked: false } binary
-                when binary.OperatorKind is not (BinaryOperatorKind.Divide or BinaryOperatorKind.Remainder):
-                return Max(Classify(binary.LeftOperand, captured), Classify(binary.RightOperand, captured));
+                return Read(field.Instance, field.Field.IsReadOnly);
+            case IPropertyReferenceOperation { Arguments.Length: 0 } property when EvaluationOrder.IsAutoProperty(property.Property):
+                return Read(property.Instance, property.Property.OriginalDefinition.SetMethod is null or { IsInitOnly: true });
+            case IUnaryOperation { OperatorMethod: null } unary when !EvaluationOrder.MayThrow(unary):
+                return Classify(unary.Operand, captured, inConstructor);
+            case IBinaryOperation { OperatorMethod: null } binary when !EvaluationOrder.MayThrow(binary):
+                return Max(Classify(binary.LeftOperand, captured, inConstructor), Classify(binary.RightOperand, captured, inConstructor));
             default:
                 return ArgumentClass.Impure;
         }
+
+        // A field or auto-property: it throws when its receiver is null, and the body can't change
+        // a readonly one (only a constructor or init accessor can).
+        ArgumentClass Read(IOperation? instance, bool readOnly)
+        {
+            var own = readOnly && !inConstructor ? ArgumentClass.LocalRead : ArgumentClass.StateRead;
+            if (instance == null)
+                return own;
+
+            return EvaluationOrder.MayBeNull(instance) ? ArgumentClass.Impure : Max(own, Classify(instance, captured, inConstructor));
+        }
+    }
+
+    /// <summary>Whether a call is in a constructor, an init accessor or an initializer, where readonly fields can still change.</summary>
+    private static bool InConstructor(SyntaxNode node) =>
+        node.Ancestors().Any(a => a is ConstructorDeclarationSyntax or AccessorDeclarationSyntax { RawKind: (int)SyntaxKind.InitAccessorDeclaration } ||
+            (a is EqualsValueClauseSyntax && a.Parent is VariableDeclaratorSyntax { Parent.Parent: FieldDeclarationSyntax } or PropertyDeclarationSyntax));
+
+    /// <summary>An expression as a warning names it: its first line, at most 40 characters.</summary>
+    private static string Shorten(ExpressionSyntax expression)
+    {
+        var text = expression.ToString();
+        var line = text.IndexOfAny(['\r', '\n']);
+        if (line >= 0)
+            text = text[..line] + " ...";
+        return text.Length <= 40 ? text : text[..37] + "...";
     }
 
     private static ArgumentClass Max(ArgumentClass left, ArgumentClass right) => left > right ? left : right;
@@ -396,7 +454,8 @@ internal sealed class InlineCallPlanner
     }
 
     private static string Describe(List<CallInput> temps) =>
-        string.Join(", ", temps.Select(t => t.Parameter == null ? "the receiver" : $"'{t.Parameter.Name}'"));
+        string.Join(", ", temps.Select(t => (t.Parameter == null ? "the receiver" : $"'{t.Parameter.Name}'") +
+            (t.Mode == InputMode.Evaluate ? " (unused, but evaluated for its side effects)" : "")));
 
     /// <summary>
     /// The statement before which the locals of an expression call can go, or why there is
@@ -633,6 +692,9 @@ internal enum InputMode
 
     /// <summary>Stored in a local first, which the body then uses.</summary>
     Temp,
+
+    /// <summary>Unused, but evaluated first for its side effects (or exception), as a statement of its own.</summary>
+    Evaluate,
 
     /// <summary>Unused and without side effects.</summary>
     Drop

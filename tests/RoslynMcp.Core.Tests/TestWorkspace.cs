@@ -28,12 +28,18 @@ internal sealed class TestWorkspace : IDisposable
         new(OutputKind.DynamicallyLinkedLibrary, nullableContextOptions: NullableContextOptions.Enable);
 
     private readonly ImmutableArray<MetadataReference> _references;
+    private readonly CSharpCompilationOptions _compilationOptions;
 
-    private TestWorkspace(string directory, WorkspaceContext context, ImmutableArray<MetadataReference> references)
+    private TestWorkspace(
+        string directory,
+        WorkspaceContext context,
+        ImmutableArray<MetadataReference> references,
+        CSharpCompilationOptions? compilationOptions = null)
     {
         Directory = directory;
         Context = context;
         _references = references;
+        _compilationOptions = compilationOptions ?? CompilationOptions;
     }
 
     /// <summary>Temp directory holding the project's source files.</summary>
@@ -53,13 +59,19 @@ internal sealed class TestWorkspace : IDisposable
     /// Additional documents (e.g. Razor files, as the Razor SDK passes them to its generator),
     /// written to disk exactly as given.
     /// </param>
+    /// <param name="checkOverflow">
+    /// Whether arithmetic is checked by default, like a project with <c>CheckForOverflowUnderflow</c>
+    /// (also for <see cref="GetDiskCompilationErrors"/> and <see cref="EmitDiskAssembly"/>).
+    /// </param>
     public static TestWorkspace Create(
         IEnumerable<(string Name, string Text)> files,
         IEnumerable<MetadataReference> extraReferences,
         string? editorConfig = null,
         string? defaultNamespace = null,
-        IEnumerable<(string Name, string Text)>? additionalFiles = null)
+        IEnumerable<(string Name, string Text)>? additionalFiles = null,
+        bool checkOverflow = false)
     {
+        var compilationOptions = CompilationOptions.WithOverflowChecks(checkOverflow);
         var directory = Path.Combine(Path.GetTempPath(), $"RoslynMcpServer.TestWorkspace-{Guid.NewGuid():N}");
         System.IO.Directory.CreateDirectory(directory);
 
@@ -73,7 +85,7 @@ internal sealed class TestWorkspace : IDisposable
             assemblyName: "TestProject",
             language: LanguageNames.CSharp,
             filePath: Path.Combine(directory, "TestProject.csproj"),
-            compilationOptions: CompilationOptions,
+            compilationOptions: compilationOptions,
             parseOptions: ParseOptions,
             metadataReferences: references).WithDefaultNamespace(defaultNamespace));
 
@@ -109,7 +121,7 @@ internal sealed class TestWorkspace : IDisposable
                 filePath: path);
         }
 
-        return new TestWorkspace(directory, new WorkspaceContext(workspace, solution, directory), references);
+        return new TestWorkspace(directory, new WorkspaceContext(workspace, solution, directory), references, compilationOptions);
     }
 
     /// <summary>A project of a <see cref="CreateSolution"/> workspace.</summary>
@@ -288,7 +300,7 @@ internal sealed class TestWorkspace : IDisposable
         var trees = System.IO.Directory.GetFiles(Directory, "*.cs", SearchOption.AllDirectories)
             .Select(path => CSharpSyntaxTree.ParseText(File.ReadAllText(path), ParseOptions, path));
 
-        return CSharpCompilation.Create("DiskCheck", trees, _references, CompilationOptions);
+        return CSharpCompilation.Create("DiskCheck", trees, _references, _compilationOptions);
     }
 
     public void Dispose()

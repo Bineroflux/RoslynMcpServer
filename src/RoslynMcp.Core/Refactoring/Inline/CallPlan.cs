@@ -48,7 +48,10 @@ internal sealed class CallPlan
 
     public required InlinedBody Body { get; init; }
 
-    /// <summary>The local declarations the last <see cref="BuildBody"/> produced.</summary>
+    /// <summary>What the inlined call does differently, for <c>warnings</c>.</summary>
+    public IReadOnlyList<string> Notes { get; init; } = [];
+
+    /// <summary>The local declarations (and evaluations of unused inputs) the last <see cref="BuildBody"/> produced.</summary>
     public IReadOnlyList<StatementSyntax> Temps { get; private set; } = [];
 
     private SyntaxAnnotation SiteAnnotation => new(SiteAnnotationKind, Site.ToString(CultureInfo.InvariantCulture));
@@ -68,6 +71,12 @@ internal sealed class CallPlan
                 continue;
 
             var expression = Source(input, invocation).WithoutTrivia();
+            if (input.Mode == InputMode.Evaluate)
+            {
+                temps.Add(Mark(Evaluation(expression)));
+                continue;
+            }
+
             ExpressionSyntax value;
             if (input.Mode == InputMode.Temp)
             {
@@ -213,6 +222,12 @@ internal sealed class CallPlan
             SyntaxFactory.SingletonSeparatedList(SyntaxFactory.VariableDeclarator(SyntaxFactory.Identifier(input.TempName!))
                 .WithInitializer(SyntaxFactory.EqualsValueClause(value)))));
     }
+
+    /// <summary>An unused input evaluated as a statement: <c>GetObj();</c>, or <c>_ = obj.Value;</c>.</summary>
+    private static ExpressionStatementSyntax Evaluation(ExpressionSyntax value) =>
+        SyntaxFactory.ExpressionStatement(IsStatementExpression(value)
+            ? value
+            : SyntaxFactory.AssignmentExpression(SyntaxKind.SimpleAssignmentExpression, SyntaxFactory.IdentifierName("_"), value));
 
     private ExpressionSyntax Cast(ITypeSymbol type, ExpressionSyntax expression) =>
         SyntaxFactory.CastExpression(SyntaxGenerationHelper.CreateTypeSyntax(type, NullableAnnotations), Parenthesize(expression))

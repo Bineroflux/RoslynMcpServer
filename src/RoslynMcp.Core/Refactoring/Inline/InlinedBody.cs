@@ -195,7 +195,7 @@ internal sealed class InlinedBody
         var thisUses = new List<Use>();
         bool IsOwn(ISymbol symbol) => declaredSet.Contains(symbol);
 
-        EvaluationOrder.Walk(operation, (op, effectBefore) =>
+        EvaluationOrder.Walk(operation, (op, before) =>
         {
             for (var current = op; current != null; current = current.Parent)
             {
@@ -206,10 +206,10 @@ internal sealed class InlinedBody
             switch (op)
             {
                 case IParameterReferenceOperation { Parameter: var parameter } when SymbolEqualityComparer.Default.Equals(parameter.ContainingSymbol, Method):
-                    parameterUses[parameter.Ordinal].Add(Use(op, effectBefore));
+                    parameterUses[parameter.Ordinal].Add(Use(op, before));
                     break;
                 case IInstanceReferenceOperation { ReferenceKind: InstanceReferenceKind.ContainingTypeInstance }:
-                    thisUses.Add(Use(op, effectBefore));
+                    thisUses.Add(Use(op, before) with { Dereferenced = op.Parent != null && EvaluationOrder.Dereferences(op.Parent) == op });
                     break;
                 case IMemberReferenceOperation member:
                     referenced.Add((member.Member, member.Instance is IInstanceReferenceOperation));
@@ -227,7 +227,7 @@ internal sealed class InlinedBody
             if (EvaluationOrder.IsEffect(op, IsOwn))
                 HasEffects = true;
             return true;
-        }, op => EvaluationOrder.IsEffect(op, IsOwn));
+        }, op => EvaluationOrder.HazardsOf(op, IsOwn));
 
         var flow = Root is ExpressionSyntax rootExpression
             ? Model.AnalyzeDataFlow(rootExpression)
@@ -287,10 +287,10 @@ internal sealed class InlinedBody
             info.Nested.SelectMany(Deconstruct).Prepend(info.Method);
     }
 
-    private Use Use(IOperation operation, bool effectBefore)
+    private Use Use(IOperation operation, Hazards before)
     {
         var (conditional, repeated) = EvaluationOrder.Context(operation.Syntax, Root);
-        return new Use(effectBefore, conditional, repeated);
+        return new Use(before, conditional, repeated);
     }
 
     private static SyntaxToken QueryIdentifier(SyntaxNode node) => node switch
@@ -602,13 +602,18 @@ internal sealed class InlinedBody
 }
 
 /// <summary>One evaluation of a parameter or of <c>this</c> in the body.</summary>
-/// <param name="EffectBefore">Whether a side effect completes before it.</param>
+/// <param name="Before">What the operations of the body completed before it may have done.</param>
 /// <param name="Conditional">Whether it may not run.</param>
 /// <param name="Repeated">Whether it may run more than once or later (loop, lambda).</param>
-internal sealed record Use(bool EffectBefore, bool Conditional, bool Repeated);
+/// <param name="Dereferenced">For <c>this</c>: whether a member of it is accessed (which throws for a null receiver).</param>
+internal sealed record Use(Hazards Before, bool Conditional, bool Repeated, bool Dereferenced = false)
+{
+    /// <summary>Whether a side effect completes before it.</summary>
+    public bool EffectBefore => Before.HasFlag(Hazards.Effect);
+}
 
 /// <summary>How the body uses one input (a parameter or <c>this</c>).</summary>
-/// <param name="Uses">Its evaluations.</param>
+/// <param name="Uses">Its evaluations, in evaluation order.</param>
 /// <param name="Written">Whether the body assigns it.</param>
 internal sealed record InputUses(IReadOnlyList<Use> Uses, bool Written)
 {
@@ -617,14 +622,25 @@ internal sealed record InputUses(IReadOnlyList<Use> Uses, bool Written)
     public int Count => Uses.Count;
 
     /// <summary>
-    /// Whether an expression with side effects can take its place: it is evaluated exactly once,
-    /// unconditionally, before any other side effect of the body.
+    /// Whether an expression with side effects (or one that may throw) can take its place: it is
+    /// evaluated exactly once, unconditionally, before any other side effect of the body and
+    /// before anything that may throw, a member access of <c>this</c> included when
+    /// <paramref name="receiverMayBeNull"/>.
     /// </summary>
-    public bool OnceFirst => Uses is [{ EffectBefore: false, Conditional: false, Repeated: false }];
+    public bool OnceFirst(bool receiverMayBeNull) =>
+        Uses is [{ Conditional: false, Repeated: false } use] &&
+        (use.Before & (Hazards.Effect | Hazards.Throw | (receiverMayBeNull ? Hazards.ThisAccess : Hazards.None))) == Hazards.None;
 
     /// <summary>
     /// Whether a read of state can take its place, however often: no side effect of the body
     /// can run before any of its evaluations.
     /// </summary>
     public bool BeforeEffects(bool bodyHasEffects) => Uses.All(u => !u.EffectBefore && !(u.Repeated && bodyHasEffects));
+
+    /// <summary>
+    /// For <c>this</c>: whether the body accesses one of its members before anything else that
+    /// may have an effect or throw, unconditionally, so that a null receiver throws
+    /// <see cref="NullReferenceException"/> where the call did.
+    /// </summary>
+    public bool DereferencedFirst => Uses is [{ Dereferenced: true, Conditional: false, Repeated: false, Before: Hazards.None }, ..];
 }

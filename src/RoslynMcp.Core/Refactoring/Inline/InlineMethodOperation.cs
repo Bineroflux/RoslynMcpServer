@@ -27,8 +27,12 @@ namespace RoslynMcp.Core.Refactoring.Inline;
 /// substituted for the parameters (parenthesized and cast where needed, left to the simplifier
 /// to remove), defaults fill in left-out optional arguments, type arguments replace type
 /// parameters, and an instance call's receiver replaces <c>this</c>. An argument (or receiver)
-/// whose evaluation could change meaning when moved, repeated or dropped is stored in a local
-/// first, in the original order; where no statement can be introduced, that call is refused.
+/// whose evaluation could change meaning when moved past the body's side effects or code that
+/// may throw, repeated or dropped is stored in a local first, in the original order (an unused
+/// one with side effects is evaluated as a statement of its own); where no statement can be
+/// introduced, that call is refused. A receiver that may be null and that the body doesn't
+/// dereference before anything else is reported in warnings: a null one no longer throws where
+/// the call did.
 /// Names the body declares are renamed when they would clash with names at the call site, and
 /// the types and static members it names are written so they bind there.
 /// </para>
@@ -181,9 +185,11 @@ public sealed class InlineMethodOperation : RefactoringOperationBase<InlineMetho
 
         var warnings = new List<string>();
         warnings.AddRange(refused
-            .Select(r => (Span: r.Location.GetLineSpan(), r.Reason))
+            .Select(r => (r.Location, Text: $"not inlined: {r.Reason}"))
+            .Concat(plans.SelectMany(p => p.Notes.Select(note => (Location: CallPlan.NameToken(p.Invocation).GetLocation(), Text: note))))
+            .Select(r => (Span: r.Location.GetLineSpan(), r.Text))
             .OrderBy(r => r.Span.Path, StringComparer.OrdinalIgnoreCase).ThenBy(r => r.Span.StartLinePosition)
-            .Select(r => $"{r.Span.Path}({r.Span.StartLinePosition.Line + 1},{r.Span.StartLinePosition.Character + 1}): not inlined: {r.Reason}"));
+            .Select(r => $"{r.Span.Path}({r.Span.StartLinePosition.Line + 1},{r.Span.StartLinePosition.Character + 1}): {r.Text}"));
         if (deleteMethod && !deletes)
             warnings.Add(await KeptReasonAsync(method, model.Compilation, solution, others.Count + calls.Count - plans.Count, cancellationToken));
         warnings.AddRange(layoutNotes);

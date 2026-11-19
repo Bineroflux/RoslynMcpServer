@@ -34,7 +34,8 @@ public sealed class InlineMethodTool : IToolHandler
         "statements. Arguments are substituted, or first stored in locals when moving, repeating or dropping them " +
         "could change what happens; calls that can't take those locals (expression-bodied members, initializers, " +
         "conditional evaluation), or whose body uses members not accessible there, are left and listed in 'warnings' " +
-        "with any compiler errors. Refuses recursive, virtual, abstract, override, interface, partial, extern, async " +
+        "with any compiler errors, and so is a receiver that may be null where the inlined code no longer throws " +
+        "NullReferenceException for it. Refuses recursive, virtual, abstract, override, interface, partial, extern, async " +
         "and iterator methods and ref/out/in parameters.";
 
     /// <inheritdoc />

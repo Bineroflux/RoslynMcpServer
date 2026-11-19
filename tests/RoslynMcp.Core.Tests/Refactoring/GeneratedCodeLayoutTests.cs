@@ -214,7 +214,7 @@ public sealed class GeneratedCodeLayoutTests
                 {
                     private int _count;
 
-                    public int Count
+                    protected internal int Count
                     {
                         get
                         {

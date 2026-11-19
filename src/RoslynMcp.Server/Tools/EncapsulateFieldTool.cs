@@ -28,7 +28,7 @@ public sealed class EncapsulateFieldTool : IToolHandler
     public string Name => "encapsulate_field";
 
     /// <inheritdoc />
-    public string Description => "Convert a field to a property with backing field.";
+    public string Description => "Encapsulate a field in a property: the field becomes private (renamed to _name when only the case would tell it from the property), code outside its type uses the property, code inside the type keeps using the field. Uses that need the field itself (ref, out, address-of) are listed in warnings.";
 
     /// <inheritdoc />
     public object InputSchema => new

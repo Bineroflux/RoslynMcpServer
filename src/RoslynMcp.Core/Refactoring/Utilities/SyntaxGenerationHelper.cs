@@ -214,16 +214,27 @@ public static class SyntaxGenerationHelper
     /// <param name="propertyName">Name for the property.</param>
     /// <param name="readOnly">If true, creates read-only property.</param>
     /// <param name="nullableAnnotations">Whether nullable annotations are enabled where the property goes.</param>
+    /// <param name="fieldName">The field's name in the accessors, when the field is renamed; its own name otherwise.</param>
     /// <returns>Property declaration syntax.</returns>
     public static PropertyDeclarationSyntax CreatePropertyFromField(
         IFieldSymbol field,
         string propertyName,
         bool readOnly = false,
-        bool nullableAnnotations = true)
+        bool nullableAnnotations = true,
+        string? fieldName = null)
     {
+        // A field named `value` is hidden by the setter's parameter: reach it through this (or the type).
+        fieldName ??= field.Name;
+        ExpressionSyntax FieldExpression() => fieldName != "value"
+            ? IdentifierNames.Name(fieldName)
+            : SyntaxFactory.MemberAccessExpression(
+                SyntaxKind.SimpleMemberAccessExpression,
+                field.IsStatic ? CreateTypeSyntax(field.ContainingType, nullableAnnotations) : SyntaxFactory.ThisExpression(),
+                SyntaxFactory.IdentifierName(fieldName));
+
         var getAccessor = SyntaxFactory.AccessorDeclaration(SyntaxKind.GetAccessorDeclaration)
             .WithBody(SyntaxFactory.Block(
-                SyntaxFactory.ReturnStatement(IdentifierNames.Name(field.Name))));
+                SyntaxFactory.ReturnStatement(FieldExpression())));
 
         var accessors = new List<AccessorDeclarationSyntax> { getAccessor };
 
@@ -234,7 +245,7 @@ public static class SyntaxGenerationHelper
                     SyntaxFactory.ExpressionStatement(
                         SyntaxFactory.AssignmentExpression(
                             SyntaxKind.SimpleAssignmentExpression,
-                            IdentifierNames.Name(field.Name),
+                            FieldExpression(),
                             SyntaxFactory.IdentifierName("value")))));
             accessors.Add(setAccessor);
         }

@@ -209,6 +209,13 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
             solution, newSolution, family.AffectedDocuments(solution, references), cancellationToken);
         var placeholders = await FindPlaceholdersAsync(solution, newSolution, callSites.Keys, cancellationToken);
         var warnings = conflicts.Concat(errors ?? []).Concat(placeholders).ToList();
+        if (methodSymbol.IsExtensionMethod && newParameters.FirstOrDefault()?.OriginalIndex != 0)
+        {
+            warnings.Insert(0,
+                $"'{methodSymbol.ToDisplayString()}' is no longer an extension method: its 'this' parameter '{originalParams[0].Name}' " +
+                $"{(newParameters.Any(p => p.OriginalIndex == 0) ? "is no longer first" : "is removed")}, so its calls in extension form " +
+                "now call it as a static method.");
+        }
 
         if (@params.Preview)
         {
@@ -595,6 +602,10 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
                     parameter = parameter.WithIdentifier(IdentifierNames.Token(name).WithTriviaFrom(parameter.Identifier));
                 if (types[newParameter] is { } type)
                     parameter = parameter.WithType(parameter.Type == null ? type : type.WithTriviaFrom(parameter.Type));
+
+                // Only the first parameter can be an extension method's `this`.
+                if (parameters.Count > 0 && parameter.Modifiers.IndexOf(SyntaxKind.ThisKeyword) is var thisModifier and >= 0)
+                    parameter = WithoutModifier(parameter, thisModifier);
             }
             else
             {
@@ -611,6 +622,19 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
         }
 
         return original.WithParameters(SyntaxFactory.SeparatedList(parameters, Separators(original.Parameters, parameters.Count)));
+    }
+
+    /// <summary>
+    /// <paramref name="parameter"/> without its modifier at <paramref name="index"/>; the
+    /// parameter keeps the leading trivia (its indentation) the modifier had.
+    /// </summary>
+    private static ParameterSyntax WithoutModifier(ParameterSyntax parameter, int index)
+    {
+        var modifier = parameter.Modifiers[index];
+        var result = parameter.WithModifiers(parameter.Modifiers.RemoveAt(index));
+        return index == 0 && parameter.AttributeLists.Count == 0
+            ? result.WithLeadingTrivia(modifier.LeadingTrivia)
+            : result;
     }
 
     /// <summary>
@@ -726,10 +750,17 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
         if (!family.Contains(invoked.ReducedFrom ?? invoked))
             return false;
 
-        // A call in extension form passes the `this` parameter as the receiver.
-        var offset = invoked.ReducedFrom != null ? 1 : 0;
-        var parameters = invoked.Parameters;
-        var original = invocation.ArgumentList;
+        // A call in extension form passes the `this` parameter as the receiver. When that
+        // parameter does not stay first, the method is no longer an extension method and the
+        // call is written in static form, the receiver as its first argument: x.M(1) is Ext.M(x, 1).
+        var toStaticForm = invoked.ReducedFrom != null && newParameters.FirstOrDefault()?.OriginalIndex != 0;
+        if (toStaticForm && invocation.Expression is not MemberAccessExpressionSyntax)
+            return false; // x?.M(1) is left alone
+        var unreduced = toStaticForm ? invoked.GetConstructedReducedFrom()! : null;
+        var (parameters, offset) = unreduced != null
+            ? (unreduced.Parameters, 0)
+            : (invoked.Parameters, invoked.ReducedFrom != null ? 1 : 0);
+        var original = unreduced != null ? WithReceiver(invocation, unreduced) : invocation.ArgumentList;
 
         // A parameter whose default value the request removes keeps meaning what it meant in a
         // call that left it out: the call passes the default of the member it binds to.
@@ -738,21 +769,103 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
         {
             if (parameter is { OriginalIndex: { } index, KeepsDefault: false, NewDefault: null, Type: null } &&
                 index - offset >= 0 &&
-                await OldDefaultAsync(parameters[index - offset], model, original.SpanStart, location.Document, cancellationToken) is { } value)
+                await OldDefaultAsync(parameters[index - offset], model, invocation.ArgumentList.SpanStart, location.Document, cancellationToken) is { } value)
             {
                 oldDefaults[index] = value;
             }
         }
 
-        // A new parameter with a default value is left out, unless an argument after it cannot
-        // be passed by name then (an expanded params argument): such a call passes the default.
-        var passNewOptional = BuildArgumentList(original, parameters, offset, newParameters, renames, oldDefaults, passNewOptional: false) == null;
-        var rewrittenHere = BuildArgumentList(original, parameters, offset, newParameters, renames, oldDefaults, passNewOptional);
-        if (rewrittenHere == null || rewrittenHere.IsEquivalentTo(original))
-            return false; // nothing to change, or a call it cannot rewrite
+        // Expanded params arguments that have to be named are passed as one collection.
+        var nullable = model.GetNullableContext(invocation.SpanStart).AnnotationsEnabled();
+        Func<IReadOnlyList<ExpressionSyntax>, ExpressionSyntax>? collect = invoked.Parameters.LastOrDefault() is { IsParams: true } last
+            ? elements => ParamsCollection(elements, last.Type, invocation.SyntaxTree.Options, nullable)
+            : null;
 
-        return edits.Add(location.Document.Id, original, rewritten =>
-            BuildArgumentList((ArgumentListSyntax)rewritten, parameters, offset, newParameters, renames, oldDefaults, passNewOptional) ?? rewritten);
+        // A new parameter with a default value is left out, unless an argument after it cannot
+        // be passed by name then (an expanded params argument): such a call passes the default,
+        // or else passes the expanded arguments as one collection, by name.
+        (bool PassNewOptional, bool Collect)[] ways = [(false, false), (true, false), (false, true)];
+        ArgumentListSyntax? Build(ArgumentListSyntax list, (bool PassNewOptional, bool Collect) way) =>
+            BuildArgumentList(list, parameters, offset, newParameters, renames, oldDefaults, way.PassNewOptional, way.Collect ? collect : null);
+
+        var chosen = ways.Select(w => ((bool PassNewOptional, bool Collect)?)w).FirstOrDefault(w => Build(original, w!.Value) != null);
+        if (chosen is not { } way)
+            return false; // a call it cannot rewrite
+
+        if (unreduced == null)
+        {
+            if (Build(original, way)!.IsEquivalentTo(original))
+                return false; // nothing to change
+
+            return edits.Add(location.Document.Id, original, rewritten => Build((ArgumentListSyntax)rewritten, way) ?? rewritten);
+        }
+
+        return edits.Add(location.Document.Id, invocation, rewritten =>
+        {
+            var call = (InvocationExpressionSyntax)rewritten;
+            return Build(WithReceiver(call, unreduced), way) is { } arguments ? StaticCall(call, unreduced, arguments) : call;
+        });
+    }
+
+    /// <summary>
+    /// The arguments of <paramref name="call"/>, an extension method call in extension form
+    /// (<c>x.M(1)</c>), with the receiver first, as the static form passes them (<c>(x, 1)</c>).
+    /// </summary>
+    private static ArgumentListSyntax WithReceiver(InvocationExpressionSyntax call, IMethodSymbol method)
+    {
+        var receiver = SyntaxFactory.Argument(((MemberAccessExpressionSyntax)call.Expression).Expression.WithoutTrivia());
+        if (method.Parameters[0].RefKind == RefKind.Ref)
+            receiver = receiver.WithRefKindKeyword(SyntaxFactory.Token(SyntaxKind.RefKeyword).WithTrailingTrivia(SyntaxFactory.Space));
+
+        var arguments = call.ArgumentList.Arguments;
+        var separators = arguments.Count == 0
+            ? []
+            : new[] { SyntaxFactory.Token(SyntaxKind.CommaToken).WithTrailingTrivia(SyntaxFactory.Space) }.Concat(arguments.GetSeparators());
+        return call.ArgumentList.WithArguments(SyntaxFactory.SeparatedList(arguments.Insert(0, receiver), separators));
+    }
+
+    /// <summary>
+    /// <paramref name="call"/> (<c>x.M(1)</c>) in static form with <paramref name="arguments"/>:
+    /// <c>Ext.M(x, 1)</c>, the class name marked for the simplifier.
+    /// </summary>
+    private static InvocationExpressionSyntax StaticCall(InvocationExpressionSyntax call, IMethodSymbol method, ArgumentListSyntax arguments)
+    {
+        var name = ((MemberAccessExpressionSyntax)call.Expression).Name;
+        var callee = SyntaxFactory.MemberAccessExpression(
+            SyntaxKind.SimpleMemberAccessExpression,
+            SyntaxGenerationHelper.CreateTypeSyntax(method.ContainingType, nullableAnnotations: false),
+            name.WithoutTrivia());
+        return SyntaxFactory.InvocationExpression(callee, arguments).WithTriviaFrom(call);
+    }
+
+    /// <summary>
+    /// The expanded arguments <paramref name="elements"/> of a <c>params</c> parameter of type
+    /// <paramref name="type"/> as one collection: a collection expression (<c>["a", "b"]</c>)
+    /// from C# 12 on, an array creation (<c>new string[] { "a", "b" }</c>) before.
+    /// </summary>
+    private static ExpressionSyntax ParamsCollection(
+        IReadOnlyList<ExpressionSyntax> elements,
+        ITypeSymbol type,
+        ParseOptions options,
+        bool nullableAnnotations)
+    {
+        var items = elements.Select(e => e.WithoutTrivia()).ToList();
+        var separators = Enumerable.Repeat(SyntaxFactory.Token(SyntaxKind.CommaToken).WithTrailingTrivia(SyntaxFactory.Space), Math.Max(0, items.Count - 1));
+        if (options is CSharpParseOptions { LanguageVersion: >= LanguageVersion.CSharp12 } || type is not IArrayTypeSymbol array)
+            return SyntaxFactory.CollectionExpression(SyntaxFactory.SeparatedList<CollectionElementSyntax>(items.Select(SyntaxFactory.ExpressionElement), separators));
+
+        return SyntaxFactory.ArrayCreationExpression(
+            SyntaxFactory.Token(SyntaxKind.NewKeyword).WithTrailingTrivia(SyntaxFactory.Space),
+            SyntaxFactory.ArrayType(
+                SyntaxGenerationHelper.CreateTypeSyntax(array.ElementType, nullableAnnotations),
+                SyntaxFactory.SingletonList(SyntaxFactory.ArrayRankSpecifier(
+                    SyntaxFactory.SingletonSeparatedList<ExpressionSyntax>(SyntaxFactory.OmittedArraySizeExpression()))))
+                .WithTrailingTrivia(SyntaxFactory.Space),
+            SyntaxFactory.InitializerExpression(
+                SyntaxKind.ArrayInitializerExpression,
+                SyntaxFactory.Token(SyntaxKind.OpenBraceToken).WithTrailingTrivia(SyntaxFactory.Space),
+                SyntaxFactory.SeparatedList(items, separators),
+                SyntaxFactory.Token(SyntaxKind.CloseBraceToken).WithLeadingTrivia(SyntaxFactory.Space)));
     }
 
     /// <summary>
@@ -874,9 +987,11 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
     /// value (from <paramref name="oldDefaults"/>), a new one without a default value a
     /// <c>TODO</c> placeholder; positional where every argument before it is positional and in
     /// position, otherwise named at the end. From the first argument out of
-    /// position on, every argument is named (CS8323). Null when the call cannot be rewritten (an
-    /// argument names no parameter, the receiver of an extension-form call moves, or an expanded
-    /// <c>params</c> argument would need a name).
+    /// position on, every argument is named (CS8323); expanded <c>params</c> arguments that
+    /// would need a name are passed as one collection made by <paramref name="collect"/>. Null
+    /// when the call cannot be rewritten (an argument names no parameter, the receiver of an
+    /// extension-form call moves, or expanded <c>params</c> arguments would need a name and
+    /// <paramref name="collect"/> is null).
     /// </summary>
     private static ArgumentListSyntax? BuildArgumentList(
         ArgumentListSyntax original,
@@ -885,7 +1000,8 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
         IReadOnlyList<NewParameter> newParameters,
         IReadOnlyList<string?> renames,
         IReadOnlyDictionary<int, ExpressionSyntax> oldDefaults,
-        bool passNewOptional)
+        bool passNewOptional,
+        Func<IReadOnlyList<ExpressionSyntax>, ExpressionSyntax>? collect)
     {
         // A call in extension form passes the `this` parameter as the receiver, which has to stay first.
         if (offset > 0 && newParameters.FirstOrDefault()?.OriginalIndex != 0)
@@ -971,7 +1087,16 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
             if (argument.NameColon == null && (nameTheRest || !inPosition || (isNew && seenNamed)))
             {
                 if (expandedParams)
-                    return null;
+                {
+                    // Expanded params arguments can only be named as one collection.
+                    if (collect == null)
+                        return null;
+
+                    var expanded = entries.Skip(i).TakeWhile(e => e.Position == position).Select(e => e.Argument.Expression).ToList();
+                    argument = SyntaxFactory.Argument(collect(expanded)).WithLeadingTrivia(argument.GetLeadingTrivia());
+                    i += expanded.Count - 1;
+                }
+
                 argument = WithName(argument, NameAt(position));
             }
 

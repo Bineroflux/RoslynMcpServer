@@ -33,10 +33,12 @@ public sealed class ChangeSignatureTool : IToolHandler
         "the changes: parameters it does not list stay, in their order. The change also applies to the members the " +
         "method overrides or implements and to its overrides and implementations, matching parameters by position. " +
         "Calls keep their argument order; a new parameter with a default value is left out of them (later positional " +
-        "arguments are then passed by name). Compiler errors left behind (e.g. a method group converted to a delegate, " +
-        "a removed parameter the body still uses) and the TODO placeholders passed for new parameters without a " +
-        "default are listed in 'warnings'. Refused when a member of that family is declared in metadata (e.g. an " +
-        "override of object.ToString), or when a new name is already used in a member's body or parameter list.";
+        "arguments are then passed by name, expanded params arguments as one collection). An extension method whose " +
+        "'this' parameter moves or is removed becomes a plain static method, called as Ext.M(x, ...). Compiler " +
+        "errors left behind (e.g. a method group converted to a delegate, a removed parameter the body still uses) " +
+        "and the TODO placeholders passed for new parameters without a default are listed in 'warnings'. Refused " +
+        "when a member of that family is declared in metadata (e.g. an override of object.ToString), or when a new " +
+        "name is already used in a member's body or parameter list.";
 
     /// <inheritdoc />
     public object InputSchema => new

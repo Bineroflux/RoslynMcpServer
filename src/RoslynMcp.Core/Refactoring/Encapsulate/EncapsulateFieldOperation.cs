@@ -149,6 +149,7 @@ public sealed class EncapsulateFieldOperation : RefactoringOperationBase<Encapsu
             : fieldName;
 
         var solution = Context.Solution;
+        var lineEnding = await LineEndings.GetAsync(document, cancellationToken);
         var edits = new SyntaxEdits();
         var warnings = new List<string>();
         var updated = new Dictionary<DocumentId, int>();
@@ -169,7 +170,7 @@ public sealed class EncapsulateFieldOperation : RefactoringOperationBase<Encapsu
         edits.Add(document.Id, containingType, rewritten =>
         {
             var typeDeclaration = (TypeDeclarationSyntax)rewritten;
-            var parts = SplitAndMakePrivate((FieldDeclarationSyntax)typeDeclaration.Members[fieldIndex], declaratorIndex, fieldSymbol);
+            var parts = SplitAndMakePrivate((FieldDeclarationSyntax)typeDeclaration.Members[fieldIndex], declaratorIndex, fieldSymbol, lineEnding);
             var members = typeDeclaration.Members.RemoveAt(fieldIndex)
                 .InsertRange(fieldIndex, parts)
                 .Insert(fieldIndex + parts.Count, GeneratedCodeFormatter.MarkInserted(property));
@@ -296,33 +297,39 @@ public sealed class EncapsulateFieldOperation : RefactoringOperationBase<Encapsu
     /// The field's declaration as it becomes: private (and no longer <c>required</c>, which the
     /// property takes over), split into the declarators before it, itself and those after it
     /// when it shares the declaration, so the fields are still initialized in the same order.
+    /// The parts keep the declaration's layout (no formatting, so initializers stay as written):
+    /// the first takes its comments, the others its indentation, each on a line of its own.
     /// </summary>
-    private static List<MemberDeclarationSyntax> SplitAndMakePrivate(FieldDeclarationSyntax declaration, int index, IFieldSymbol field)
+    private static List<MemberDeclarationSyntax> SplitAndMakePrivate(
+        FieldDeclarationSyntax declaration, int index, IFieldSymbol field, string lineEnding)
     {
         var variables = declaration.Declaration.Variables;
         var modifiers = MakePrivate(declaration.Modifiers, field);
         if (variables.Count == 1)
             return [declaration.WithModifiers(modifiers)];
 
-        FieldDeclarationSyntax With(IEnumerable<VariableDeclaratorSyntax> declarators, SyntaxTokenList tokens) =>
+        // The declarators from start to end, with the separators (and their spacing) between them.
+        FieldDeclarationSyntax Part(int start, int end, SyntaxTokenList tokens) =>
             declaration
                 .WithModifiers(tokens)
                 .WithDeclaration(declaration.Declaration.WithVariables(SyntaxFactory.SeparatedList(
-                    declarators.Select((d, i) => i == 0 ? d.WithoutLeadingTrivia() : d))));
+                    variables.Skip(start).Take(end - start).Select((d, i) => i == 0 ? d.WithoutLeadingTrivia() : d),
+                    Enumerable.Range(start, end - start - 1).Select(variables.GetSeparator))));
 
-        var parts = new List<MemberDeclarationSyntax>();
+        var parts = new List<FieldDeclarationSyntax>();
         if (index > 0)
-            parts.Add(With(variables.Take(index), declaration.Modifiers));
-        parts.Add(With([variables[index]], modifiers));
+            parts.Add(Part(0, index, declaration.Modifiers));
+        parts.Add(Part(index, index + 1, modifiers));
         if (index < variables.Count - 1)
-            parts.Add(With(variables.Skip(index + 1), declaration.Modifiers));
+            parts.Add(Part(index + 1, variables.Count, declaration.Modifiers));
 
-        // The first part keeps the declaration's comments and layout, the others are laid out anew.
-        return parts.Select((part, i) => i == 0
-                ? part.WithTrailingTrivia(SyntaxFactory.ElasticCarriageReturnLineFeed)
-                : (MemberDeclarationSyntax)GeneratedCodeFormatter.Mark(part
-                    .WithLeadingTrivia(SyntaxFactory.ElasticMarker)
-                    .WithTrailingTrivia(i == parts.Count - 1 ? declaration.GetTrailingTrivia() : [SyntaxFactory.ElasticCarriageReturnLineFeed])))
+        var indentation = declaration.GetLeadingTrivia().LastOrDefault();
+        var lineBreak = SyntaxFactory.EndOfLine(lineEnding);
+        return parts.Select((part, i) => (MemberDeclarationSyntax)part
+                .WithLeadingTrivia(i == 0
+                    ? declaration.GetLeadingTrivia()
+                    : indentation.IsKind(SyntaxKind.WhitespaceTrivia) ? [indentation] : [])
+                .WithTrailingTrivia(i == parts.Count - 1 ? declaration.GetTrailingTrivia() : [lineBreak]))
             .ToList();
     }
 

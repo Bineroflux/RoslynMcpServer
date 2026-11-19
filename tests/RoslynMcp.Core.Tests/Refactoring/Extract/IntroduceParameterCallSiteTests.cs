@@ -192,6 +192,32 @@ public sealed class IntroduceParameterCallSiteTests
     }
 
     [Fact]
+    public async Task InitializerAsWritten_OnlyWhatIsGeneratedIsSimplified()
+    {
+        using var ws = TestWorkspace.Create(("Program.cs", Lf("""
+            public static class Program
+            {
+                public static int Clamp(int width)
+                {
+                    var limit = System.Math.Max(width,1) + Offset;
+                    return limit;
+                }
+
+                private const int Offset = 2;
+
+                public static string Run() => Clamp(-3).ToString();
+            }
+            """)));
+        var before = Run(ws);
+
+        var result = await IntroduceAsync(ws, ws.PathOf("Program.cs"), "limit", "var limit");
+
+        Assert.True(result.Success, result.Error?.Message);
+        Assert.Contains("Clamp(-3, System.Math.Max(-3,1) + Offset)", ws.ReadFile("Program.cs"));
+        Assert.Equal(before, Run(ws));
+    }
+
+    [Fact]
     public async Task RecursiveCall_GetsTheArgumentToo()
     {
         using var ws = TestWorkspace.Create(("Program.cs", Lf("""

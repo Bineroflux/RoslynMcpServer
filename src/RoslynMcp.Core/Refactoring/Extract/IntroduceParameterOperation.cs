@@ -607,7 +607,7 @@ public sealed class IntroduceParameterOperation : RefactoringOperationBase<Intro
             {
                 if (!receiverIsPlain)
                     failure ??= "the initializer uses the instance, and the call's receiver is not a plain variable that could be named again";
-                return receiver == null ? SyntaxFactory.ThisExpression().WithTriviaFrom(original) : Parenthesize(receiver).WithTriviaFrom(original);
+                return receiver == null ? SyntaxFactory.ThisExpression().WithTriviaFrom(original) : receiver.WithTriviaFrom(original);
             }
 
             var names = _initializer.DescendantNodesAndSelf().OfType<SimpleNameSyntax>().Where(IsStandalone).Cast<SyntaxNode>();
@@ -636,7 +636,7 @@ public sealed class IntroduceParameterOperation : RefactoringOperationBase<Intro
                             return rewritten;
                         }
 
-                        return Parenthesize(passed.WithoutTrivia()).WithTriviaFrom(rewritten);
+                        return ParenthesizeIfNeeded(passed.WithoutTrivia(), name).WithTriviaFrom(rewritten);
 
                     case ITypeParameterSymbol typeParameter when typeNames.TryGetValue(typeParameter.Name, out var typeArgument):
                         return typeArgument.WithTriviaFrom(rewritten);
@@ -665,7 +665,8 @@ public sealed class IntroduceParameterOperation : RefactoringOperationBase<Intro
                 return null;
             }
 
-            return written.WithoutTrivia().WithAdditionalAnnotations(Simplifier.Annotation);
+            // Only what was generated (qualified names, this.) is simplified; the rest stays as written.
+            return written.WithoutTrivia();
         }
 
         /// <summary>A written type with the type parameters it names replaced by the call's type arguments.</summary>
@@ -699,8 +700,22 @@ public sealed class IntroduceParameterOperation : RefactoringOperationBase<Intro
             _ => false
         };
 
-        private static ExpressionSyntax Parenthesize(ExpressionSyntax expression) =>
-            SyntaxFactory.ParenthesizedExpression(expression).WithAdditionalAnnotations(Simplifier.Annotation);
+        /// <summary>
+        /// An argument written where a parameter was: in parentheses only when it is a cast or a
+        /// unary expression used as the receiver of a member access, an element access or a call.
+        /// </summary>
+        private static ExpressionSyntax ParenthesizeIfNeeded(ExpressionSyntax value, SyntaxNode site) =>
+            value is CastExpressionSyntax or PrefixUnaryExpressionSyntax && site.Parent switch
+            {
+                MemberAccessExpressionSyntax access => access.Expression == site,
+                ElementAccessExpressionSyntax access => access.Expression == site,
+                InvocationExpressionSyntax invocation => invocation.Expression == site,
+                ConditionalAccessExpressionSyntax access => access.Expression == site,
+                PostfixUnaryExpressionSyntax => true,
+                _ => false
+            }
+                ? SyntaxFactory.ParenthesizedExpression(value)
+                : value;
 
         private static ExpressionSyntax? DefaultValueOf(IParameterSymbol parameter, CancellationToken cancellationToken) =>
             parameter.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax(cancellationToken) is ParameterSyntax { Default.Value: { } value }

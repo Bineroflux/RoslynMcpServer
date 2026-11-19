@@ -1289,13 +1289,19 @@ public sealed class ExtractMethodOperation : RefactoringOperationBase<ExtractMet
                 (original, _) => IdentifierNames.Name(((SingleVariableDesignationSyntax)original.Designation).Identifier.ValueText)
                     .WithTriviaFrom(original));
 
+            // The expression keeps its own layout; only its other lines move with its first.
+            var kept = GeneratedCodeFormatter.KeepLayout(body.WithoutTrivia(), body, expression);
             statements.Add(flow.ValueType == null
-                ? SyntaxFactory.ExpressionStatement(body.WithoutTrivia())
-                : SyntaxFactory.ReturnStatement(body.WithoutTrivia()));
+                ? SyntaxFactory.ExpressionStatement(kept)
+                : SyntaxFactory.ReturnStatement(kept));
         }
         else
         {
-            statements.AddRange(selection.Statements.Select(PreserveInnerTrivia));
+            // The statements keep their own layout (single-line statements, blank lines,
+            // comments, spacing); the formatter lays out only what is generated around them.
+            var moved = selection.Statements;
+            statements.AddRange(moved.Select((statement, i) => GeneratedCodeFormatter.KeepLayout(
+                PreserveInnerTrivia(statement), statement, first: i == 0, last: i == moved.Count - 1)));
             if (!flow.AlwaysLeaves && flow.Outputs.Count > 0)
             {
                 statements.Add(SyntaxFactory.ReturnStatement(flow.Outputs.Count == 1

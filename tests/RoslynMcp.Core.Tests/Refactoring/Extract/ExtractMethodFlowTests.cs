@@ -1125,6 +1125,101 @@ public sealed class ExtractMethodFlowTests
     }
 
     [Fact]
+    public async Task MovedStatements_KeepTheirLayout_OnlyIndentationChanges()
+    {
+        using var ws = Create("""
+            using System.Collections.Generic;
+
+            public static class Program
+            {
+                public static string Run()
+                {
+                    var items = new[] { 3, 1, 4 };
+                    var max = 0;
+                    var log = new List<string>();
+                    if (items.Length > 0)
+                    {
+                        // scan the items
+                        foreach (var x in items)
+                        {
+                            if (x > max) max = x;
+                            { log.Add("seen"); log.Add(x.ToString()); }
+
+                            // a wrapped call, spacing as written
+                            log.Add(string.Join(",",   x,
+                                "end"));
+                            log.Add(@"a
+                            b");
+                        }
+                    }
+
+                    return max + "/" + string.Join("|", log);
+                }
+            }
+            """);
+
+        var text = await ExtractAndCompareAsync(ws, "// scan the items", "\"end\"));\n                log.Add(@\"a\n                b\");\n            }", "Scan");
+
+        Assert.Contains("max = Scan(items, max, log);", text);
+        Assert.Contains("""
+                private static int Scan(int[] items, int max, List<string> log)
+                {
+                    // scan the items
+                    foreach (var x in items)
+                    {
+                        if (x > max) max = x;
+                        { log.Add("seen"); log.Add(x.ToString()); }
+
+                        // a wrapped call, spacing as written
+                        log.Add(string.Join(",",   x,
+                            "end"));
+                        log.Add(@"a
+                            b");
+                    }
+
+                    return max;
+                }
+            """.ReplaceLineEndings("\n"), text);
+    }
+
+    [Fact]
+    public async Task MovedExpression_KeepsItsLayout_ContinuationLinesMoveWithIt()
+    {
+        using var ws = Create("""
+            using System.Linq;
+
+            public static class Program
+            {
+                public static string Run()
+                {
+                    var items = new[] { 3, 1, 4 };
+                    if (items.Length > 0)
+                    {
+                        var total = items
+                            .Where(x => x>1)
+                            .Sum();
+                        return total.ToString();
+                    }
+
+                    return "";
+                }
+            }
+            """);
+
+        var text = await ExtractAndCompareAsync(ws, "items\n", ".Sum()", "Total", expected: "7");
+
+        Assert.Contains("var total = Total(items);", text);
+        Assert.Contains("""
+                private static int Total(int[] items)
+                {
+                    return items
+                        .Where(x => x>1)
+                        .Sum();
+                }
+            """.ReplaceLineEndings("\n"), text);
+    }
+
+    [Fact]
     public async Task Preview_ShowsCallAndMethod_WritesNothing()
     {
         const string source = """

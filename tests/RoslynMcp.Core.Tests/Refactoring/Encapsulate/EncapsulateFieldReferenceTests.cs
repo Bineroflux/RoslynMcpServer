@@ -160,6 +160,31 @@ public sealed class EncapsulateFieldReferenceTests
     }
 
     [Fact]
+    public async Task SharedDeclaration_PartsKeepTheirLayout()
+    {
+        using var ws = TestWorkspace.Create(("Counter.cs", Lf("""
+            public class Counter
+            {
+                public int first=1, second = 2, a = 3, last = 4; // counts
+
+                public int Sum() => first + second + a + last;
+            }
+            """)));
+
+        var result = await EncapsulateAsync(ws, "Counter.cs", "a");
+
+        Assert.True(result.Success, result.Error?.Message);
+        Assert.Contains("""
+                public int first=1, second = 2;
+                private int _a = 3;
+                public int last = 4; // counts
+
+                public int A
+            """.ReplaceLineEndings("\n"), ws.ReadFile("Counter.cs"));
+        Assert.Empty(ws.GetDiskCompilationWarningsAndErrors());
+    }
+
+    [Fact]
     public async Task UsesThatNeedTheField_StayAndAreReported()
     {
         using var ws = TestWorkspace.Create(("Holder.cs", Lf("""

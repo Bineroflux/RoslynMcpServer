@@ -83,6 +83,117 @@ public sealed class PullMembersUpTargetTests
         Assert.Equal(Derived, ws.ReadFile("Derived.cs"));
     }
 
+    [Fact]
+    public async Task UsingStaticAndAliasesTheMovedCodeUses_AreAddedToTheTargetsFile()
+    {
+        using var ws = TestWorkspace.Create(
+            ("Base.cs", Lf("""
+                using Col = System.Collections.Generic;
+
+                namespace Core;
+
+                public class Base
+                {
+                }
+                """)),
+            ("Derived.cs", Lf("""
+                using System;
+                using Core;
+                using static System.Math;
+                using static App.Units;
+                using Col = System.Collections.Generic;
+                using Sb = System.Text.StringBuilder;
+                using Unused = System.Text.Encoding;
+
+                namespace App;
+
+                public static class Units
+                {
+                    public const int Scale = 10;
+
+                    public enum Kind { Small, Large }
+                }
+
+                public class Derived : Base
+                {
+                    public int Bigger(int a, int b) => Max(a, b) * Scale;
+
+                    public string Text(Kind kind) => new Sb().Append(kind).ToString();
+
+                    public Col.List<int> Items() => new Col.List<int> { Abs(-1) };
+
+                    [Obsolete("old")]
+                    public int Old() => 1;
+                }
+                """)));
+
+        var result = await PullAsync(ws, ["Bigger", "Text", "Items", "Old"]);
+
+        Assert.True(result.Success, result.Error?.Message);
+        Assert.Equal(Lf("""
+            using System;
+            using static System.Math;
+            using static App.Units;
+            using Col = System.Collections.Generic;
+            using Sb = System.Text.StringBuilder;
+
+            namespace Core;
+
+            public class Base
+            {
+                public int Bigger(int a, int b) => Max(a, b) * Scale;
+
+                public string Text(Kind kind) => new Sb().Append(kind).ToString();
+
+                public Col.List<int> Items() => new Col.List<int> { Abs(-1) };
+
+                [Obsolete("old")]
+                public int Old() => 1;
+            }
+            """), ws.ReadFile("Base.cs"));
+        Assert.Null(result.Warnings);
+        Assert.Empty(ws.GetDiskCompilationErrors());
+    }
+
+    [Fact]
+    public async Task ANameTheTargetUsesForSomethingElse_IsWrittenQualified()
+    {
+        using var ws = TestWorkspace.Create(
+            ("Base.cs", Lf("""
+                using System;
+                using Sb = System.Text.Encoding;
+
+                namespace Core;
+
+                public class Base
+                {
+                    private static int Max(int a, int b) => a;
+
+                    public Sb Encoding => Sb.UTF8;
+                }
+                """)),
+            ("Derived.cs", Lf("""
+                using Core;
+                using static System.Math;
+                using Sb = System.Text.StringBuilder;
+
+                namespace App;
+
+                public class Derived : Base
+                {
+                    public string Bigger(int a, int b) => new Sb().Append(Max(a, b)).ToString();
+                }
+                """)));
+
+        var result = await PullAsync(ws, ["Bigger"]);
+
+        Assert.True(result.Success, result.Error?.Message);
+        Assert.Contains("    public string Bigger(int a, int b) => new System.Text.StringBuilder().Append(Math.Max(a, b)).ToString();\n", ws.ReadFile("Base.cs"));
+        Assert.StartsWith("using System;\nusing Sb = System.Text.Encoding;\n\nnamespace Core;", ws.ReadFile("Base.cs"));
+        Assert.Null(result.Warnings);
+        Assert.Empty(ws.GetDiskCompilationErrors());
+    }
+
     private static string Lf(string text) => text.ReplaceLineEndings("\n") + "\n";
 
     private static Task<RefactoringResult> PullAsync(

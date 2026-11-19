@@ -3,6 +3,7 @@ using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.FindSymbols;
 using Microsoft.CodeAnalysis.Formatting;
+using Microsoft.CodeAnalysis.Simplification;
 using Microsoft.CodeAnalysis.Text;
 using RoslynMcp.Contracts.Enums;
 using RoslynMcp.Contracts.Errors;
@@ -38,7 +39,9 @@ namespace RoslynMcp.Core.Refactoring.Hierarchy;
 /// </para>
 /// <para>
 /// The members go into the target's part in <c>targetFile</c>, or else its first part in a file
-/// that isn't generated. Usings the moved code needs are added to that file. Compiler errors introduced in the
+/// that isn't generated. Usings the moved code needs are added to that file: namespaces, a
+/// <c>using static</c> for static members named without their type, and the aliases it uses; a
+/// name the target uses for something else is written qualified instead. Compiler errors introduced in the
 /// files of the target, the type, the target's other derived types or implementers (members they
 /// now hide or lack) are returned as warnings, with notes on changed accessibility.
 /// </para>
@@ -129,7 +132,7 @@ public sealed class PullMembersUpOperation : RefactoringOperationBase<PullMember
 
         var notes = new List<string>();
         var newMembers = new List<MemberDeclarationSyntax>();
-        var namespaces = new HashSet<string>(StringComparer.Ordinal);
+        var usings = new HashSet<UsingDirectives.NewUsing>();
         var edits = new SyntaxEdits();
         var dependencies = new List<ISymbol>();
 
@@ -146,9 +149,10 @@ public sealed class PullMembersUpOperation : RefactoringOperationBase<PullMember
                 .Where(d => !dependencies.Contains(d, SymbolEqualityComparer.Default)));
             if (!signatureOnly)
                 CheckBaseAccess(movedNodes, target, declaringModel, cancellationToken);
-            namespaces.UnionWith(NeededNamespaces(movedNodes, declaringModel, targetModel, targetDeclaration, cancellationToken));
+            var qualified = new Dictionary<SyntaxNode, SyntaxNode>();
+            usings.UnionWith(NeededUsings(movedNodes, type, declaringModel, targetModel, targetDeclaration, nullable, qualified, cancellationToken));
 
-            var translated = Translate(declaration.Declaration, type, typeMap, declaringModel, nullable);
+            var translated = Translate(declaration.Declaration, type, typeMap, qualified, declaringModel, nullable);
             var member = declaration.Chosen(translated);
             MemberDeclarationSyntax forTarget;
             if (isInterface)
@@ -207,8 +211,8 @@ public sealed class PullMembersUpOperation : RefactoringOperationBase<PullMember
             solution,
             cancellationToken,
             (id, newRoot) =>
-                id == targetDocument.Id && newRoot is CompilationUnitSyntax unit && namespaces.Count > 0
-                    ? UsingDirectives.Add(unit, namespaces, lineEnding)
+                id == targetDocument.Id && newRoot is CompilationUnitSyntax unit && usings.Count > 0
+                    ? UsingDirectives.Add(unit, usings, lineEnding)
                     : newRoot,
             notes);
         var annotated = newSolution;
@@ -527,77 +531,206 @@ public sealed class PullMembersUpOperation : RefactoringOperationBase<PullMember
     }
 
     /// <summary>
-    /// The namespaces the target's file has to import for the types and extension methods the
-    /// moved code names. Fails when the target's project can't see such a type at all.
+    /// The usings the target's file needs for the names the moved code uses: the namespaces of
+    /// the types and extension methods it names; a <c>using static</c> of the type of a static
+    /// member (or nested type) it names without its type, the way a <c>using static</c> or an
+    /// enclosing type made it visible; and the aliases it uses. Where such a name would bind to
+    /// something else in the target (a member of the target with that name, an alias of that name
+    /// for something else), the name is written qualified instead: <paramref name="qualified"/>
+    /// receives the replacement of each such name. Fails when the target's project can't see a
+    /// type the moved code uses.
     /// </summary>
-    private static HashSet<string> NeededNamespaces(
+    private static List<UsingDirectives.NewUsing> NeededUsings(
         IEnumerable<SyntaxNode> nodes,
+        INamedTypeSymbol source,
         SemanticModel model,
         SemanticModel targetModel,
         TypeDeclarationSyntax targetDeclaration,
+        bool nullable,
+        Dictionary<SyntaxNode, SyntaxNode> qualified,
         CancellationToken cancellationToken)
     {
         var position = targetDeclaration.OpenBraceToken.Span.End;
-        var needed = new HashSet<string>(StringComparer.Ordinal);
+        var needed = new List<UsingDirectives.NewUsing>();
         foreach (var name in nodes.SelectMany(n => n.DescendantNodesAndSelf()).OfType<SimpleNameSyntax>())
         {
-            var symbol = model.GetSymbolInfo(name, cancellationToken).Symbol;
-            INamedTypeSymbol? type = null;
-            if (symbol is INamedTypeSymbol named && !IsQualified(name) && name.Identifier.ValueText == named.Name)
+            if (name is IdentifierNameSyntax identifier && model.GetAliasInfo(identifier, cancellationToken) is { } alias)
             {
-                var bound = targetModel.GetSpeculativeSymbolInfo(position, name, SpeculativeBindingOption.BindAsTypeOrNamespace).Symbol;
-                if (bound != null && SymbolEqualityComparer.Default.Equals(bound.OriginalDefinition, named.OriginalDefinition))
-                    continue;
-                type = named;
-            }
-            else if (symbol is IMethodSymbol { ReducedFrom: { } extension } && name.Parent is MemberAccessExpressionSyntax access && access.Name == name)
-            {
-                if (targetModel.LookupNamespacesAndTypes(position, name: extension.ContainingType.Name)
-                    .Any(s => SymbolEqualityComparer.Default.Equals(s.OriginalDefinition, extension.ContainingType.OriginalDefinition)))
-                {
-                    continue;
-                }
-
-                type = extension.ContainingType;
-            }
-
-            if (type == null)
+                AliasUsing(identifier, alias);
                 continue;
-
-            if (!SymbolFinder.FindSimilarSymbols(type.OriginalDefinition, targetModel.Compilation, cancellationToken).Any())
-            {
-                throw new RefactoringException(
-                    ErrorCodes.MemberNotMoveable,
-                    $"The moved code uses '{type.ToDisplayString()}' from {type.ContainingAssembly?.Name}, which '{targetModel.Compilation.AssemblyName}' does not reference.");
             }
 
-            var outer = type;
-            while (outer.ContainingType != null)
-                outer = outer.ContainingType;
-            if (outer.ContainingNamespace is { IsGlobalNamespace: false } ns)
-                needed.Add(ns.ToDisplayString());
+            var info = model.GetSymbolInfo(name, cancellationToken);
+            var symbol = info.Symbol ?? (info.CandidateSymbols.Length == 1 ? info.CandidateSymbols[0] : null);
+            if (symbol is IMethodSymbol { MethodKind: MethodKind.Constructor } constructor && name.Parent is AttributeSyntax)
+                symbol = constructor.ContainingType; // an attribute's name binds to its constructor
+
+            switch (symbol)
+            {
+                case INamedTypeSymbol named when !IsQualified(name) && WrittenFor(name, named):
+                    TypeUsing(name, named);
+                    break;
+                case IMethodSymbol { ReducedFrom: { } extension } when name.Parent is MemberAccessExpressionSyntax access && access.Name == name:
+                    ExtensionUsing(extension);
+                    break;
+                case IFieldSymbol or IPropertySymbol or IEventSymbol or IMethodSymbol { MethodKind: MethodKind.Ordinary }
+                    when !IsQualified(name) && (symbol.IsStatic || symbol is IFieldSymbol { IsConst: true }) && symbol.ContainingType is { } containing &&
+                        !SymbolEqualityComparer.Default.Equals(containing.OriginalDefinition, source.OriginalDefinition):
+                    StaticMemberUsing(name, symbol, containing);
+                    break;
+            }
         }
 
         return needed;
 
+        // A type named by its simple name: its namespace, or for a nested type a static import of
+        // the type it is nested in; qualified where the name means something else in the target.
+        void TypeUsing(SimpleNameSyntax name, INamedTypeSymbol named)
+        {
+            var bound = targetModel.GetSpeculativeSymbolInfo(position, name, SpeculativeBindingOption.BindAsTypeOrNamespace).Symbol;
+            if (bound != null && SameSymbol(bound, named))
+                return;
+
+            CheckVisible(named);
+            if (named.ContainingType is { } outer)
+            {
+                if (SymbolEqualityComparer.Default.Equals(outer.OriginalDefinition, source.OriginalDefinition))
+                    return; // a dependency left behind, refused on its own
+
+                if (bound == null)
+                    needed.Add(new UsingDirectives.NewUsing(TypeName(outer), Static: true));
+                else
+                    qualified[name] = Qualify(name, SyntaxGenerationHelper.CreateTypeSyntax(named, nullable));
+                return;
+            }
+
+            if (named.ContainingNamespace is { IsGlobalNamespace: false } ns)
+                needed.Add(new UsingDirectives.NewUsing(ns.ToDisplayString()));
+        }
+
+        // An extension method called in extension form: the namespace of its class.
+        void ExtensionUsing(IMethodSymbol extension)
+        {
+            if (targetModel.LookupNamespacesAndTypes(position, name: extension.ContainingType.Name)
+                .Any(s => SymbolEqualityComparer.Default.Equals(s.OriginalDefinition, extension.ContainingType.OriginalDefinition)))
+            {
+                return;
+            }
+
+            CheckVisible(extension.ContainingType);
+            var outer = extension.ContainingType;
+            while (outer.ContainingType != null)
+                outer = outer.ContainingType;
+            if (outer.ContainingNamespace is { IsGlobalNamespace: false } ns)
+                needed.Add(new UsingDirectives.NewUsing(ns.ToDisplayString()));
+        }
+
+        // A static member named without its type (through a using static, or an enclosing type):
+        // a using static of its type, or its type written in front of it.
+        void StaticMemberUsing(SimpleNameSyntax name, ISymbol member, INamedTypeSymbol containing)
+        {
+            var bound = targetModel.GetSpeculativeSymbolInfo(position, SyntaxFactory.IdentifierName(name.Identifier), SpeculativeBindingOption.BindAsExpression);
+            if (bound.Symbol is { } symbol ? SameSymbol(symbol, member) : bound.CandidateSymbols.Any(c => SameSymbol(c, member)))
+                return;
+
+            CheckVisible(containing);
+            if (bound.Symbol == null && bound.CandidateSymbols.Length == 0)
+            {
+                needed.Add(new UsingDirectives.NewUsing(TypeName(containing), Static: true));
+                return;
+            }
+
+            ExpressionSyntax type = SyntaxGenerationHelper.CreateTypeSyntax(containing, nullable);
+            qualified[name] = SyntaxFactory.MemberAccessExpression(
+                    SyntaxKind.SimpleMemberAccessExpression,
+                    SyntaxFactory.ParseExpression(type.ToString()).WithAdditionalAnnotations(Simplifier.Annotation),
+                    name.WithoutTrivia())
+                .WithTriviaFrom(name)
+                .WithAdditionalAnnotations(Simplifier.Annotation);
+        }
+
+        // An alias: nothing when the target has the same one, else the same alias, or what it
+        // stands for where its name means something else in the target.
+        void AliasUsing(IdentifierNameSyntax name, IAliasSymbol alias)
+        {
+            var targetAlias = targetModel.GetSpeculativeAliasInfo(position, name, SpeculativeBindingOption.BindAsTypeOrNamespace);
+            if (targetAlias != null && SameSymbol(targetAlias.Target, alias.Target))
+                return;
+
+            if (alias.Target is ITypeSymbol aliasedType)
+                CheckVisible(aliasedType);
+
+            var option = SyntaxFacts.IsInNamespaceOrTypeContext(name) ? SpeculativeBindingOption.BindAsTypeOrNamespace : SpeculativeBindingOption.BindAsExpression;
+            var bound = targetModel.GetSpeculativeSymbolInfo(position, name, option);
+            if ((targetAlias == null && bound.Symbol == null && bound.CandidateSymbols.Length == 0) || name.Parent is AliasQualifiedNameSyntax)
+            {
+                var target = alias.Target is ITypeSymbol type ? TypeName(type) : alias.Target.ToDisplayString();
+                needed.Add(new UsingDirectives.NewUsing(target, Alias: alias.Name));
+                return;
+            }
+
+            qualified[name] = Qualify(name, alias.Target is ITypeSymbol typeTarget
+                ? SyntaxGenerationHelper.CreateTypeSyntax(typeTarget, nullable)
+                : SyntaxFactory.ParseName("global::" + alias.Target.ToDisplayString()).WithAdditionalAnnotations(Simplifier.Annotation));
+        }
+
+        void CheckVisible(ITypeSymbol type)
+        {
+            if (type.ContainingAssembly != null && !SymbolFinder.FindSimilarSymbols(type.OriginalDefinition, targetModel.Compilation, cancellationToken).Any())
+            {
+                throw new RefactoringException(
+                    ErrorCodes.MemberNotMoveable,
+                    $"The moved code uses '{type.ToDisplayString()}' from {type.ContainingAssembly.Name}, which '{targetModel.Compilation.AssemblyName}' does not reference.");
+            }
+        }
+
         static bool IsQualified(SimpleNameSyntax name) =>
             name.Parent is QualifiedNameSyntax qualified && qualified.Right == name ||
             name.Parent is MemberAccessExpressionSyntax access && access.Name == name ||
+            name.Parent is MemberBindingExpressionSyntax ||
             name.Parent is AliasQualifiedNameSyntax;
+
+        // The name of the type itself, or of an attribute class without its Attribute suffix.
+        static bool WrittenFor(SimpleNameSyntax name, INamedTypeSymbol type) =>
+            name.Identifier.ValueText == type.Name ||
+            (name.Identifier.ValueText + "Attribute" == type.Name && name.Ancestors().OfType<AttributeSyntax>().Any());
+
+        // The same symbol, also across compilations (the target may be in another project).
+        static bool SameSymbol(ISymbol left, ISymbol right) =>
+            SymbolEqualityComparer.Default.Equals(left.OriginalDefinition, right.OriginalDefinition) ||
+            (left.Kind == right.Kind &&
+                left.OriginalDefinition.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) == right.OriginalDefinition.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) &&
+                left.OriginalDefinition.GetDocumentationCommentId() == right.OriginalDefinition.GetDocumentationCommentId());
+
+        // A type as a using directive names it: fully qualified, without global::.
+        static string TypeName(ITypeSymbol type) =>
+            type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat.WithGlobalNamespaceStyle(SymbolDisplayGlobalNamespaceStyle.Omitted));
+
+        // What replaces a name: in an expression, member accesses; elsewhere the qualified name.
+        static SyntaxNode Qualify(SimpleNameSyntax name, TypeSyntax qualifiedName) =>
+            (SyntaxFacts.IsInNamespaceOrTypeContext(name)
+                ? (SyntaxNode)SyntaxFactory.ParseTypeName(qualifiedName.ToString())
+                : SyntaxFactory.ParseExpression(qualifiedName.ToString()))
+            .WithTriviaFrom(name)
+            .WithAdditionalAnnotations(Simplifier.Annotation);
     }
 
-    /// <summary>The declaration with the types that mention the type's own type parameters written in the target's terms.</summary>
+    /// <summary>
+    /// The declaration with <paramref name="qualified"/>'s names replaced and the types that
+    /// mention the type's own type parameters written in the target's terms.
+    /// </summary>
     private static MemberDeclarationSyntax Translate(
         MemberDeclarationSyntax declaration,
         INamedTypeSymbol type,
         Dictionary<ITypeParameterSymbol, ITypeSymbol> typeMap,
+        Dictionary<SyntaxNode, SyntaxNode> qualified,
         SemanticModel model,
         bool nullable)
     {
-        if (type.TypeParameters.Length == 0)
+        if (type.TypeParameters.Length == 0 && qualified.Count == 0)
             return declaration;
 
-        var translator = new TypeTranslator(model, type, typeMap, nullable);
+        var translator = new TypeTranslator(model, type, typeMap, qualified, nullable);
         var translated = (MemberDeclarationSyntax)translator.Visit(declaration)!;
         if (translator.Failure != null)
         {
@@ -980,18 +1113,23 @@ public sealed class PullMembersUpOperation : RefactoringOperationBase<PullMember
 
     /// <summary>
     /// Rewrites the types in a declaration that mention its type's type parameters into the
-    /// target's terms; <see cref="Failure"/> names a type that can't be.
+    /// target's terms, and replaces the names in <paramref name="qualified"/>; <see cref="Failure"/>
+    /// names a type that can't be translated.
     /// </summary>
     private sealed class TypeTranslator(
         SemanticModel model,
         INamedTypeSymbol type,
         Dictionary<ITypeParameterSymbol, ITypeSymbol> map,
+        Dictionary<SyntaxNode, SyntaxNode> qualified,
         bool nullable) : CSharpSyntaxRewriter
     {
         public string? Failure { get; private set; }
 
         public override SyntaxNode? Visit(SyntaxNode? node)
         {
+            if (node != null && qualified.TryGetValue(node, out var replacement))
+                return replacement;
+
             // Names only: a nullable, array or tuple type keeps its shape around the translated names.
             if (node is NameSyntax syntax && !syntax.IsVar && IsTypePosition(syntax) &&
                 model.GetTypeInfo(syntax).Type is { } bound && Mentions(bound))

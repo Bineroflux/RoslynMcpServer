@@ -86,8 +86,23 @@ public sealed class AddNullChecksOperation : RefactoringOperationBase<AddNullChe
             nullChecks.Add(check);
         }
 
+        // Insert null checks at the beginning of the method body
+        var body = GetBody(methodNode);
+        if (body == null)
+            throw new RefactoringException(ErrorCodes.RoslynError, "Method has no body to insert null checks into.");
+
+        var newStatements = nullChecks.Select(GeneratedCodeFormatter.MarkInserted).Concat(body.Statements);
+        var newBody = body.WithStatements(SyntaxFactory.List(newStatements));
+        var newMethodNode = ReplaceBody(methodNode, newBody);
+
+        var newRoot = root.ReplaceNode(methodNode, newMethodNode);
+        var newDocument = document.WithSyntaxRoot(newRoot);
+        var newSolution = await GeneratedCodeFormatter.FormatAsync(
+            newDocument.Project.Solution, document, cancellationToken);
+
         if (@params.Preview)
         {
+            await PreviewCommitAsync(newSolution, cancellationToken);
             var code = string.Join("\n", nullChecks.Select(s => s.NormalizeWhitespace().ToFullString()));
             var pendingChanges = new List<PendingChange>
             {
@@ -103,19 +118,6 @@ public sealed class AddNullChecksOperation : RefactoringOperationBase<AddNullChe
             return RefactoringResult.PreviewResult(operationId, pendingChanges);
         }
 
-        // Insert null checks at the beginning of the method body
-        var body = GetBody(methodNode);
-        if (body == null)
-            throw new RefactoringException(ErrorCodes.RoslynError, "Method has no body to insert null checks into.");
-
-        var newStatements = nullChecks.Select(GeneratedCodeFormatter.MarkInserted).Concat(body.Statements);
-        var newBody = body.WithStatements(SyntaxFactory.List(newStatements));
-        var newMethodNode = ReplaceBody(methodNode, newBody);
-
-        var newRoot = root.ReplaceNode(methodNode, newMethodNode);
-        var newDocument = document.WithSyntaxRoot(newRoot);
-        var newSolution = await GeneratedCodeFormatter.FormatAsync(
-            newDocument.Project.Solution, document, cancellationToken);
         var commitResult = await CommitChangesAsync(newSolution, cancellationToken);
 
         return RefactoringResult.Succeeded(operationId,

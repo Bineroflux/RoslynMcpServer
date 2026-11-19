@@ -200,6 +200,7 @@ public sealed class ChangeSignatureOperation : RefactoringOperationBase<ChangeSi
 
         if (@params.Preview)
         {
+            await PreviewCommitAsync(newSolution, cancellationToken);
             return new RefactoringResult
             {
                 Success = true,

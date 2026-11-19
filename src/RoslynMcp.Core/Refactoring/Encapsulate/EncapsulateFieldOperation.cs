@@ -231,6 +231,7 @@ public sealed class EncapsulateFieldOperation : RefactoringOperationBase<Encapsu
 
         if (@params.Preview)
         {
+            await PreviewCommitAsync(newSolution, cancellationToken);
             return await CreatePreviewResultAsync(
                 operationId, @params, document, fieldDeclaration, propertyName, newSolution, updated, warnings, cancellationToken);
         }

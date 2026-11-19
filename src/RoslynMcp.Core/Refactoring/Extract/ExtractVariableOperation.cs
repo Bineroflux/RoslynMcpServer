@@ -163,12 +163,6 @@ public sealed class ExtractVariableOperation : RefactoringOperationBase<ExtractV
         // Create variable reference
         var variableRef = IdentifierNames.Name(@params.VariableName);
 
-        // If preview mode, return without applying
-        if (@params.Preview)
-        {
-            return CreatePreviewResult(operationId, @params, expression, typeInfo.Type, variableDeclaration);
-        }
-
         // Apply changes: insert declaration before statement, replace expression with variable
         var newStatements = new List<StatementSyntax>();
 
@@ -205,6 +199,13 @@ public sealed class ExtractVariableOperation : RefactoringOperationBase<ExtractV
         var newDocument = document.WithSyntaxRoot(newRoot);
         var newSolution = await GeneratedCodeFormatter.FormatAsync(
             newDocument.Project.Solution, document, cancellationToken);
+
+        // If preview mode, return without applying
+        if (@params.Preview)
+        {
+            await PreviewCommitAsync(newSolution, cancellationToken);
+            return CreatePreviewResult(operationId, @params, expression, typeInfo.Type, variableDeclaration);
+        }
 
         // Commit changes
         var commitResult = await CommitChangesAsync(newSolution, cancellationToken);

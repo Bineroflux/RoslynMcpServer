@@ -150,6 +150,7 @@ public sealed class ExtractMethodOperation : RefactoringOperationBase<ExtractMet
 
         if (@params.Preview)
         {
+            await PreviewCommitAsync(newSolution, cancellationToken);
             return await CreatePreviewAsync(operationId, @params, document, selection, newSolution, warnings, cancellationToken);
         }
 

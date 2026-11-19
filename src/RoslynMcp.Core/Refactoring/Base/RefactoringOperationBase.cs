@@ -137,6 +137,29 @@ public abstract class RefactoringOperationBase<TParams> : IRefactoringOperation<
     }
 
     /// <summary>
+    /// The preview's counterpart of <see cref="CommitChangesAsync(Solution, CancellationToken)"/>:
+    /// adds to the preview's result what committing <paramref name="newSolution"/> would warn
+    /// about (a file that would be saved as UTF-8 because its code page cannot represent the
+    /// new text) or fail on (a file whose bytes are not valid in its encoding, which a commit
+    /// refuses to rewrite), without writing anything. Every preview calls it with the solution
+    /// its commit would write.
+    /// </summary>
+    /// <param name="newSolution">Solution with the changes the commit would write.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    protected Task PreviewCommitAsync(Solution newSolution, CancellationToken cancellationToken) =>
+        PreviewCommitAsync(newSolution, newFilesEncodingFrom: null, cancellationToken);
+
+    /// <inheritdoc cref="PreviewCommitAsync(Solution, CancellationToken)"/>
+    /// <param name="newSolution">Solution with the changes the commit would write.</param>
+    /// <param name="newFilesEncodingFrom">As for <see cref="CommitChangesAsync(Solution, string?, CancellationToken)"/>.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    protected async Task PreviewCommitAsync(
+        Solution newSolution, string? newFilesEncodingFrom, CancellationToken cancellationToken)
+    {
+        _commitWarnings.AddRange(await Context.GetCommitWarningsAsync(newSolution, newFilesEncodingFrom, cancellationToken));
+    }
+
+    /// <summary>
     /// <paramref name="warnings"/> followed by the <paramref name="additional"/> ones it does
     /// not contain yet; null when there are none.
     /// </summary>
@@ -172,12 +195,22 @@ public abstract class RefactoringOperationBase<TParams> : IRefactoringOperation<
     private static RefactoringResult WithTiming(
         RefactoringResult result, long elapsedMs, long workspaceLoadMs, IReadOnlyList<string> commitWarnings)
     {
-        // Preview results intentionally don't carry timing (and commit nothing).
+        // Preview results intentionally don't carry timing (and commit nothing), but they carry
+        // what the commit would warn about (PreviewCommitAsync).
         if (result.Preview)
-            return result;
+        {
+            return commitWarnings.Count == 0
+                ? result
+                : Copy(result, result.ExecutionTimeMs, result.WorkspaceLoadMs, result.TotalExecutionTimeMs, commitWarnings);
+        }
 
         var opMs = result.ExecutionTimeMs > 0 ? result.ExecutionTimeMs : elapsedMs;
-        return new RefactoringResult
+        return Copy(result, opMs, workspaceLoadMs, opMs + workspaceLoadMs, commitWarnings);
+    }
+
+    private static RefactoringResult Copy(
+        RefactoringResult result, long executionMs, long workspaceLoadMs, long totalMs, IReadOnlyList<string> commitWarnings) =>
+        new()
         {
             Success = result.Success,
             OperationId = result.OperationId,
@@ -187,12 +220,11 @@ public abstract class RefactoringOperationBase<TParams> : IRefactoringOperation<
             ReferencesUpdated = result.ReferencesUpdated,
             UsingDirectivesAdded = result.UsingDirectivesAdded,
             UsingDirectivesRemoved = result.UsingDirectivesRemoved,
-            ExecutionTimeMs = opMs,
+            ExecutionTimeMs = executionMs,
             WorkspaceLoadMs = workspaceLoadMs,
-            TotalExecutionTimeMs = opMs + workspaceLoadMs,
+            TotalExecutionTimeMs = totalMs,
             Error = result.Error,
             PendingChanges = result.PendingChanges,
             Warnings = MergeWarnings(result.Warnings, commitWarnings)
         };
-    }
 }

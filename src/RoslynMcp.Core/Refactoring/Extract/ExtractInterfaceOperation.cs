@@ -138,12 +138,6 @@ public sealed class ExtractInterfaceOperation : RefactoringOperationBase<Extract
         // Get namespace
         var namespaceName = typeSymbol.ContainingNamespace?.ToDisplayString();
 
-        // If preview mode, return without applying
-        if (@params.Preview)
-        {
-            return CreatePreviewResult(operationId, @params, membersToExtract, interfaceDecl, namespaceName);
-        }
-
         // Apply changes
         Solution newSolution;
         if (inNewFile)
@@ -184,6 +178,13 @@ public sealed class ExtractInterfaceOperation : RefactoringOperationBase<Extract
         }
 
         newSolution = await GeneratedCodeFormatter.FormatAsync(newSolution, document, cancellationToken);
+
+        // If preview mode, return without applying
+        if (@params.Preview)
+        {
+            await PreviewCommitAsync(newSolution, cancellationToken);
+            return CreatePreviewResult(operationId, @params, membersToExtract, interfaceDecl, namespaceName);
+        }
 
         // Commit changes
         var commitResult = await CommitChangesAsync(newSolution, cancellationToken);

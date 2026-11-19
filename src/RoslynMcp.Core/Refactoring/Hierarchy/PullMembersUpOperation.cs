@@ -208,6 +208,7 @@ public sealed class PullMembersUpOperation : RefactoringOperationBase<PullMember
 
         if (@params.Preview)
         {
+            await PreviewCommitAsync(newSolution, cancellationToken);
             return new RefactoringResult
             {
                 Success = true,

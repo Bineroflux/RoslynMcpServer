@@ -321,7 +321,7 @@ These tools generate new code members for existing types.
 
 ## Preview Mode
 
-Every refactoring tool supports a `preview` parameter. When set to `true`, the tool computes and returns the changes that would be made without writing anything to disk. This lets you review diffs before committing to a refactoring.
+Every refactoring tool supports a `preview` parameter. When set to `true`, the tool computes and returns the changes that would be made without writing anything to disk. This lets you review diffs before committing to a refactoring. A preview's `warnings` also say what writing the change would do to the files' encodings: a file that would be saved as UTF-8 with BOM because its code page cannot hold the new text, and a file whose bytes are not valid in its own encoding, which makes the refactoring fail (see [File Encodings and Line Endings](#file-encodings-and-line-endings)); the preview itself succeeds, so the changes are still shown.
 
 Example (as a natural language prompt to Claude):
 

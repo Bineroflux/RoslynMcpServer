@@ -132,8 +132,22 @@ public sealed class ConvertToPatternMatchingOperation : RefactoringOperationBase
         var before = switchStmt.NormalizeWhitespace().ToFullString();
         var after = switchExpr.NormalizeWhitespace().ToFullString();
 
+        // Determine how to replace: if parent is a method with return, wrap accordingly
+        var parentStatement = switchStmt.Parent;
+        SyntaxNode newRoot;
+
+        // Simple replacement: replace switch statement with return switchExpr
+        var returnStmt = SyntaxFactory.ReturnStatement(switchExpr)
+            .WithLeadingTrivia(switchStmt.GetLeadingTrivia())
+            .WithTrailingTrivia(switchStmt.GetTrailingTrivia());
+
+        newRoot = root.ReplaceNode(switchStmt, returnStmt);
+
+        var newDocument = document.WithSyntaxRoot(newRoot);
+
         if (@params.Preview)
         {
+            await PreviewCommitAsync(newDocument.Project.Solution, cancellationToken);
             var pendingChanges = new List<PendingChange>
             {
                 new()
@@ -148,18 +162,6 @@ public sealed class ConvertToPatternMatchingOperation : RefactoringOperationBase
             return RefactoringResult.PreviewResult(operationId, pendingChanges);
         }
 
-        // Determine how to replace: if parent is a method with return, wrap accordingly
-        var parentStatement = switchStmt.Parent;
-        SyntaxNode newRoot;
-
-        // Simple replacement: replace switch statement with return switchExpr
-        var returnStmt = SyntaxFactory.ReturnStatement(switchExpr)
-            .WithLeadingTrivia(switchStmt.GetLeadingTrivia())
-            .WithTrailingTrivia(switchStmt.GetTrailingTrivia());
-
-        newRoot = root.ReplaceNode(switchStmt, returnStmt);
-
-        var newDocument = document.WithSyntaxRoot(newRoot);
         var commitResult = await CommitChangesAsync(newDocument.Project.Solution, cancellationToken);
 
         return RefactoringResult.Succeeded(operationId,
@@ -247,8 +249,16 @@ public sealed class ConvertToPatternMatchingOperation : RefactoringOperationBase
         var before = ifStmt.NormalizeWhitespace().ToFullString();
         var after = switchExpr.NormalizeWhitespace().ToFullString();
 
+        var returnStmt = SyntaxFactory.ReturnStatement(switchExpr)
+            .WithLeadingTrivia(ifStmt.GetLeadingTrivia())
+            .WithTrailingTrivia(ifStmt.GetTrailingTrivia());
+
+        var newRoot = root.ReplaceNode(ifStmt, returnStmt);
+        var newDocument = document.WithSyntaxRoot(newRoot);
+
         if (@params.Preview)
         {
+            await PreviewCommitAsync(newDocument.Project.Solution, cancellationToken);
             var pendingChanges = new List<PendingChange>
             {
                 new()
@@ -263,12 +273,6 @@ public sealed class ConvertToPatternMatchingOperation : RefactoringOperationBase
             return RefactoringResult.PreviewResult(operationId, pendingChanges);
         }
 
-        var returnStmt = SyntaxFactory.ReturnStatement(switchExpr)
-            .WithLeadingTrivia(ifStmt.GetLeadingTrivia())
-            .WithTrailingTrivia(ifStmt.GetTrailingTrivia());
-
-        var newRoot = root.ReplaceNode(ifStmt, returnStmt);
-        var newDocument = document.WithSyntaxRoot(newRoot);
         var commitResult = await CommitChangesAsync(newDocument.Project.Solution, cancellationToken);
 
         return RefactoringResult.Succeeded(operationId,

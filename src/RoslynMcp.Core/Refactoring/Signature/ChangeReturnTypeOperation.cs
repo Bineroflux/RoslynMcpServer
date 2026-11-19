@@ -155,6 +155,7 @@ public sealed class ChangeReturnTypeOperation : RefactoringOperationBase<ChangeR
 
         if (@params.Preview)
         {
+            await PreviewCommitAsync(newSolution, cancellationToken);
             return new RefactoringResult
             {
                 Success = true,

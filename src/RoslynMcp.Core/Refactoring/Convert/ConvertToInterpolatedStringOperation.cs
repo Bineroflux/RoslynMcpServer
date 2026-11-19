@@ -195,9 +195,12 @@ public sealed class ConvertToInterpolatedStringOperation : RefactoringOperationB
 
         var before = invocation.NormalizeWhitespace().ToFullString();
         var after = interpolatedString.NormalizeWhitespace().ToFullString();
+        var newRoot = root.ReplaceNode(invocation, interpolatedString);
+        var newDocument = document.WithSyntaxRoot(newRoot);
 
         if (@params.Preview)
         {
+            await PreviewCommitAsync(newDocument.Project.Solution, cancellationToken);
             var pendingChanges = new List<PendingChange>
             {
                 new()
@@ -212,8 +215,6 @@ public sealed class ConvertToInterpolatedStringOperation : RefactoringOperationB
             return RefactoringResult.PreviewResult(operationId, pendingChanges);
         }
 
-        var newRoot = root.ReplaceNode(invocation, interpolatedString);
-        var newDocument = document.WithSyntaxRoot(newRoot);
         var commitResult = await CommitChangesAsync(newDocument.Project.Solution, cancellationToken);
 
         return RefactoringResult.Succeeded(operationId,
@@ -262,9 +263,12 @@ public sealed class ConvertToInterpolatedStringOperation : RefactoringOperationB
 
         var before = outerConcat.NormalizeWhitespace().ToFullString();
         var after = interpolatedString.NormalizeWhitespace().ToFullString();
+        var newRoot = root.ReplaceNode(outerConcat, interpolatedString);
+        var newDocument = document.WithSyntaxRoot(newRoot);
 
         if (@params.Preview)
         {
+            await PreviewCommitAsync(newDocument.Project.Solution, cancellationToken);
             var pendingChanges = new List<PendingChange>
             {
                 new()
@@ -279,8 +283,6 @@ public sealed class ConvertToInterpolatedStringOperation : RefactoringOperationB
             return RefactoringResult.PreviewResult(operationId, pendingChanges);
         }
 
-        var newRoot = root.ReplaceNode(outerConcat, interpolatedString);
-        var newDocument = document.WithSyntaxRoot(newRoot);
         var commitResult = await CommitChangesAsync(newDocument.Project.Solution, cancellationToken);
 
         return RefactoringResult.Succeeded(operationId,

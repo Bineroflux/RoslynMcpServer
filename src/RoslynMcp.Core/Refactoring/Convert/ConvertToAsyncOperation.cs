@@ -183,8 +183,10 @@ public sealed class ConvertToAsyncOperation : RefactoringOperationBase<ConvertTo
         warnings.AddRange(await NotAwaitedWarningsAsync(renamed, newSolution, edits.Documents, references.Hidden, returns, cancellationToken));
         warnings.AddRange(await IntroducedErrors.FindAsync(solution, newSolution, affected, cancellationToken) ?? []);
 
+        var toCommit = await WithTextChangesOnlyAsync(solution, newSolution, cancellationToken);
         if (@params.Preview)
         {
+            await PreviewCommitAsync(toCommit, cancellationToken);
             var declarationChange = $"Make '{method.Name}' async" +
                 (newName != method.Name ? $" as '{newName}'" : "") + $", returning '{returns}'";
             return new RefactoringResult
@@ -203,7 +205,7 @@ public sealed class ConvertToAsyncOperation : RefactoringOperationBase<ConvertTo
             };
         }
 
-        var commit = await CommitChangesAsync(await WithTextChangesOnlyAsync(solution, newSolution, cancellationToken), cancellationToken);
+        var commit = await CommitChangesAsync(toCommit, cancellationToken);
 
         return new RefactoringResult
         {

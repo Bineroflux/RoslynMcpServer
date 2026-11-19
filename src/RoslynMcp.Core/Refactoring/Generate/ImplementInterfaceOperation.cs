@@ -188,12 +188,6 @@ public sealed class ImplementInterfaceOperation : RefactoringOperationBase<Imple
             @params.ThrowNotImplemented,
             nullableAnnotations);
 
-        // If preview mode, return without applying
-        if (@params.Preview)
-        {
-            return CreatePreviewResult(operationId, @params, unimplementedMembers, implementations, addsInterface, warnings);
-        }
-
         // Add implementations to type
         var newTypeDeclaration = AddMembers(typeDeclaration, implementations);
         var newRoot = root.ReplaceNode(typeDeclaration, newTypeDeclaration);
@@ -201,6 +195,13 @@ public sealed class ImplementInterfaceOperation : RefactoringOperationBase<Imple
         var newDocument = document.WithSyntaxRoot(newRoot);
         var newSolution = await GeneratedCodeFormatter.FormatAsync(
             newDocument.Project.Solution, document, cancellationToken);
+
+        // If preview mode, return without applying
+        if (@params.Preview)
+        {
+            await PreviewCommitAsync(newSolution, cancellationToken);
+            return CreatePreviewResult(operationId, @params, unimplementedMembers, implementations, addsInterface, warnings);
+        }
 
         // Commit changes
         var commitResult = await CommitChangesAsync(newSolution, cancellationToken);

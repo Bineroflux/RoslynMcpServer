@@ -188,6 +188,7 @@ public sealed class InlineMethodOperation : RefactoringOperationBase<InlineMetho
 
         if (@params.Preview)
         {
+            await PreviewCommitAsync(newSolution, cancellationToken);
             return new RefactoringResult
             {
                 Success = true,

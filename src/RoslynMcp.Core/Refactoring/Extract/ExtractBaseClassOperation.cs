@@ -174,12 +174,6 @@ public sealed class ExtractBaseClassOperation : RefactoringOperationBase<Extract
         // Get namespace
         var namespaceName = typeSymbol.ContainingNamespace?.ToDisplayString();
 
-        // If preview mode, return without applying
-        if (@params.Preview)
-        {
-            return CreatePreviewResult(operationId, @params, moved, baseClass, namespaceName);
-        }
-
         // Mark what leaves the type; it is removed from the text once the rest is done.
         var originalSolution = document.Project.Solution;
         var markedRoot = root.ReplaceNodes(
@@ -245,6 +239,13 @@ public sealed class ExtractBaseClassOperation : RefactoringOperationBase<Extract
         var formattedText = await formatted.GetTextAsync(cancellationToken);
         newSolution = newSolution.WithDocumentText(document.Id, DeclarationRemoval.Remove(
             formattedText, DeclarationRemoval.Spans(formattedText, formattedRoot!.GetAnnotatedNodes(RemoveAnnotationKind))));
+
+        // If preview mode, return without applying
+        if (@params.Preview)
+        {
+            await PreviewCommitAsync(newSolution, cancellationToken);
+            return CreatePreviewResult(operationId, @params, moved, baseClass, namespaceName);
+        }
 
         var warnings = await FindWarningsAsync(originalSolution, newSolution, document.Id, @params.TargetFile, moved, cancellationToken);
 

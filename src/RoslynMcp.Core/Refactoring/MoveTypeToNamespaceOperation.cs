@@ -66,6 +66,7 @@ public sealed class MoveTypeToNamespaceOperation : RefactoringOperationBase<Move
         // If preview mode, return without applying
         if (@params.Preview)
         {
+            await PreviewCommitAsync(newSolution, cancellationToken);
             return CreatePreviewResult(operationId, @params, resolution, changeStats, move);
         }
 

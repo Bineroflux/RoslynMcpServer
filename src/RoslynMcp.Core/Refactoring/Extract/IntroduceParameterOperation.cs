@@ -162,6 +162,7 @@ public sealed class IntroduceParameterOperation : RefactoringOperationBase<Intro
 
         if (@params.Preview)
         {
+            await PreviewCommitAsync(newSolution, cancellationToken);
             var pendingChanges = new List<PendingChange>
             {
                 new()

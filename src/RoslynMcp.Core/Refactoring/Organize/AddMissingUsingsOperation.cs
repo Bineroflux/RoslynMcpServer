@@ -163,17 +163,18 @@ public sealed class AddMissingUsingsOperation : RefactoringOperationBase<AddMiss
                 0);
         }
 
-        // If preview mode, return without applying (but include before/after snippets)
-        if (preview)
-        {
-            return CreatePreviewResult(operationId, sourceFile, newUsings, root);
-        }
-
         // Add the using directives
         var lineEnding = await LineEndings.GetAsync(document, cancellationToken);
         var newRoot = AddUsings(root, newUsings, lineEnding);
         var newDocument = document.WithSyntaxRoot(newRoot);
         var newSolution = newDocument.Project.Solution;
+
+        // If preview mode, return without applying (but include before/after snippets)
+        if (preview)
+        {
+            await PreviewCommitAsync(newSolution, cancellationToken);
+            return CreatePreviewResult(operationId, sourceFile, newUsings, root);
+        }
 
         // Commit changes
         var commitResult = await CommitChangesAsync(newSolution, cancellationToken);
@@ -272,8 +273,6 @@ public sealed class AddMissingUsingsOperation : RefactoringOperationBase<AddMiss
                 var previewResult = CreatePreviewResult(operationId, document.FilePath!, newUsings, root);
                 if (previewResult.PendingChanges != null)
                     allPendingChanges.AddRange(previewResult.PendingChanges);
-                totalUsingsAdded += newUsings.Count;
-                continue;
             }
 
             // Add the using directives. Accumulate locally and commit once at the end:
@@ -290,6 +289,7 @@ public sealed class AddMissingUsingsOperation : RefactoringOperationBase<AddMiss
         // If preview mode, return aggregated preview
         if (@params.Preview)
         {
+            await PreviewCommitAsync(newSolution, cancellationToken);
             return new RefactoringResult
             {
                 Success = true,

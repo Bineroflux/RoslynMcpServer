@@ -66,6 +66,33 @@ public sealed class NewFileConventionsTests
         Assert.Contains("int Λ();", File.ReadAllText(ws.PathOf("ILettered.cs")));
     }
 
+    [Fact]
+    public async Task NewFile_Preview_SaysTheCommitWouldWriteUtf8WithBomForACharacterTheCharsetLacks()
+    {
+        const string Shape = "namespace App;\n\npublic class Shape\n{\n    public int Λ() => 2;\n}\n";
+        using var ws = TestWorkspace.Create(
+            [("Shape.cs", Shape)], [], editorConfig: "root = true\n\n[*.cs]\ncharset = latin1\n");
+
+        var result = await new ExtractInterfaceOperation(ws.Context).ExecuteAsync(
+            new ExtractInterfaceParams
+            {
+                SourceFile = ws.PathOf("Shape.cs"),
+                TypeName = "Shape",
+                InterfaceName = "ILettered",
+                TargetFile = ws.PathOf("ILettered.cs"),
+                Preview = true,
+            },
+            TestContext.Current.CancellationToken);
+
+        Assert.True(result.Success, result.Error?.Message);
+        Assert.True(result.Preview);
+        var warning = Assert.Single(result.Warnings!);
+        Assert.Equal(
+            $"'{ws.PathOf("ILettered.cs")}' would be saved as UTF-8 with BOM instead of iso-8859-1, which cannot represent 'Λ' (U+039B).",
+            warning);
+        Assert.False(File.Exists(ws.PathOf("ILettered.cs")));
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

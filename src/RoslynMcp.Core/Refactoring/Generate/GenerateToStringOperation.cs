@@ -89,8 +89,16 @@ public sealed class GenerateToStringOperation : RefactoringOperationBase<Generat
             ? GenerateStringBuilderToString(@params.TypeName, members)
             : GenerateInterpolatedToString(@params.TypeName, members);
 
+        var newTypeDecl = typeDecl.AddMembers(GeneratedCodeFormatter.MarkInserted(toStringMethod));
+
+        var newRoot = root.ReplaceNode(typeDecl, newTypeDecl);
+        var newDocument = document.WithSyntaxRoot(newRoot);
+        var newSolution = await GeneratedCodeFormatter.FormatAsync(
+            newDocument.Project.Solution, document, cancellationToken);
+
         if (@params.Preview)
         {
+            await PreviewCommitAsync(newSolution, cancellationToken);
             var code = toStringMethod.NormalizeWhitespace().ToFullString();
             var pendingChanges = new List<PendingChange>
             {
@@ -106,12 +114,6 @@ public sealed class GenerateToStringOperation : RefactoringOperationBase<Generat
             return RefactoringResult.PreviewResult(operationId, pendingChanges);
         }
 
-        var newTypeDecl = typeDecl.AddMembers(GeneratedCodeFormatter.MarkInserted(toStringMethod));
-
-        var newRoot = root.ReplaceNode(typeDecl, newTypeDecl);
-        var newDocument = document.WithSyntaxRoot(newRoot);
-        var newSolution = await GeneratedCodeFormatter.FormatAsync(
-            newDocument.Project.Solution, document, cancellationToken);
         var commitResult = await CommitChangesAsync(newSolution, cancellationToken);
 
         return RefactoringResult.Succeeded(operationId,

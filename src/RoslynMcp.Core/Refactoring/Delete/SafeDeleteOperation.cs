@@ -109,6 +109,7 @@ public sealed class SafeDeleteOperation : RefactoringOperationBase<SafeDeletePar
 
         if (@params.Preview)
         {
+            await PreviewCommitAsync(newSolution, cancellationToken);
             return new RefactoringResult
             {
                 Success = true,

@@ -155,12 +155,6 @@ public sealed class ExtractConstantOperation : RefactoringOperationBase<ExtractC
                 semanticModel.GetNullableContext(containingType.OpenBraceToken.Span.End).AnnotationsEnabled()),
             literal);
 
-        // If preview mode, return without applying
-        if (@params.Preview)
-        {
-            return CreatePreviewResult(operationId, @params, typeInfo.Type, literalsToReplace.Count, constField);
-        }
-
         // Apply changes
         var constantRef = IdentifierNames.Name(@params.ConstantName);
 
@@ -180,6 +174,13 @@ public sealed class ExtractConstantOperation : RefactoringOperationBase<ExtractC
         var newDocument = document.WithSyntaxRoot(newRoot);
         var newSolution = await GeneratedCodeFormatter.FormatAsync(
             newDocument.Project.Solution, document, cancellationToken);
+
+        // If preview mode, return without applying
+        if (@params.Preview)
+        {
+            await PreviewCommitAsync(newSolution, cancellationToken);
+            return CreatePreviewResult(operationId, @params, typeInfo.Type, literalsToReplace.Count, constField);
+        }
 
         // Commit changes
         var commitResult = await CommitChangesAsync(newSolution, cancellationToken);

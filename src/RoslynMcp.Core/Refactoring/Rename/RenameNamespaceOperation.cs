@@ -110,6 +110,7 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
         var references = scan.Files.Sum(f => f.References);
         if (@params.Preview)
         {
+            await PreviewCommitAsync(newSolution, cancellationToken);
             return new RefactoringResult
             {
                 Success = true,

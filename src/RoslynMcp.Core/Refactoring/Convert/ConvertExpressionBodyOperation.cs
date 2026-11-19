@@ -98,8 +98,13 @@ public sealed class ConvertExpressionBodyOperation : RefactoringOperationBase<Co
             (newMember, beforeSnippet, afterSnippet) = ConvertToBlockBody(member, returnsNothing);
         }
 
+        var newRoot = root.ReplaceNode(member, newMember);
+        var newSolution = await GeneratedCodeFormatter.FormatAsync(
+            document.WithSyntaxRoot(newRoot).Project.Solution, document, cancellationToken);
+
         if (@params.Preview)
         {
+            await PreviewCommitAsync(newSolution, cancellationToken);
             var pendingChanges = new List<PendingChange>
             {
                 new()
@@ -114,9 +119,6 @@ public sealed class ConvertExpressionBodyOperation : RefactoringOperationBase<Co
             return RefactoringResult.PreviewResult(operationId, pendingChanges);
         }
 
-        var newRoot = root.ReplaceNode(member, newMember);
-        var newSolution = await GeneratedCodeFormatter.FormatAsync(
-            document.WithSyntaxRoot(newRoot).Project.Solution, document, cancellationToken);
         var commitResult = await CommitChangesAsync(newSolution, cancellationToken);
 
         return RefactoringResult.Succeeded(operationId,

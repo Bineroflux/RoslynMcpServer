@@ -177,12 +177,6 @@ public sealed class InlineVariableOperation : RefactoringOperationBase<InlineVar
                 "Cannot inline variable that is reassigned.");
         }
 
-        // If preview mode, return without applying
-        if (@params.Preview)
-        {
-            return CreatePreviewResult(operationId, @params, initializerExpression, usages.Count);
-        }
-
         // Apply changes: replace all usages with initializer, remove declaration
         var rewriter = new InlineRewriter(@params.VariableName, variableSymbol, initializerExpression, semanticModel);
         var newRoot = rewriter.Visit(root);
@@ -216,6 +210,13 @@ public sealed class InlineVariableOperation : RefactoringOperationBase<InlineVar
 
         var newDocument = document.WithSyntaxRoot(newRoot!);
         var newSolution = newDocument.Project.Solution;
+
+        // If preview mode, return without applying
+        if (@params.Preview)
+        {
+            await PreviewCommitAsync(newSolution, cancellationToken);
+            return CreatePreviewResult(operationId, @params, initializerExpression, usages.Count);
+        }
 
         // Commit changes
         var commitResult = await CommitChangesAsync(newSolution, cancellationToken);

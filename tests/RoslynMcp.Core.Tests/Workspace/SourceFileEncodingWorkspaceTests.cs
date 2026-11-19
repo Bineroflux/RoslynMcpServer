@@ -1,8 +1,10 @@
 using System.Text;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.Text;
+using RoslynMcp.Contracts.Errors;
 using RoslynMcp.Contracts.Models;
 using RoslynMcp.Core.FileSystem;
+using RoslynMcp.Core.Refactoring;
 using RoslynMcp.Core.Refactoring.Inline;
 using RoslynMcp.Core.Refactoring.Rename;
 using RoslynMcp.Core.Tests.Refactoring.Rename;
@@ -166,6 +168,68 @@ public sealed class SourceFileEncodingWorkspaceTests
         Assert.Equal(
             caller.Replace("Arrows.Right()", "\"→\"", StringComparison.Ordinal),
             Encoding.UTF8.GetString(bytes, 3, bytes.Length - 3));
+    }
+
+    [Fact]
+    public async Task InlineMethod_Preview_SaysTheCommitWouldConvertTheFile()
+    {
+        // A preview used to say nothing about it.
+        SkipUnlessFallbackIsWindows1252();
+        var ct = TestContext.Current.CancellationToken;
+        using var ws = TestWorkspace.Create(
+            ("Arrows.cs", "internal static class Arrows\n{\n    public static string Right() => \"→\";\n}\n"),
+            ("Legacy.cs", "internal sealed class Placeholder { }\n"));
+        var legacy = ws.PathOf("Legacy.cs");
+        const string caller = "// Größe der Maße\ninternal sealed class Legacy\n{\n    public string Name => Arrows.Right();\n}\n";
+        await File.WriteAllBytesAsync(legacy, Windows1252.GetBytes(caller), ct);
+        Assert.Equal(DiskSyncOutcome.Updated, await ws.Context.SyncDocumentFromDiskAsync(legacy, ct));
+
+        var result = await new InlineMethodOperation(ws.Context).ExecuteAsync(
+            new InlineMethodParams { SourceFile = ws.PathOf("Arrows.cs"), MethodName = "Right", Line = 3, Preview = true },
+            ct);
+
+        Assert.True(result.Success, result.Error?.Message);
+        Assert.True(result.Preview);
+        var warning = Assert.Single(result.Warnings!);
+        Assert.Equal($"'{legacy}' would be saved as UTF-8 with BOM instead of windows-1252, which cannot represent '→' (U+2192).", warning);
+        Assert.Equal(Windows1252.GetBytes(caller), await File.ReadAllBytesAsync(legacy, ct));
+    }
+
+    [Fact]
+    public async Task Preview_FileWithBytesInvalidForItsEncoding_SaysTheCommitWouldFail()
+    {
+        // The commit refuses to rewrite such a file; the preview succeeds and says so, so a
+        // client sees the change and what to fix first.
+        var ct = TestContext.Current.CancellationToken;
+        using var ws = TestWorkspace.Create(
+            ("Broken.cs", "internal sealed class Broken { }\n"),
+            ("User.cs", "internal sealed class User\n{\n    public Broken? Value { get; set; }\n}\n"));
+        var broken = ws.PathOf("Broken.cs");
+        byte[] brokenBytes = [0xEF, 0xBB, 0xBF, .. Windows1252.GetBytes("// Größe\ninternal sealed class Broken { }\n")];
+        await File.WriteAllBytesAsync(broken, brokenBytes, ct);
+        Assert.Equal(DiskSyncOutcome.Updated, await ws.Context.SyncDocumentFromDiskAsync(broken, ct));
+
+        var preview = await new RenameSymbolOperation(ws.Context).ExecuteAsync(
+            new RenameSymbolParams { SourceFile = broken, SymbolName = "Broken", NewName = "Fixed", Line = 2, RenameFile = false, Preview = true },
+            ct);
+
+        Assert.True(preview.Success, preview.Error?.Message);
+        var warning = Assert.Single(preview.Warnings!);
+        Assert.StartsWith("Applying this would fail with FilesystemError (4002) and write nothing: ", warning);
+        Assert.Contains($"'{broken}' is not valid UTF-8 with BOM", warning);
+
+        var commit = await Assert.ThrowsAsync<RefactoringException>(() => new RenameSymbolOperation(ws.Context).ExecuteAsync(
+            new RenameSymbolParams { SourceFile = broken, SymbolName = "Broken", NewName = "Fixed", Line = 2, RenameFile = false },
+            ct));
+        Assert.Equal(ErrorCodes.FilesystemError, commit.ErrorCode);
+        Assert.Equal(brokenBytes, await File.ReadAllBytesAsync(broken, ct));
+
+        // A preview that leaves the file alone has nothing to say.
+        var unrelated = await new RenameSymbolOperation(ws.Context).ExecuteAsync(
+            new RenameSymbolParams { SourceFile = ws.PathOf("User.cs"), SymbolName = "Value", NewName = "Item", Line = 3, Preview = true },
+            ct);
+        Assert.True(unrelated.Success, unrelated.Error?.Message);
+        Assert.Null(unrelated.Warnings);
     }
 
     [Fact]

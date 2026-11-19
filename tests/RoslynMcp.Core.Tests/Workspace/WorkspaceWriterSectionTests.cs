@@ -148,6 +148,7 @@ public sealed class WorkspaceWriterSectionTests
         var change = ctx.Solution.WithDocumentText(id, SourceText.From(WidgetWithGamma));
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => ctx.CommitChangesAsync(change, ct));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => ctx.GetCommitWarningsAsync(change, cancellationToken: ct));
         Assert.Throws<InvalidOperationException>(() => ctx.UpdateSolution(change));
         Assert.Equal(Widget, ws.ReadFile("Widget.cs"));
 

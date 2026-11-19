@@ -93,16 +93,17 @@ public sealed class SortUsingsOperation : RefactoringOperationBase<SortUsingsPar
                 0);
         }
 
-        // If preview mode, return without applying
-        if (@params.Preview)
-        {
-            return CreatePreviewResult(operationId, @params.SourceFile, root, sortedUsings);
-        }
-
         // Apply the sorted usings
         var newRoot = root.WithUsings(SyntaxFactory.List(sortedUsings));
         var newDocument = document.WithSyntaxRoot(newRoot);
         var newSolution = newDocument.Project.Solution;
+
+        // If preview mode, return without applying
+        if (@params.Preview)
+        {
+            await PreviewCommitAsync(newSolution, cancellationToken);
+            return CreatePreviewResult(operationId, @params.SourceFile, root, sortedUsings);
+        }
 
         // Commit changes
         var commitResult = await CommitChangesAsync(newSolution, cancellationToken);

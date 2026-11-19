@@ -143,12 +143,6 @@ public sealed class GenerateConstructorOperation : RefactoringOperationBase<Gene
             @params.AddNullChecks,
             semanticModel.GetNullableContext(typeDeclaration.OpenBraceToken.Span.End).AnnotationsEnabled());
 
-        // If preview mode, return without applying (but include generated constructor code)
-        if (@params.Preview)
-        {
-            return CreatePreviewResult(operationId, @params, members, constructor);
-        }
-
         // Add constructor to type
         var newTypeDeclaration = InsertConstructor(typeDeclaration, constructor);
         var newRoot = root.ReplaceNode(typeDeclaration, newTypeDeclaration);
@@ -156,6 +150,13 @@ public sealed class GenerateConstructorOperation : RefactoringOperationBase<Gene
         var newDocument = document.WithSyntaxRoot(newRoot);
         var newSolution = await GeneratedCodeFormatter.FormatAsync(
             newDocument.Project.Solution, document, cancellationToken);
+
+        // If preview mode, return without applying (but include generated constructor code)
+        if (@params.Preview)
+        {
+            await PreviewCommitAsync(newSolution, cancellationToken);
+            return CreatePreviewResult(operationId, @params, members, constructor);
+        }
 
         // Commit changes
         var commitResult = await CommitChangesAsync(newSolution, cancellationToken);

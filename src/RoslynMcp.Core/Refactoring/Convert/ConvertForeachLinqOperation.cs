@@ -70,8 +70,13 @@ public sealed class ConvertForeachLinqOperation : RefactoringOperationBase<Conve
         // → collection.Select(x => expr).ToList()
         if (TryConvertAddPattern(foreachStmt, statements, out var selectExpr, out var beforeSnippet))
         {
+            // Find the list initialization and foreach, replace both
+            var newRoot = ReplaceForeachWithLinq(root, foreachStmt, selectExpr!);
+            var newDocument = document.WithSyntaxRoot(newRoot);
+
             if (@params.Preview)
             {
+                await PreviewCommitAsync(newDocument.Project.Solution, cancellationToken);
                 var pendingChanges = new List<PendingChange>
                 {
                     new()
@@ -86,9 +91,6 @@ public sealed class ConvertForeachLinqOperation : RefactoringOperationBase<Conve
                 return RefactoringResult.PreviewResult(operationId, pendingChanges);
             }
 
-            // Find the list initialization and foreach, replace both
-            var newRoot = ReplaceForeachWithLinq(root, foreachStmt, selectExpr!);
-            var newDocument = document.WithSyntaxRoot(newRoot);
             var commitResult = await CommitChangesAsync(newDocument.Project.Solution, cancellationToken);
 
             return RefactoringResult.Succeeded(operationId,
@@ -100,8 +102,12 @@ public sealed class ConvertForeachLinqOperation : RefactoringOperationBase<Conve
         // → collection.Where(x => condition).Select(x => expr).ToList()
         if (TryConvertFilterPattern(foreachStmt, statements, out var filterExpr, out beforeSnippet))
         {
+            var newRoot = ReplaceForeachWithLinq(root, foreachStmt, filterExpr!);
+            var newDocument = document.WithSyntaxRoot(newRoot);
+
             if (@params.Preview)
             {
+                await PreviewCommitAsync(newDocument.Project.Solution, cancellationToken);
                 var pendingChanges = new List<PendingChange>
                 {
                     new()
@@ -116,8 +122,6 @@ public sealed class ConvertForeachLinqOperation : RefactoringOperationBase<Conve
                 return RefactoringResult.PreviewResult(operationId, pendingChanges);
             }
 
-            var newRoot = ReplaceForeachWithLinq(root, foreachStmt, filterExpr!);
-            var newDocument = document.WithSyntaxRoot(newRoot);
             var commitResult = await CommitChangesAsync(newDocument.Project.Solution, cancellationToken);
 
             return RefactoringResult.Succeeded(operationId,

@@ -95,8 +95,14 @@ public sealed class ConvertPropertyOperation : RefactoringOperationBase<ConvertP
 
         var (newRoot, beforeSnippet, afterSnippet) = ConvertToFullProperty(root, property);
 
+        // The generated property and field are laid out like their surroundings, with the
+        // document's indentation and line ending.
+        var newDocument = document.WithSyntaxRoot(newRoot);
+        var newSolution = await GeneratedCodeFormatter.FormatAsync(newDocument.Project.Solution, document, cancellationToken);
+
         if (@params.Preview)
         {
+            await PreviewCommitAsync(newSolution, cancellationToken);
             var pendingChanges = new List<PendingChange>
             {
                 new()
@@ -111,10 +117,6 @@ public sealed class ConvertPropertyOperation : RefactoringOperationBase<ConvertP
             return RefactoringResult.PreviewResult(operationId, pendingChanges);
         }
 
-        // The generated property and field are laid out like their surroundings, with the
-        // document's indentation and line ending.
-        var newDocument = document.WithSyntaxRoot(newRoot);
-        var newSolution = await GeneratedCodeFormatter.FormatAsync(newDocument.Project.Solution, document, cancellationToken);
         var commitResult = await CommitChangesAsync(newSolution, cancellationToken);
 
         return RefactoringResult.Succeeded(operationId,
@@ -370,6 +372,7 @@ public sealed class ConvertPropertyOperation : RefactoringOperationBase<ConvertP
 
         if (@params.Preview)
         {
+            await PreviewCommitAsync(newSolution, cancellationToken);
             return new RefactoringResult
             {
                 Success = true,

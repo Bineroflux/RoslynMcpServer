@@ -80,8 +80,19 @@ public sealed class GenerateEqualsHashCodeOperation : RefactoringOperationBase<G
         var equalsMethod = GenerateEquals(typeSymbol, members, semanticModel.Compilation, nullable);
         var hashCodeMethod = GenerateGetHashCode(members, semanticModel.Compilation);
 
+        var newTypeDecl = typeDecl.AddMembers(
+            GeneratedCodeFormatter.MarkInserted(equalsMethod),
+            GeneratedCodeFormatter.MarkInserted(hashCodeMethod));
+
+        var newRoot = root.ReplaceNode(typeDecl, newTypeDecl);
+        var newDocument = document.WithSyntaxRoot(newRoot);
+        var newSolution = await GeneratedCodeFormatter.FormatAsync(
+            newDocument.Project.Solution, document, cancellationToken);
+        newSolution = await WrapComparisonsAsync(newSolution, document, cancellationToken);
+
         if (@params.Preview)
         {
+            await PreviewCommitAsync(newSolution, cancellationToken);
             var code = equalsMethod.NormalizeWhitespace().ToFullString() + "\n\n" +
                        hashCodeMethod.NormalizeWhitespace().ToFullString();
             var pendingChanges = new List<PendingChange>
@@ -98,15 +109,6 @@ public sealed class GenerateEqualsHashCodeOperation : RefactoringOperationBase<G
             return RefactoringResult.PreviewResult(operationId, pendingChanges);
         }
 
-        var newTypeDecl = typeDecl.AddMembers(
-            GeneratedCodeFormatter.MarkInserted(equalsMethod),
-            GeneratedCodeFormatter.MarkInserted(hashCodeMethod));
-
-        var newRoot = root.ReplaceNode(typeDecl, newTypeDecl);
-        var newDocument = document.WithSyntaxRoot(newRoot);
-        var newSolution = await GeneratedCodeFormatter.FormatAsync(
-            newDocument.Project.Solution, document, cancellationToken);
-        newSolution = await WrapComparisonsAsync(newSolution, document, cancellationToken);
         var commitResult = await CommitChangesAsync(newSolution, cancellationToken);
 
         return RefactoringResult.Succeeded(operationId,

@@ -143,12 +143,6 @@ public sealed class RemoveUnusedUsingsOperation : RefactoringOperationBase<Remov
                 0);
         }
 
-        // If preview mode, return without applying (but include before/after snippets)
-        if (preview)
-        {
-            return CreatePreviewResult(operationId, sourceFile, unusedUsings, root);
-        }
-
         // Remove unused usings and re-sort the remaining ones
         var remainingUsings = root.Usings
             .Where(u => !unusedUsings.Contains(u))
@@ -160,6 +154,13 @@ public sealed class RemoveUnusedUsingsOperation : RefactoringOperationBase<Remov
         var newRoot = root.WithUsings(SyntaxFactory.List(sortedUsings));
         var newDocument = document.WithSyntaxRoot(newRoot);
         var newSolution = newDocument.Project.Solution;
+
+        // If preview mode, return without applying (but include before/after snippets)
+        if (preview)
+        {
+            await PreviewCommitAsync(newSolution, cancellationToken);
+            return CreatePreviewResult(operationId, sourceFile, unusedUsings, root);
+        }
 
         // Commit changes
         var commitResult = await CommitChangesAsync(newSolution, cancellationToken);
@@ -262,8 +263,6 @@ public sealed class RemoveUnusedUsingsOperation : RefactoringOperationBase<Remov
                 var previewResult = CreatePreviewResult(operationId, document.FilePath!, unusedUsings, root);
                 if (previewResult.PendingChanges != null)
                     allPendingChanges.AddRange(previewResult.PendingChanges);
-                totalUsingsRemoved += unusedUsings.Count;
-                continue;
             }
 
             // Remove unused usings and re-sort the remaining ones
@@ -286,6 +285,7 @@ public sealed class RemoveUnusedUsingsOperation : RefactoringOperationBase<Remov
         // If preview mode, return aggregated preview
         if (@params.Preview)
         {
+            await PreviewCommitAsync(newSolution, cancellationToken);
             return new RefactoringResult
             {
                 Success = true,

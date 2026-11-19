@@ -57,6 +57,7 @@ public sealed class MoveTypeToFileOperation : RefactoringOperationBase<MoveTypeT
         // If preview mode, return without applying
         if (@params.Preview)
         {
+            await PreviewCommitAsync(newSolution, resolution.Document.FilePath, cancellationToken);
             return CreatePreviewResult(operationId, changeInfo, resolution);
         }
 

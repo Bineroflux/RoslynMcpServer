@@ -138,6 +138,7 @@ public sealed class RenameSymbolOperation : RefactoringOperationBase<RenameSymbo
         // If preview mode, return without applying
         if (@params.Preview)
         {
+            await PreviewCommitAsync(newSolution, cancellationToken);
             return CreatePreviewResult(
                 operationId,
                 symbol,

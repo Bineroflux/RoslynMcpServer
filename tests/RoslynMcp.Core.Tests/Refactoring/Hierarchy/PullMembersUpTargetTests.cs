@@ -1,7 +1,9 @@
+using Microsoft.CodeAnalysis.CSharp;
 using RoslynMcp.Contracts.Errors;
 using RoslynMcp.Contracts.Models;
 using RoslynMcp.Core.Refactoring;
 using RoslynMcp.Core.Refactoring.Hierarchy;
+using RoslynMcp.Core.Tests.Refactoring.Signature;
 using Xunit;
 
 namespace RoslynMcp.Core.Tests.Refactoring.Hierarchy;
@@ -271,6 +273,85 @@ public sealed class PullMembersUpTargetTests
         Assert.True(result.Success, result.Error?.Message);
         Assert.Contains("public abstract class Base", ws.ReadFile("C.cs"));
         Assert.Empty(ws.GetDiskCompilationErrors());
+    }
+
+    [Fact]
+    public async Task StaticMembers_IntoAnInterface_AreDeclaredStaticAbstract_ImplementersAndTypeArgumentsReported()
+    {
+        using var ws = TestWorkspace.Create(("Shapes.cs", Lf("""
+            using System;
+            using System.Collections.Generic;
+
+            public interface IShape
+            {
+            }
+
+            public sealed class Square : IShape
+            {
+                /// <summary>The kind.</summary>
+                public static string Kind => "square";
+
+                public static Square Create(int side) => new Square();
+
+                public static event Action? Created;
+
+                public static void Raise() => Created?.Invoke();
+            }
+
+            public sealed class Circle : IShape
+            {
+            }
+
+            public static class Use
+            {
+                public static string KindOf<T>() where T : Square => Square.Kind;
+
+                public static List<IShape> All() => new();
+            }
+            """)));
+
+        var result = await PullAsync(ws, ["Kind", "Create", "Created"], file: "Shapes.cs", type: "Square", targetType: "IShape");
+
+        Assert.True(result.Success, result.Error?.Message);
+        Assert.Contains(Lf("""
+            public interface IShape
+            {
+                /// <summary>The kind.</summary>
+                static abstract string Kind { get; }
+
+                static abstract Square Create(int side);
+
+                static abstract event Action? Created;
+            }
+            """), ws.ReadFile("Shapes.cs"));
+        Assert.Contains("public static string Kind => \"square\";", ws.ReadFile("Shapes.cs"));
+        var warnings = string.Join("\n", result.Warnings!);
+        Assert.Contains("error CS0535: 'Circle' does not implement interface member 'IShape.Kind'", warnings);
+        Assert.Contains("error CS0535: 'Circle' does not implement interface member 'IShape.Create(int)'", warnings);
+        Assert.Contains("error CS8920", warnings);
+        WarningAssert.AreTheCompilerErrors(ws, result.Warnings);
+    }
+
+    [Fact]
+    public async Task StaticMembers_IntoAnInterface_BeforeCSharp11_AreRefused()
+    {
+        var source = Lf("""
+            public interface IShape
+            {
+            }
+
+            public sealed class Square : IShape
+            {
+                public static string Kind => "square";
+            }
+            """);
+        using var ws = TestWorkspace.Create([("Shapes.cs", source)], [], languageVersion: LanguageVersion.CSharp10);
+
+        var ex = await Assert.ThrowsAsync<RefactoringException>(() => PullAsync(ws, ["Kind"], file: "Shapes.cs", type: "Square", targetType: "IShape"));
+
+        Assert.Equal(ErrorCodes.MemberNotMoveable, ex.ErrorCode);
+        Assert.Contains("'Square.Kind' is static; it would be declared static abstract in 'IShape', which needs C# 11", ex.Message);
+        Assert.Equal(source, ws.ReadFile("Shapes.cs"));
     }
 
     private static string Lf(string text) => text.ReplaceLineEndings("\n") + "\n";

@@ -63,13 +63,15 @@ internal sealed class TestWorkspace : IDisposable
     /// Whether arithmetic is checked by default, like a project with <c>CheckForOverflowUnderflow</c>
     /// (also for <see cref="GetDiskCompilationErrors"/> and <see cref="EmitDiskAssembly"/>).
     /// </param>
+    /// <param name="languageVersion">The project's C# version (default: the latest).</param>
     public static TestWorkspace Create(
         IEnumerable<(string Name, string Text)> files,
         IEnumerable<MetadataReference> extraReferences,
         string? editorConfig = null,
         string? defaultNamespace = null,
         IEnumerable<(string Name, string Text)>? additionalFiles = null,
-        bool checkOverflow = false)
+        bool checkOverflow = false,
+        LanguageVersion languageVersion = LanguageVersion.Latest)
     {
         var compilationOptions = CompilationOptions.WithOverflowChecks(checkOverflow);
         var directory = Path.Combine(Path.GetTempPath(), $"RoslynMcpServer.TestWorkspace-{Guid.NewGuid():N}");
@@ -86,7 +88,7 @@ internal sealed class TestWorkspace : IDisposable
             language: LanguageNames.CSharp,
             filePath: Path.Combine(directory, "TestProject.csproj"),
             compilationOptions: compilationOptions,
-            parseOptions: ParseOptions,
+            parseOptions: ParseOptions.WithLanguageVersion(languageVersion),
             metadataReferences: references).WithDefaultNamespace(defaultNamespace));
 
         if (editorConfig != null)

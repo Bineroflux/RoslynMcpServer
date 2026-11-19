@@ -30,8 +30,9 @@ public sealed class PullMembersUpTool : IToolHandler
     /// <inheritdoc />
     public string Description =>
         "Move members of a type into its base class, or add their signatures to an interface it implements " +
-        "(targetType), into the part of a partial target in targetFile or else its first part. Declarations move with " +
-        "their doc comments and attributes; private members become protected. With makeAbstract, methods, properties, " +
+        "(targetType; static members as static abstract, C# 11+), into the part of a partial target in targetFile or " +
+        "else its first part. Declarations move with their doc comments and attributes; private members become " +
+        "protected. With makeAbstract, methods, properties, " +
         "indexers and events are declared abstract in the base class (made abstract if nothing instantiates it) and " +
         "stay in the type as overrides. Refused when a member uses members that stay behind (they are listed), when the " +
         "target already declares it, or when its types can't be written in the target's type parameters. Adds the " +

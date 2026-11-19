@@ -36,9 +36,10 @@ namespace RoslynMcp.Core.Refactoring.Hierarchy;
 /// </para>
 /// <para>
 /// Into an interface, the signature of each public instance method, property, indexer or event is
-/// added (public accessors only); the type keeps its implementation, which stays an implicit
-/// implementation. Non-public members are refused rather than made public or explicit, which
-/// would change who can call them.
+/// added (public accessors only), and of a public static method, property or event as
+/// <c>static abstract</c> (C# 11 on a runtime that supports it); the type keeps its
+/// implementation, which stays an implicit implementation. Non-public members are refused rather
+/// than made public or explicit, which would change who can call them.
 /// </para>
 /// <para>
 /// The members go into the target's part in <c>targetFile</c>, or else its first part in a file
@@ -130,7 +131,7 @@ public sealed class PullMembersUpOperation : RefactoringOperationBase<PullMember
 
         var selected = MovedMembers.Select(type, @params.Members, cancellationToken);
         var moved = selected.SelectMany(s => s.Symbols).ToList();
-        CheckMembers(selected, target, isInterface, makeAbstract);
+        CheckMembers(selected, target, isInterface, makeAbstract, targetModel.Compilation);
         CheckConflicts(moved, target, typeMap, model.Compilation);
 
         var notes = new List<string>();
@@ -224,7 +225,16 @@ public sealed class PullMembersUpOperation : RefactoringOperationBase<PullMember
 
         var (siblingNotes, related) = await RelatedTypesAsync(type, target, moved, makeAbstract, solution, cancellationToken);
         notes.AddRange(siblingNotes);
-        var affected = edits.Documents.Concat(related).Distinct().ToList();
+        var affected = edits.Documents.Concat(related).ToList();
+        if (isInterface && moved.Any(m => m.IsStatic))
+        {
+            // An interface with a static abstract member can't be a type argument any more (CS8920).
+            affected.AddRange((await SymbolFinder.FindReferencesAsync(target, solution, cancellationToken))
+                .SelectMany(r => r.Locations)
+                .Select(l => l.Document.Id));
+        }
+
+        affected = affected.Distinct().ToList();
         var warnings = notes.Concat(await IntroducedErrors.FindAsync(solution, newSolution, affected, cancellationToken) ?? []).ToList();
 
         if (@params.Preview)
@@ -362,7 +372,18 @@ public sealed class PullMembersUpOperation : RefactoringOperationBase<PullMember
         return map;
     }
 
-    private static void CheckMembers(List<SelectedDeclaration> selected, INamedTypeSymbol target, bool isInterface, bool makeAbstract)
+    /// <summary>
+    /// Refuses members the target can't declare: into an interface fields, non-public members, and
+    /// static members where the target's project can't declare static abstract members (before
+    /// C# 11, or on a runtime without static virtual members in interfaces); into a base class
+    /// overrides of the base's own members, and what <c>makeAbstract</c> can't make abstract.
+    /// </summary>
+    private static void CheckMembers(
+        List<SelectedDeclaration> selected,
+        INamedTypeSymbol target,
+        bool isInterface,
+        bool makeAbstract,
+        Compilation targetCompilation)
     {
         foreach (var declaration in selected)
         {
@@ -373,8 +394,13 @@ public sealed class PullMembersUpOperation : RefactoringOperationBase<PullMember
                 {
                     if (symbol is IFieldSymbol)
                         throw new RefactoringException(ErrorCodes.MemberNotMoveable, $"'{name}' is a field; an interface can't declare it.");
-                    if (symbol.IsStatic)
-                        throw new RefactoringException(ErrorCodes.MemberNotMoveable, $"'{name}' is static; only instance members are added to an interface.");
+                    if (symbol.IsStatic && !SupportsStaticAbstract(targetCompilation))
+                    {
+                        throw new RefactoringException(
+                            ErrorCodes.MemberNotMoveable,
+                            $"'{name}' is static; it would be declared static abstract in '{target.ToDisplayString()}', which needs C# 11 " +
+                            $"and a runtime with static virtual members in interfaces (.NET 7 or later), and '{targetCompilation.AssemblyName}' has not both.");
+                    }
                     if (symbol.DeclaredAccessibility != Accessibility.Public)
                     {
                         throw new RefactoringException(
@@ -789,9 +815,25 @@ public sealed class PullMembersUpOperation : RefactoringOperationBase<PullMember
         return Bodiless(member, symbol, modifiers, forInterface: false);
     }
 
-    /// <summary>The interface declaration of a member: its signature and public accessors.</summary>
+    /// <summary>
+    /// The interface declaration of a member: its signature and public accessors, <c>static
+    /// abstract</c> for a static member (which its type then implements implicitly).
+    /// </summary>
     private static MemberDeclarationSyntax InterfaceMember(MemberDeclarationSyntax member, ISymbol symbol) =>
-        Bodiless(member, symbol, default, forInterface: true);
+        Bodiless(
+            member,
+            symbol,
+            symbol.IsStatic
+                ? SyntaxFactory.TokenList(
+                    SyntaxFactory.Token(SyntaxKind.StaticKeyword).WithTrailingTrivia(SyntaxFactory.Space),
+                    SyntaxFactory.Token(SyntaxKind.AbstractKeyword).WithTrailingTrivia(SyntaxFactory.Space))
+                : default,
+            forInterface: true);
+
+    /// <summary>Whether a project can declare static abstract interface members: C# 11 or later, on a runtime that supports them.</summary>
+    private static bool SupportsStaticAbstract(Compilation compilation) =>
+        compilation is CSharpCompilation { LanguageVersion: >= LanguageVersion.CSharp11 } &&
+        compilation.SupportsRuntimeCapability(RuntimeCapability.VirtualStaticsInInterfaces);
 
     private static MemberDeclarationSyntax Bodiless(MemberDeclarationSyntax member, ISymbol symbol, SyntaxTokenList modifiers, bool forInterface)
     {

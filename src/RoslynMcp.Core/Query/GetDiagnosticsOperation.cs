@@ -19,6 +19,9 @@ namespace RoslynMcp.Core.Query;
 /// </summary>
 public sealed class GetDiagnosticsOperation : QueryOperationBase<GetDiagnosticsParams, GetDiagnosticsResult>
 {
+    /// <summary>The ID of the diagnostic Roslyn reports for an analyzer that threw.</summary>
+    private const string AnalyzerExceptionId = "AD0001";
+
     /// <inheritdoc />
     public GetDiagnosticsOperation(WorkspaceContext context) : base(context)
     {
@@ -75,42 +78,6 @@ public sealed class GetDiagnosticsOperation : QueryOperationBase<GetDiagnosticsP
         var normalizedSourceFile = string.IsNullOrWhiteSpace(@params.SourceFile)
             ? null
             : PathResolver.NormalizePath(@params.SourceFile);
-
-        // Surface workspace-level load issues (e.g. the Razor source generator
-        // failed to load) as synthetic info-level diagnostics. Emitted whenever
-        // the caller's filter would include informational results — i.e. for
-        // anything except an explicit Errors-only request, because the message
-        // explains why their .razor query came back empty. A projectPath keeps
-        // only the issues of its project.
-        if (severityFilter != DiagnosticSeverityFilter.Error)
-        {
-            List<string> issues;
-            lock (Context.GeneratorLoadIssues)
-            {
-                // The list grows when an analyzer fails to load later; it is locked while it does.
-                issues = Context.GeneratorLoadIssues.ToList();
-            }
-
-            foreach (var issue in issues)
-            {
-                if (projectScope is not null &&
-                    !projectScope.Projects.Any(p => WorkspaceContext.IssueConcernsProject(issue, p.Name)))
-                {
-                    continue;
-                }
-
-                diagnostics.Add(new DiagnosticInfo
-                {
-                    Id = "RMCP0001",
-                    Message = issue,
-                    Severity = DiagnosticSeverity.Info.ToString(),
-                    Category = "RoslynMcp.Workspace",
-                    File = null,
-                    Line = 0,
-                    Column = 0
-                }, project: null, span: default);
-            }
-        }
 
         // A projectPath compiles only its own project(s), which is what makes it cheaper.
         var projects = projectScope?.Projects ?? Context.Solution.Projects;
@@ -173,7 +140,11 @@ public sealed class GetDiagnosticsOperation : QueryOperationBase<GetDiagnosticsP
 
             if (compilation is null) continue;
 
-            foreach (var diag in compilation.GetDiagnostics(cancellationToken).Concat(generatorDiags))
+            var reported = @params.IncludeAnalyzers == true
+                ? await GetDiagnosticsWithAnalyzersAsync(project, compilation, contentFilter, normalizedSourceFile, diagnostics, severityFilter, cancellationToken)
+                : compilation.GetDiagnostics(cancellationToken);
+
+            foreach (var diag in reported.Concat(generatorDiags))
             {
                 if (!PassesSeverityFilter(diag.Severity, severityFilter))
                     continue;
@@ -192,8 +163,9 @@ public sealed class GetDiagnosticsOperation : QueryOperationBase<GetDiagnosticsP
                 var mappedSpan = hasLocation ? diag.Location.GetMappedLineSpan() : default;
                 var preferredSpan = mappedSpan.IsValid && mappedSpan.HasMappedPath ? mappedSpan : unmappedSpan;
 
-                // Filter by file if specified
-                if (normalizedSourceFile is not null)
+                // Filter by file if specified. A crashed analyzer's AD0001 has no location but
+                // stays: the file's analyzer diagnostics may be incomplete.
+                if (normalizedSourceFile is not null && !(diag.Id == AnalyzerExceptionId && !hasLocation))
                 {
                     if (!hasLocation)
                         continue;
@@ -231,8 +203,45 @@ public sealed class GetDiagnosticsOperation : QueryOperationBase<GetDiagnosticsP
             }
         }
 
+        // Surface workspace-level load issues (e.g. the Razor source generator
+        // failed to load) as synthetic info-level diagnostics. Emitted whenever
+        // the caller's filter would include informational results — i.e. for
+        // anything except an explicit Errors-only request, because the message
+        // explains why their .razor query came back empty. A projectPath keeps
+        // only the issues of its project. Collected after the projects ran: an
+        // analyzer that fails to load is only noticed when its analyzers are listed.
+        if (severityFilter != DiagnosticSeverityFilter.Error)
+        {
+            List<string> issues;
+            lock (Context.GeneratorLoadIssues)
+            {
+                // The list grows when an analyzer fails to load later; it is locked while it does.
+                issues = Context.GeneratorLoadIssues.ToList();
+            }
+
+            foreach (var issue in issues)
+            {
+                if (projectScope is not null &&
+                    !projectScope.Projects.Any(p => WorkspaceContext.IssueConcernsProject(issue, p.Name)))
+                {
+                    continue;
+                }
+
+                diagnostics.Add(new DiagnosticInfo
+                {
+                    Id = "RMCP0001",
+                    Message = issue,
+                    Severity = DiagnosticSeverity.Info.ToString(),
+                    Category = "RoslynMcp.Workspace",
+                    File = null,
+                    Line = 0,
+                    Column = 0
+                }, project: null, span: default);
+            }
+        }
+
         // Sort, since compilations bind method bodies concurrently and projects are
-        // independent: diagnostics without a file (RMCP0001/RMCP0002, project-level) first,
+        // independent: diagnostics without a file (RMCP0001-RMCP0003, project-level) first,
         // then by file, line, column, ID and message. Filter before truncating, so
         // totalCount counts every match.
         var matching = ResultOrder.ByLocation(
@@ -253,6 +262,69 @@ public sealed class GetDiagnosticsOperation : QueryOperationBase<GetDiagnosticsP
         };
 
         return QueryResult<GetDiagnosticsResult>.Succeeded(operationId, result);
+    }
+
+    /// <summary>
+    /// The compiler's and the analyzers' diagnostics of <paramref name="project"/>, from the
+    /// analyzers that can report an ID the filters keep. A <c>.cs</c> <paramref name="normalizedSourceFile"/>
+    /// limits the analyzers to that file (and skips them in a project without it). Analyzers
+    /// that can't be listed or run are reported as RMCP0003 (unless only errors are wanted),
+    /// with the compiler's diagnostics returned on their own.
+    /// </summary>
+    private static async Task<ImmutableArray<Diagnostic>> GetDiagnosticsWithAnalyzersAsync(
+        Project project,
+        Compilation compilation,
+        DiagnosticContentFilter contentFilter,
+        string? normalizedSourceFile,
+        DiagnosticCollector diagnostics,
+        DiagnosticSeverityFilter severityFilter,
+        CancellationToken cancellationToken)
+    {
+        SyntaxTree? tree = null;
+        if (normalizedSourceFile is not null && PathResolver.IsValidCSharpFilePath(normalizedSourceFile))
+        {
+            tree = compilation.SyntaxTrees.FirstOrDefault(t => SpanPathMatchesSourceFile(t.FilePath, normalizedSourceFile));
+            if (tree is null)
+                return compilation.GetDiagnostics(cancellationToken);
+        }
+
+        var failures = new List<string>();
+        var analyzers = ProjectAnalyzers.Select(project, contentFilter.IncludedIds, contentFilter.ExcludedIds, failures);
+        ImmutableArray<Diagnostic> reported;
+        try
+        {
+            reported = await ProjectAnalyzers.GetDiagnosticsAsync(
+                compilation, analyzers, project.AnalyzerOptions, tree, cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            failures.Add(ex.Message);
+            reported = compilation.GetDiagnostics(cancellationToken);
+        }
+
+        if (severityFilter != DiagnosticSeverityFilter.Error)
+        {
+            foreach (var failure in failures)
+            {
+                diagnostics.Add(new DiagnosticInfo
+                {
+                    Id = "RMCP0003",
+                    Message = $"Analyzers failed while processing project '{project.Name}': {failure}. " +
+                              "Their diagnostics will be missing.",
+                    Severity = DiagnosticSeverity.Info.ToString(),
+                    Category = "RoslynMcp.Workspace",
+                    File = null,
+                    Line = 0,
+                    Column = 0
+                }, project, span: default);
+            }
+        }
+
+        return reported;
     }
 
     private static DiagnosticSeverityFilter ParseSeverityFilter(string? filter)
@@ -473,6 +545,12 @@ public sealed class GetDiagnosticsOperation : QueryOperationBase<GetDiagnosticsP
         private readonly HashSet<string>? _include;
         private readonly HashSet<string> _exclude;
         private readonly string? _message;
+
+        /// <summary>The IDs to keep, or null for every ID.</summary>
+        public IReadOnlySet<string>? IncludedIds => _include;
+
+        /// <summary>The IDs to leave out.</summary>
+        public IReadOnlySet<string> ExcludedIds => _exclude;
 
         public DiagnosticContentFilter(GetDiagnosticsParams @params)
         {

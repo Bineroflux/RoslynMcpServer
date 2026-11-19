@@ -18,6 +18,7 @@ public class QueryFilterOptionsTests
     [InlineData("get-diagnostics", "--exclude-diagnostic-ids")]
     [InlineData("get-diagnostics", "--message-filter")]
     [InlineData("get-diagnostics", "--max-results")]
+    [InlineData("get-diagnostics", "--include-analyzers")]
     [InlineData("search-symbols", "--exact-match")]
     [InlineData("search-symbols", "--case-sensitive")]
     [InlineData("search-symbols", "--project-path")]
@@ -56,7 +57,8 @@ public class QueryFilterOptionsTests
             ["diagnostic-ids"] = """["CS0168","CS0219"]""",
             ["exclude-diagnostic-ids"] = """["CS0219"]""",
             ["project-path"] = ProjectPath,
-            ["max-results"] = "5"
+            ["max-results"] = "5",
+            ["include-analyzers"] = "true"
         }, ParamsSchema.For(typeof(GetDiagnosticsParams)));
 
         var @params = JsonSerializer.Deserialize<GetDiagnosticsParams>(json, JsonOptions)!;
@@ -65,6 +67,7 @@ public class QueryFilterOptionsTests
         Assert.Equal(["CS0219"], @params.ExcludeDiagnosticIds);
         Assert.Equal(ProjectPath, @params.ProjectPath);
         Assert.Equal(5, @params.MaxResults);
+        Assert.True(@params.IncludeAnalyzers);
     }
 
     private static readonly string ProjectPath = Path.Combine(Path.GetTempPath(), "src", "App", "App.csproj");

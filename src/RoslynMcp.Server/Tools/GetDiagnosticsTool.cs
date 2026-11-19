@@ -28,7 +28,7 @@ public sealed class GetDiagnosticsTool : IToolHandler
     public string Name => "get_diagnostics";
 
     /// <inheritdoc />
-    public string Description => "Get compiler diagnostics (errors, warnings) for the solution or a specific file. Useful for checking compilation status before or after refactoring. Reports compiler (CS), source-generator and Razor (RZ) diagnostics plus RMCP workspace notes; IDE/CA analyzers are not run. Sorted by file, line and column; diagnostics without a file come first.";
+    public string Description => "Get compiler diagnostics (errors, warnings) for the solution or a specific file. Useful for checking compilation status before or after refactoring. Reports compiler (CS), source-generator and Razor (RZ) diagnostics plus RMCP workspace notes; analyzer rules (CA, IDE, package analyzers) only with includeAnalyzers, which is much slower. Sorted by file, line and column; diagnostics without a file come first.";
 
     /// <inheritdoc />
     public object InputSchema => new
@@ -62,7 +62,7 @@ public sealed class GetDiagnosticsTool : IToolHandler
             {
                 type = "array",
                 items = new { type = "string" },
-                description = "Only these diagnostic IDs (e.g. CS0168), case-insensitive. IDE/CA analyzer IDs never match: analyzers are not run."
+                description = "Only these diagnostic IDs (e.g. CS0168), case-insensitive. Analyzer IDs (CA1822, IDE0005) need includeAnalyzers; then only the analyzers reporting one of these IDs run."
             },
             excludeDiagnosticIds = new
             {
@@ -80,6 +80,11 @@ public sealed class GetDiagnosticsTool : IToolHandler
                 type = "integer",
                 description = "Maximum number of diagnostics to return (default: all). totalCount still counts every match.",
                 minimum = 1
+            },
+            includeAnalyzers = new
+            {
+                type = "boolean",
+                description = "Also run each project's analyzers as the build does (default: false): the .NET CA analyzers of SDK projects, the IDE code-style analyzers only if the project sets EnforceCodeStyleInBuild, and analyzers from packages; severities from .editorconfig/global config, suppressions applied. SLOW: seconds per project even when warm. Narrow it with projectPath, a .cs sourceFile (most analyzers then run on that file only) or diagnosticIds. An analyzer that throws shows up as AD0001."
             }
         },
         additionalProperties = false
@@ -108,7 +113,8 @@ public sealed class GetDiagnosticsTool : IToolHandler
                 DiagnosticIds = args.DiagnosticIds,
                 ExcludeDiagnosticIds = args.ExcludeDiagnosticIds,
                 MessageFilter = args.MessageFilter,
-                MaxResults = args.MaxResults
+                MaxResults = args.MaxResults,
+                IncludeAnalyzers = args.IncludeAnalyzers
             };
 
             var result = await operation.ExecuteAsync(@params, cancellationToken);
@@ -142,5 +148,6 @@ public sealed class GetDiagnosticsTool : IToolHandler
         public IReadOnlyList<string>? ExcludeDiagnosticIds { get; init; }
         public string? MessageFilter { get; init; }
         public int? MaxResults { get; init; }
+        public bool? IncludeAnalyzers { get; init; }
     }
 }

@@ -271,7 +271,7 @@ public sealed class ToolRegistry
 
         // ── Query: Analysis (7) ──────────────────────────────────────
         r.RegisterQuery<GetDiagnosticsOperation, GetDiagnosticsParams, GetDiagnosticsResult>(
-            "get-diagnostics", "Get compiler diagnostics for the solution or a file");
+            "get-diagnostics", "Get compiler diagnostics (analyzers too with --include-analyzers) for the solution or a file");
         r.RegisterQuery<GetCodeMetricsOperation, GetCodeMetricsParams, GetCodeMetricsResult>(
             "get-code-metrics", "Calculate code metrics (complexity, coupling, etc.)");
         r.RegisterQuery<AnalyzeControlFlowOperation, AnalyzeControlFlowParams, AnalyzeControlFlowResult>(

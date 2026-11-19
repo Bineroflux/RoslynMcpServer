@@ -24,8 +24,8 @@ public sealed class GetDiagnosticsParams
 
     /// <summary>
     /// Diagnostic IDs to include (e.g. CS0168), case-insensitive. If null or empty, all IDs.
-    /// Only compiler, source-generator, Razor and RMCP diagnostics are reported (analyzers are
-    /// not run), so IDE/CA IDs never match.
+    /// IDE/CA and other analyzer IDs only match with <see cref="IncludeAnalyzers"/>; then only
+    /// the analyzers that can report one of these IDs run.
     /// </summary>
     public IReadOnlyList<string>? DiagnosticIds { get; init; }
 
@@ -43,4 +43,13 @@ public sealed class GetDiagnosticsParams
     /// Maximum number of diagnostics to return. If null, all of them.
     /// </summary>
     public int? MaxResults { get; init; }
+
+    /// <summary>
+    /// Also run the projects' analyzers (their analyzer references: for an SDK project the .NET
+    /// CA analyzers, the IDE code-style analyzers when the project sets
+    /// <c>EnforceCodeStyleInBuild</c>, and those of package references), with the severities and
+    /// suppressions the build applies. Much slower. Default: false (compiler, source-generator,
+    /// Razor and RMCP diagnostics only).
+    /// </summary>
+    public bool? IncludeAnalyzers { get; init; }
 }

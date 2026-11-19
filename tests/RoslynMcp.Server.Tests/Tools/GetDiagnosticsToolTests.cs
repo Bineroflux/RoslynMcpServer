@@ -78,6 +78,7 @@ public class GetDiagnosticsToolTests
     [InlineData("excludeDiagnosticIds", "array")]
     [InlineData("messageFilter", "string")]
     [InlineData("maxResults", "integer")]
+    [InlineData("includeAnalyzers", "boolean")]
     public void GetDefinition_HasFilteringParameters(string name, string type)
     {
         SchemaAssert.HasOptionalProperty(_tool, name, type);
@@ -100,12 +101,17 @@ public class GetDiagnosticsToolTests
     }
 
     [Fact]
-    public void GetDefinition_SaysAnalyzerDiagnosticsAreNotReported()
+    public void GetDefinition_SaysAnalyzersRunOnlyWhenAskedAndAreSlow()
     {
         var properties = JsonDocument.Parse(JsonSerializer.Serialize(_tool.InputSchema)).RootElement.GetProperty("properties");
+        var includeAnalyzers = properties.GetProperty("includeAnalyzers").GetProperty("description").GetString()!;
 
-        Assert.Contains("analyzers are not run", _tool.Description);
-        Assert.Contains("IDE/CA", properties.GetProperty("diagnosticIds").GetProperty("description").GetString());
+        Assert.Contains("only with includeAnalyzers", _tool.Description);
+        Assert.Contains("slower", _tool.Description);
+        Assert.Contains("SLOW", includeAnalyzers);
+        Assert.Contains("EnforceCodeStyleInBuild", includeAnalyzers);
+        Assert.Contains("default: false", includeAnalyzers);
+        Assert.Contains("includeAnalyzers", properties.GetProperty("diagnosticIds").GetProperty("description").GetString());
     }
 
     [Fact]

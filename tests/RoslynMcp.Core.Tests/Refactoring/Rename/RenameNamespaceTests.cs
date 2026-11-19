@@ -403,6 +403,76 @@ public sealed class RenameNamespaceTests
     }
 
     [Fact]
+    public async Task RazorUsingAndNamespaceDirectives_AreRewritten_AndOtherMentionsReported()
+    {
+        const string imports = "@using System.Net.Http\r\n@using Company.Old\r\n@using Company.Old.Shared\r\n@using Company.OldStuff\r\n@using static Company.Old.Util\r\n@using M = Company.Old.Model\r\n";
+        const string index = "@namespace Company.Old.Pages\n@inherits Company.Old.BasePage\n\n<h1>Company.Old</h1>\n\n@code {\n    private Company.Old.Model? model;\n}\n";
+        using var ws = TestWorkspace.Create(
+            [
+                ("Model.cs", "namespace Company.Old\n{\n    public class Model { }\n\n    public class BasePage { }\n\n    public static class Util { }\n}\n\nnamespace Company.Old.Shared\n{\n    public class Part { }\n}\n\nnamespace Company.OldStuff\n{\n    public class Thing { }\n}\n")
+            ],
+            [],
+            additionalFiles:
+            [
+                ("_Imports.razor", imports),
+                ("Pages/Index.razor", index),
+                ("Views/_ViewImports.cshtml", "@using Company.Old\n@namespace Company.Old.Views\n")
+            ]);
+        File.WriteAllText(ws.PathOf("_Imports.razor"), imports, new UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
+
+        var result = await RenameAsync(ws, "Company.Old", "Company.New");
+
+        Assert.True(result.Success, result.Error?.Message);
+        var bytes = File.ReadAllBytes(ws.PathOf("_Imports.razor"));
+        Assert.True(bytes.AsSpan().StartsWith(Encoding.UTF8.Preamble));
+        Assert.Equal(
+            "@using System.Net.Http\r\n@using Company.New\r\n@using Company.New.Shared\r\n@using Company.OldStuff\r\n@using static Company.New.Util\r\n@using M = Company.New.Model\r\n",
+            Encoding.UTF8.GetString(bytes[3..]));
+        Assert.Equal(index.Replace("@namespace Company.Old.Pages", "@namespace Company.New.Pages", StringComparison.Ordinal), ws.ReadFile("Pages/Index.razor"));
+        Assert.Equal("@using Company.New\n@namespace Company.New.Views\n", ws.ReadFile("Views/_ViewImports.cshtml"));
+        Assert.Equal(7, result.ReferencesUpdated);
+        Assert.Contains(ws.PathOf("_Imports.razor"), result.Changes!.FilesModified);
+        Assert.Contains(ws.PathOf("Views/_ViewImports.cshtml"), result.Changes.FilesModified);
+
+        // The other mentions are left, and reported by line.
+        var mentions = result.Warnings!.Where(w => w.Contains("in Razor files only @using and @namespace directives are rewritten", StringComparison.Ordinal)).ToList();
+        Assert.Equal([2, 4, 7], mentions.Select(m => int.Parse(m[(m.IndexOf("Index.razor(", StringComparison.Ordinal) + "Index.razor(".Length)..m.IndexOf("):", StringComparison.Ordinal)], System.Globalization.CultureInfo.InvariantCulture)));
+
+        // The workspace holds the new text, so the file watcher has nothing to take over.
+        foreach (var name in new[] { "_Imports.razor", "Pages/Index.razor", "Views/_ViewImports.cshtml" })
+        {
+            var document = ws.Context.Solution.Projects.SelectMany(p => p.AdditionalDocuments).Single(d => d.FilePath == ws.PathOf(name));
+            Assert.Equal(File.ReadAllText(ws.PathOf(name)), (await document.GetTextAsync(TestContext.Current.CancellationToken)).ToString());
+            Assert.True(await ws.Context.AdditionalDocumentsMatchDiskAsync(ws.PathOf(name), TestContext.Current.CancellationToken));
+        }
+
+        File.AppendAllText(ws.PathOf("Pages/Index.razor"), "<p>edited</p>\n");
+        Assert.False(await ws.Context.AdditionalDocumentsMatchDiskAsync(ws.PathOf("Pages/Index.razor"), TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task ARazorRewrite_IsPreviewed_AndANamespaceOnlyRazorDeclares_CanBeRenamed()
+    {
+        using var ws = TestWorkspace.Create(
+            [("Use.cs", "public class Use { }\n")],
+            [],
+            additionalFiles: [("Shared/_Imports.razor", "@namespace Company.Components.Shared\n")]);
+
+        var preview = await RenameAsync(ws, "Company.Components", "Company.Ui", preview: true);
+
+        var change = Assert.Single(preview.PendingChanges!);
+        Assert.Equal(ws.PathOf("Shared/_Imports.razor"), change.File);
+        Assert.Equal("@namespace Company.Components.Shared", change.BeforeSnippet);
+        Assert.Equal("@namespace Company.Ui.Shared", change.AfterSnippet);
+        Assert.Equal("@namespace Company.Components.Shared\n", ws.ReadFile("Shared/_Imports.razor"));
+
+        var result = await RenameAsync(ws, "Company.Components", "Company.Ui");
+
+        Assert.True(result.Success, result.Error?.Message);
+        Assert.Equal("@namespace Company.Ui.Shared\n", ws.ReadFile("Shared/_Imports.razor"));
+    }
+
+    [Fact]
     public async Task AMultiTargetedFile_IsRewrittenInTheIfBranchesOfEveryFramework()
     {
         const string use = """

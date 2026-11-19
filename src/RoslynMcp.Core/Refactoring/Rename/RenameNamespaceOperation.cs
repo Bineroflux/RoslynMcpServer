@@ -48,6 +48,12 @@ namespace RoslynMcp.Core.Refactoring.Rename;
 /// type, and a namespace that also holds types from referenced assemblies.
 /// </para>
 /// <para>
+/// In Razor files (<c>.razor</c>, <c>.cshtml</c>) the <c>@using</c> and <c>@namespace</c>
+/// directives naming the old namespace or one under it are rewritten as text (see
+/// <see cref="RazorNamespaceDirectives"/>); other mentions there are reported in <c>warnings</c>
+/// by line, as are the errors the Razor generator's code gets.
+/// </para>
+/// <para>
 /// Generated files (under <c>obj</c>, <c>*.g.cs</c>, an auto-generated header) are never edited.
 /// When one still refers to the old namespace, or a project file has a matching
 /// <c>&lt;Using Include&gt;</c> or <c>&lt;RootNamespace&gt;</c> (not rewritten either), the result
@@ -91,7 +97,8 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
 
         await CheckTypesAsync(rename, solution, cancellationToken);
         var scan = await ScanAsync(rename, solution, cancellationToken);
-        if (!scan.Files.Any(f => f.Declarations > 0))
+        var razor = await RazorNamespaceDirectives.PlanAsync(solution, rename.OldSegments, rename.Covers, rename.Map, cancellationToken);
+        if (!scan.Files.Any(f => f.Declarations > 0) && !razor.Files.Any(f => f.NamespaceDirectives > 0))
         {
             throw new RefactoringException(
                 ErrorCodes.SymbolNotFound,
@@ -102,10 +109,13 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
 
         var newSolution = await ApplyAsync(solution, scan, cancellationToken);
         (newSolution, var usingsRemoved, var vanished) = await RemoveRedundantUsingsAsync(rename, solution, newSolution, scan, cancellationToken);
+        newSolution = RazorNamespaceDirectives.Apply(newSolution, razor);
 
         var warnings = ProjectFileWarnings(rename, solution, out var projectsWithUsings);
         warnings.AddRange(scan.Generated.Select(path =>
             $"'{path}' is generated and was not changed; it still refers to namespace '{rename.Old}'."));
+        warnings.AddRange(razor.Mentions.Select(line =>
+            $"{line}: still names namespace '{rename.Old}'; in Razor files only @using and @namespace directives are rewritten."));
 
         var plans = new List<PlannedMove>();
         if (@params.UpdateFolders)
@@ -117,8 +127,10 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
         foreach (var projectId in scan.ProjectsWithGenerated.Concat(projectsWithUsings))
             affected.UnionWith(solution.GetProject(projectId)?.DocumentIds ?? []);
         warnings.AddRange(await IntroducedErrors.FindAsync(solution, newSolution, affected, cancellationToken) ?? []);
+        warnings.AddRange(await IntroducedErrors.FindInGeneratedAsync(
+            solution, newSolution, razor.Projects, RazorNamespaceDirectives.IsRazorFile, cancellationToken) ?? []);
 
-        var references = scan.Files.Sum(f => f.References);
+        var references = scan.Files.Sum(f => f.References) + razor.Files.Sum(f => f.Directives);
         if (@params.Preview)
         {
             await PreviewCommitAsync(newSolution, cancellationToken);
@@ -127,7 +139,7 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
                 Success = true,
                 OperationId = operationId,
                 Preview = true,
-                PendingChanges = await CreatePendingChangesAsync(rename, scan, solution, newSolution, plans, cancellationToken),
+                PendingChanges = await CreatePendingChangesAsync(rename, scan, razor, solution, newSolution, plans, cancellationToken),
                 ReferencesUpdated = references,
                 UsingDirectivesRemoved = usingsRemoved,
                 Warnings = warnings.Count == 0 ? null : warnings
@@ -1057,6 +1069,7 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
     private static async Task<List<PendingChange>> CreatePendingChangesAsync(
         NamespaceRename rename,
         Scan scan,
+        RazorNamespaceDirectives.Plan razor,
         Solution solution,
         Solution newSolution,
         List<PlannedMove> plans,
@@ -1086,6 +1099,22 @@ public sealed class RenameNamespaceOperation : RefactoringOperationBase<RenameNa
                     : "Remove using directives the rename made redundant",
                 BeforeSnippet = before.Lines[line].ToString().Trim(),
                 AfterSnippet = after.Lines[line].ToString().Trim(),
+                StartLine = line + 1,
+                EndLine = line + 1
+            });
+        }
+
+        foreach (var file in razor.Files)
+        {
+            var line = Enumerable.Range(0, file.Text.Lines.Count)
+                .First(i => file.Text.Lines[i].ToString() != file.NewText.Lines[i].ToString());
+            changes.Add(new PendingChange
+            {
+                File = file.Path,
+                ChangeType = ChangeKind.Modify,
+                Description = $"Rename namespace '{rename.Old}' to '{rename.New}': {file.Directives} @using / @namespace directive(s)",
+                BeforeSnippet = file.Text.Lines[line].ToString().Trim(),
+                AfterSnippet = file.NewText.Lines[line].ToString().Trim(),
                 StartLine = line + 1,
                 EndLine = line + 1
             });

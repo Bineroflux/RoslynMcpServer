@@ -626,9 +626,17 @@ public sealed class WorkspaceCache : IDisposable
                 // generator; we can't apply an incremental text update through the
                 // Document-centric ApplyExternalTextChangeAsync path, so any edit
                 // invalidates the entry. The next access reloads from scratch and
-                // picks up the new Razor content.
+                // picks up the new Razor content. A file this workspace wrote itself
+                // (rename_namespace rewrites @using / @namespace directives) is already in
+                // the solution as it is on disk, and needs no reload.
                 if (isRazor)
                 {
+                    if (IsRazorExt(ext) && (oldFullPath == null || !IsRazorExt(oldExt)) &&
+                        await IsAlreadyInSolutionAsync(fullPath).ConfigureAwait(false))
+                    {
+                        return;
+                    }
+
                     _cache.LogCallback?.Invoke(
                         $"Razor/CSHTML file {changeType} '{fullPath}'; invalidating '{_key}'.");
                     _cache.InvalidateEntry(_key, this);
@@ -787,6 +795,26 @@ public sealed class WorkspaceCache : IDisposable
             var sep = Path.DirectorySeparatorChar;
             return normalized.Contains($"{sep}obj{sep}", StringComparison.OrdinalIgnoreCase)
                 || normalized.Contains($"{sep}bin{sep}", StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>
+        /// Whether a Razor file's text on disk is what the solution's additional documents hold
+        /// already, as after this workspace's own commit; an atomic save's brief absence (delete,
+        /// then rename into place) is waited out.
+        /// </summary>
+        private async Task<bool> IsAlreadyInSolutionAsync(string filePath)
+        {
+            if (!File.Exists(filePath) && await StillMissingAsync(filePath).ConfigureAwait(false))
+                return false;
+
+            try
+            {
+                return await Context.AdditionalDocumentsMatchDiskAsync(filePath).ConfigureAwait(false);
+            }
+            catch (ObjectDisposedException)
+            {
+                return false;
+            }
         }
 
         /// <summary>

@@ -449,9 +449,12 @@ public sealed class WorkspaceContext : IDisposable
             if (tracked == null)
             {
                 // Created or moved here: the project decides whether it compiles the file. A file
-                // the project left out before and that was only edited stays out.
+                // the project left out before and that was only edited stays out. An additional
+                // document (a Razor file) takes the text on disk.
                 if (structural)
                     toEvaluate.Add(path);
+                else
+                    sol = await WithAdditionalDiskTextAsync(sol, path, bytes, cancellationToken).ConfigureAwait(false);
                 continue;
             }
 
@@ -1036,6 +1039,64 @@ public sealed class WorkspaceContext : IDisposable
         }
 
         return solution;
+    }
+
+    /// <summary>
+    /// <paramref name="solution"/> with the additional documents at <paramref name="filePath"/>
+    /// (Razor files, which the Razor generator reads) given the file's text on disk,
+    /// <paramref name="bytes"/>, decoded in the encoding they were read in where it has no byte
+    /// order mark; the same instance when they hold it already.
+    /// </summary>
+    private static async Task<Solution> WithAdditionalDiskTextAsync(
+        Solution solution, string filePath, byte[] bytes, CancellationToken cancellationToken)
+    {
+        foreach (var document in AdditionalDocumentsAt(solution, filePath))
+        {
+            var current = await document.GetTextAsync(cancellationToken).ConfigureAwait(false);
+            var text = SourceFileEncoding.Decode(bytes, fallbackEncoding: current.Encoding);
+            if (!current.ContentEquals(text))
+                solution = solution.WithAdditionalDocumentText(document.Id, text, PreservationMode.PreserveIdentity);
+        }
+
+        return solution;
+    }
+
+    private static List<TextDocument> AdditionalDocumentsAt(Solution solution, string filePath) =>
+        solution.Projects.SelectMany(p => p.AdditionalDocuments)
+            .Where(d => d.FilePath != null && PathResolver.PathsEqual(d.FilePath, filePath))
+            .ToList();
+
+    /// <summary>
+    /// Whether the solution has additional documents at <paramref name="filePath"/> (a Razor
+    /// file) and all of them hold the file's text on disk, as after this workspace's own commit
+    /// wrote it: the file watcher then has nothing to take over. False when the file cannot be
+    /// read. Like <see cref="SyncDocumentFromDiskAsync"/>, it waits until no operation holds a
+    /// lease, so a commit that wrote the file has put its text into the solution by then.
+    /// </summary>
+    internal async Task<bool> AdditionalDocumentsMatchDiskAsync(string filePath, CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_s.Disposed, this);
+        ThrowIfInWriterSection();
+
+        await _s.Gate.EnterFileUpdateAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            ObjectDisposedException.ThrowIf(_s.Disposed, this);
+
+            var solution = _s.Solution;
+            if (AdditionalDocumentsAt(solution, filePath).Count == 0 ||
+                await TryReadFileAsync(filePath, cancellationToken).ConfigureAwait(false) is not { } bytes)
+            {
+                return false;
+            }
+
+            var withDisk = await WithAdditionalDiskTextAsync(solution, filePath, bytes, cancellationToken).ConfigureAwait(false);
+            return ReferenceEquals(withDisk, solution);
+        }
+        finally
+        {
+            _s.Gate.ExitFileUpdate();
+        }
     }
 
     /// <summary>
@@ -1625,6 +1686,35 @@ public sealed class WorkspaceContext : IDisposable
                 plan.FilesModified.Add(filePath);
             }
 
+            // Changed additional documents (Razor files a rename rewrote): written like changed
+            // documents, in the encoding their text was decoded with.
+            foreach (var docId in projectChanges.GetChangedAdditionalDocuments())
+            {
+                var doc = newSolution.GetAdditionalDocument(docId);
+                var oldDoc = _s.Solution.GetAdditionalDocument(docId);
+                if (doc?.FilePath == null || oldDoc == null || !PathResolver.PathsEqual(oldDoc.FilePath, doc.FilePath))
+                    continue;
+
+                var filePath = doc.FilePath;
+                var text = await doc.GetTextAsync(cancellationToken);
+                var oldText = await oldDoc.GetTextAsync(cancellationToken);
+                if (oldText.ContentEquals(text))
+                    continue;
+
+                var content = text.ToString();
+                var decodedWith = oldText.Encoding ?? text.Encoding;
+                var encoding = Representable(
+                    filePath,
+                    content,
+                    _s.FileWriter.GetEncoding(filePath, decodedWith) ?? decodedWith ?? SourceFileEncoding.Utf8WithBom,
+                    plan.Warnings,
+                    preview);
+                plan.Operations.Add((filePath, content, encoding));
+                plan.Written.Add((docId, encoding));
+                plan.Files.Add((filePath, false));
+                plan.FilesModified.Add(filePath);
+            }
+
             // Removed documents.
             foreach (var docId in projectChanges.GetRemovedDocuments())
             {
@@ -1757,7 +1847,7 @@ public sealed class WorkspaceContext : IDisposable
     {
         foreach (var (id, encoding) in written)
         {
-            var document = solution.GetDocument(id);
+            var document = (TextDocument?)solution.GetDocument(id) ?? solution.GetAdditionalDocument(id);
             if (document == null)
                 continue;
 
@@ -1769,8 +1859,10 @@ public sealed class WorkspaceContext : IDisposable
                 continue;
             }
 
-            solution = solution.WithDocumentText(
-                id, SourceText.From(text.ToString(), encoding, text.ChecksumAlgorithm), PreservationMode.PreserveIdentity);
+            var labelled = SourceText.From(text.ToString(), encoding, text.ChecksumAlgorithm);
+            solution = document is Document
+                ? solution.WithDocumentText(id, labelled, PreservationMode.PreserveIdentity)
+                : solution.WithAdditionalDocumentText(id, labelled, PreservationMode.PreserveIdentity);
         }
 
         return solution;

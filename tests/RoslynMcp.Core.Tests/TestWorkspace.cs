@@ -49,11 +49,16 @@ internal sealed class TestWorkspace : IDisposable
     /// <param name="extraReferences">References besides the framework.</param>
     /// <param name="editorConfig">Content of an <c>.editorconfig</c> next to the files, if any.</param>
     /// <param name="defaultNamespace">The project's root namespace (<c>RootNamespace</c>), if any.</param>
+    /// <param name="additionalFiles">
+    /// Additional documents (e.g. Razor files, as the Razor SDK passes them to its generator),
+    /// written to disk exactly as given.
+    /// </param>
     public static TestWorkspace Create(
         IEnumerable<(string Name, string Text)> files,
         IEnumerable<MetadataReference> extraReferences,
         string? editorConfig = null,
-        string? defaultNamespace = null)
+        string? defaultNamespace = null,
+        IEnumerable<(string Name, string Text)>? additionalFiles = null)
     {
         var directory = Path.Combine(Path.GetTempPath(), $"RoslynMcpServer.TestWorkspace-{Guid.NewGuid():N}");
         System.IO.Directory.CreateDirectory(directory);
@@ -86,6 +91,18 @@ internal sealed class TestWorkspace : IDisposable
             System.IO.Directory.CreateDirectory(Path.GetDirectoryName(path)!);
             File.WriteAllText(path, text);
             solution = solution.AddDocument(
+                DocumentId.CreateNewId(projectId),
+                name,
+                SourceText.From(text),
+                filePath: path);
+        }
+
+        foreach (var (name, text) in additionalFiles ?? [])
+        {
+            var path = Path.Combine(directory, name);
+            System.IO.Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.WriteAllText(path, text);
+            solution = solution.AddAdditionalDocument(
                 DocumentId.CreateNewId(projectId),
                 name,
                 SourceText.From(text),

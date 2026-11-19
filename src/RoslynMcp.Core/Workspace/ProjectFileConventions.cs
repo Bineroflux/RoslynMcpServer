@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.Unicode;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.Text;
 using RoslynMcp.Core.FileSystem;
@@ -93,6 +94,59 @@ internal static class ProjectFileConventions
             },
             encoding => (encoding.CodePage, encoding.Preamble.Length > 0),
             cancellationToken);
+
+    /// <summary>
+    /// The encoding each project of <paramref name="solution"/> declares for its files without
+    /// byte order mark (see <see cref="InferDeclaredEncodingAsync"/>), for the projects that
+    /// declare one as far as their documents tell. Meant for a solution as MSBuild loaded it.
+    /// </summary>
+    public static async Task<IReadOnlyDictionary<ProjectId, Encoding>> InferDeclaredEncodingsAsync(
+        Solution solution, CancellationToken cancellationToken)
+    {
+        var declared = new Dictionary<ProjectId, Encoding>();
+        foreach (var project in solution.Projects)
+        {
+            if (await InferDeclaredEncodingAsync(project, cancellationToken).ConfigureAwait(false) is { } encoding)
+                declared[project.Id] = encoding;
+        }
+
+        return declared;
+    }
+
+    /// <summary>
+    /// The encoding <paramref name="project"/> declares for its files without byte order mark
+    /// (MSBuild's <c>&lt;CodePage&gt;</c>), as the texts MSBuild decoded its documents to show
+    /// it; null when it declares none, declares UTF-8, or its texts don't tell.
+    /// </summary>
+    /// <remarks>
+    /// A loaded project does not carry the declared encoding: MSBuild hands it only to the
+    /// loaders of the project's documents. But the compiler reads every file without byte
+    /// order mark in it, also one that is valid UTF-8, which it reads as UTF-8 otherwise. So a
+    /// document without byte order mark read as UTF-8 shows that the project declares none (or
+    /// UTF-8), and one read in a code page although its bytes are valid UTF-8 (any file of
+    /// plain ASCII) shows that the project declares that code page. A project whose files
+    /// without byte order mark are all invalid UTF-8 doesn't tell; they read the same either
+    /// way. Only texts as MSBuild loaded them tell this: a file a commit creates is labelled
+    /// with the encoding it was written in.
+    /// </remarks>
+    public static async Task<Encoding?> InferDeclaredEncodingAsync(Project project, CancellationToken cancellationToken)
+    {
+        foreach (var document in project.Documents)
+        {
+            var text = await document.GetTextAsync(cancellationToken).ConfigureAwait(false);
+            if (text.Encoding is not { } encoding || encoding.Preamble.Length > 0)
+                continue; // no encoding recorded, or read by its byte order mark
+
+            if (encoding.CodePage == Encoding.UTF8.CodePage)
+                return null;
+
+            // UTF-16 or UTF-32 without byte order mark: only a declared encoding reads a file so.
+            if (!SourceFileEncoding.IsCodePage(encoding) || Utf8.IsValid(encoding.GetBytes(text.ToString())))
+                return encoding;
+        }
+
+        return null;
+    }
 
     /// <summary>
     /// The line ending most of <paramref name="project"/>'s own files use, judged by their

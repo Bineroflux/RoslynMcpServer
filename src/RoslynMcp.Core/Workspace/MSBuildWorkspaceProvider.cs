@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Text;
 using Microsoft.Build.Locator;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.Diagnostics;
@@ -282,13 +283,28 @@ public sealed class MSBuildWorkspaceProvider : IWorkspaceProvider, IDisposable
         // the real cold-load cost into WorkspaceLoadMs and keeps subsequent queries cheap.
         await MaterializeCompilationsAsync(workspace, solution, timeoutCts, linkedCts.Token, cancellationToken);
 
+        // The projects' <CodePage>, which only the documents' loaders were given: read off the
+        // texts now, as MSBuild decoded them, so files read later are decoded the same way. The
+        // texts are loaded by now, so this takes no time worth cancelling.
+        IReadOnlyDictionary<ProjectId, Encoding>? declaredEncodings = null;
+        try
+        {
+            declaredEncodings = await ProjectFileConventions.InferDeclaredEncodingsAsync(solution, CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            LogErrorCallback?.Invoke(
+                "Could not tell the projects' <CodePage> from their documents; files changed later are decoded without it.", ex);
+        }
+
         return new WorkspaceContext(
             workspace, solution, loadedPath, _fileWriter,
             generatorLoadIssues: generatorIssues.Count == 0 ? null : generatorIssues,
             analyzerAssemblyLoader: analyzerLoader,
             msbuildProperties: properties,
             fileBasedProgram: fileBasedProgram,
-            loadDiagnostics: diagnostics);
+            loadDiagnostics: diagnostics,
+            declaredEncodings: declaredEncodings);
     }
 
     /// <summary>

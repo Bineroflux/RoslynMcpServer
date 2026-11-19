@@ -107,7 +107,8 @@ public sealed class WorkspaceContext : IDisposable
         IDisposable? analyzerAssemblyLoader = null,
         IReadOnlyDictionary<string, string>? msbuildProperties = null,
         FileBasedProgramInfo? fileBasedProgram = null,
-        IReadOnlyCollection<WorkspaceDiagnostic>? loadDiagnostics = null)
+        IReadOnlyCollection<WorkspaceDiagnostic>? loadDiagnostics = null,
+        IReadOnlyDictionary<ProjectId, Encoding>? declaredEncodings = null)
     {
         _s = new Session(
             workspace,
@@ -119,7 +120,8 @@ public sealed class WorkspaceContext : IDisposable
             msbuildProperties?.ToImmutableDictionary(StringComparer.OrdinalIgnoreCase)
                 ?? ImmutableDictionary<string, string>.Empty,
             fileBasedProgram,
-            loadDiagnostics ?? Array.Empty<WorkspaceDiagnostic>());
+            loadDiagnostics ?? Array.Empty<WorkspaceDiagnostic>(),
+            declaredEncodings?.ToImmutableDictionary() ?? ImmutableDictionary<ProjectId, Encoding>.Empty);
     }
 
     /// <summary>A handle on the session of a cached workspace, holding one operation lease.</summary>
@@ -144,9 +146,15 @@ public sealed class WorkspaceContext : IDisposable
         IDisposable? analyzerAssemblyLoader,
         ImmutableDictionary<string, string> msbuildProperties,
         FileBasedProgramInfo? fileBasedProgram,
-        IReadOnlyCollection<WorkspaceDiagnostic> loadDiagnostics)
+        IReadOnlyCollection<WorkspaceDiagnostic> loadDiagnostics,
+        ImmutableDictionary<ProjectId, Encoding> declaredEncodings)
     {
         public readonly Microsoft.CodeAnalysis.Workspace Workspace = workspace;
+
+        // The encoding each project declares for its files without byte order mark (MSBuild's
+        // CodePage), as captured at load (ProjectFileConventions.InferDeclaredEncodingsAsync);
+        // a project that declares none is missing. Projects don't change within a workspace.
+        public readonly ImmutableDictionary<ProjectId, Encoding> DeclaredEncodings = declaredEncodings;
         public readonly string LoadedPath = loadedPath;
         public readonly IFileWriter FileWriter = fileWriter;
         public readonly IReadOnlyList<string> GeneratorLoadIssues = generatorLoadIssues;
@@ -896,17 +904,23 @@ public sealed class WorkspaceContext : IDisposable
 
     /// <summary>
     /// The text of a file read as <paramref name="bytes"/>, decoded as the compiler would (see
-    /// <see cref="SourceFileEncoding.Decode"/>). A file that is not UTF-8 is read in the code page
-    /// the documents at its path were read in before (which may be the project's), not in
-    /// whatever the system's is.
+    /// <see cref="SourceFileEncoding.Decode"/>). A file without byte order mark is read in the
+    /// encoding its project declares (<c>CodePage</c>, see <see cref="Session.DeclaredEncodings"/>)
+    /// even when its bytes are valid UTF-8, as the compiler and MSBuild's loader read it; in a
+    /// project that declares none, a file that is not UTF-8 is read in the code page the
+    /// documents at its path were read in before, not in whatever the system's is.
     /// </summary>
-    private static async Task<SourceText> DecodeFromDiskAsync(
+    private async Task<SourceText> DecodeFromDiskAsync(
         IReadOnlyList<Document> tracked, byte[] bytes, CancellationToken cancellationToken)
     {
-        var readBefore = tracked.Count > 0
-            ? (await tracked[0].GetTextAsync(cancellationToken).ConfigureAwait(false)).Encoding
-            : null;
-        return SourceFileEncoding.Decode(bytes, fallbackEncoding: readBefore);
+        if (tracked.Count == 0)
+            return SourceFileEncoding.Decode(bytes);
+
+        var readBefore = (await tracked[0].GetTextAsync(cancellationToken).ConfigureAwait(false)).Encoding;
+        return SourceFileEncoding.Decode(
+            bytes,
+            projectEncoding: _s.DeclaredEncodings.GetValueOrDefault(tracked[0].Project.Id),
+            fallbackEncoding: readBefore);
     }
 
     /// <summary>

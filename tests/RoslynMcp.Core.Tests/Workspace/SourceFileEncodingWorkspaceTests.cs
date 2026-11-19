@@ -213,6 +213,59 @@ public sealed class SourceFileEncodingWorkspaceTests
     }
 
     [Fact]
+    public async Task MsBuildWorkspace_CodePageProject_FileChangedOutside_IsReadAndWrittenInTheCodePage()
+    {
+        if (!ModuleInitializer.MsBuildAvailable)
+        {
+            Assert.Skip($"MSBuild not available: {ModuleInitializer.MsBuildError}");
+        }
+
+        var ct = TestContext.Current.CancellationToken;
+        using var working = RenameTempSolution.Create();
+        var csproj = Path.Combine(working.ProjectDir, "TestProject.csproj");
+        await File.WriteAllTextAsync(
+            csproj,
+            (await File.ReadAllTextAsync(csproj, ct)).Replace("</Nullable>", "</Nullable>\n    <CodePage>1252</CodePage>", StringComparison.Ordinal),
+            ct);
+        var counter = Path.Combine(working.ProjectDir, "Counter.cs");
+        await File.WriteAllTextAsync(counter, "namespace TestProject;\n\ninternal static class Counter\n{\n    public static int Count => 1;\n}\n", ct);
+        using var provider = new MSBuildWorkspaceProvider();
+
+        WorkspaceContext cached;
+        using (var ctx = await provider.CreateContextAsync(working.SolutionPath, ct))
+        {
+            cached = ctx;
+            Assert.Equal(1252, (await ctx.GetDocumentByPath(counter)!.GetTextAsync(ct)).Encoding!.CodePage);
+        }
+
+        // Changed outside the server, still without byte order mark, into bytes that are valid
+        // UTF-8: C3 A4 is "ä" in UTF-8, but "Ã¤" in windows-1252, which the compiler reads. The
+        // watcher may sync it first; either way it is decoded like this. (The update waits for
+        // leases, so the context's is released above.)
+        const string Changed = "namespace TestProject;\n\n// Ã¤\ninternal static class Counter\n{\n    public static int Count => 2;\n}\n";
+        await File.WriteAllBytesAsync(counter, Windows1252.GetBytes(Changed), ct);
+        await cached.SyncDocumentFromDiskAsync(counter, ct);
+
+        RefactoringResult result;
+        using (var ctx = await provider.CreateContextAsync(working.SolutionPath, ct))
+        {
+            var text = await ctx.GetDocumentByPath(counter)!.GetTextAsync(ct);
+            Assert.Equal(Changed, text.ToString());
+            Assert.Equal(1252, text.Encoding!.CodePage);
+
+            // So the file is written in its code page, where UTF-8 bytes would read as "GrÃ¶ÃŸe".
+            result = await new RenameSymbolOperation(ctx).ExecuteAsync(
+                new RenameSymbolParams { SourceFile = counter, SymbolName = "Count", NewName = "Größe", Line = 6 },
+                ct);
+        }
+
+        Assert.True(result.Success, result.Error?.Message);
+        Assert.Equal(
+            Windows1252.GetBytes(Changed.Replace("int Count", "int Größe", StringComparison.Ordinal)),
+            await File.ReadAllBytesAsync(counter, ct));
+    }
+
+    [Fact]
     public async Task StandaloneFile_Windows1252_KeepsTheUmlauts()
     {
         SkipUnlessFallbackIsWindows1252();

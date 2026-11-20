@@ -205,6 +205,62 @@ public sealed class CrossProcessWriteLockTests
     }
 
     [Fact]
+    public async Task RenameType_WithItsFile_WritesTheNewFileAndDeletesTheOriginalUnderTheLock()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        using var ws = TestWorkspace.Create(("Widget.cs", "namespace App;\n\npublic class Widget\n{\n}\n"));
+        var original = ws.PathOf("Widget.cs");
+        var renamed = ws.PathOf("Gadget.cs");
+        var held = new List<(bool OriginalExists, bool RenamedExists)>();
+        var released = new List<(bool OriginalExists, bool RenamedExists)>();
+        var writers = new WorkspaceWriteCoordinator(new CrossProcessWriteLock(Path.Combine(ws.Directory, "writers.lock"))
+        {
+            Acquired = _ =>
+            {
+                held.Add((File.Exists(original), File.Exists(renamed)));
+                return Task.CompletedTask;
+            },
+            Releasing = () => released.Add((File.Exists(original), File.Exists(renamed))),
+        });
+        ws.Context.ShareWriters(writers, writers.Sequence);
+
+        var result = await new RenameSymbolOperation(ws.Context).ExecuteAsync(
+            new RenameSymbolParams { SourceFile = original, SymbolName = "Widget", NewName = "Gadget" }, ct);
+
+        Assert.True(result.Success, result.Error?.Message);
+        Assert.Null(result.Error);
+        Assert.Equal(new[] { (true, false) }, held);
+        Assert.Equal(new[] { (false, true) }, released);
+        Assert.Equal(renamed, result.Symbol!.NewLocation!.File);
+        Assert.Contains(original, result.Changes!.FilesDeleted);
+    }
+
+    [Fact]
+    public async Task RenameType_OriginalFileHeldOpen_IsKept_AndReported()
+    {
+        if (!OperatingSystem.IsWindows())
+            Assert.Skip("Only Windows refuses to delete a file someone holds open.");
+
+        var ct = TestContext.Current.CancellationToken;
+        const string widget = "namespace App;\n\npublic class Widget\n{\n}\n";
+        using var ws = TestWorkspace.Create(("Widget.cs", widget));
+        var original = ws.PathOf("Widget.cs");
+
+        RefactoringResult result;
+        using (new FileStream(original, FileMode.Open, FileAccess.Read, FileShare.Read))
+        {
+            result = await new RenameSymbolOperation(ws.Context).ExecuteAsync(
+                new RenameSymbolParams { SourceFile = original, SymbolName = "Widget", NewName = "Gadget" }, ct);
+        }
+
+        Assert.True(result.Success, result.Error?.Message);
+        Assert.Equal("PARTIAL_SUCCESS", result.Error!.Code);
+        Assert.StartsWith($"Original file '{original}' could not be deleted: ", result.Error.Message, StringComparison.Ordinal);
+        Assert.Equal(widget, ws.ReadFile("Widget.cs"));
+        Assert.Contains("public class Gadget", ws.ReadFile("Gadget.cs"), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void DefaultLock_IsTheUsersTempLockFile()
     {
         var writers = new WorkspaceWriteCoordinator();

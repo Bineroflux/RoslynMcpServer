@@ -158,48 +158,19 @@ public sealed class RenameSymbolOperation : RefactoringOperationBase<RenameSymbo
         // Commit changes
         var commitResult = await CommitChangesAsync(newSolution, cancellationToken);
 
-        // Complete the physical file rename. The commit has already written the renamed
-        // source under the new path, so all that is left is removing the stale original.
-        bool fileRenameSucceeded = false;
-        if (renamedFile != null && document.FilePath != null)
+        // The commit has completed the physical file rename: it wrote the renamed source under
+        // the new path (the document points there) and then deleted the original, both under
+        // the lock all RoslynMcp processes share. A case-only rename resolves to the same file,
+        // which the commit rewrote under its new spelling. All that is left is reporting an
+        // original the commit could not delete.
+        var fileRenameSucceeded = renamedFile != null;
+        if (renamedFile != null && document.FilePath != null && !caseOnlyFileRename &&
+            commitResult.OldFilesNotDeleted.TryGetValue(document.FilePath, out var notDeleted))
         {
-            if (File.Exists(renamedFile))
-            {
-                fileRenameSucceeded = true;
-
-                // A case-only rename resolves to the same file, which the commit has
-                // already rewritten under its new spelling — nothing to remove.
-                if (!caseOnlyFileRename && File.Exists(document.FilePath))
-                {
-                    try
-                    {
-                        File.Delete(document.FilePath);
-                    }
-                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-                    {
-                        fileRenameSucceeded = false;
-                        fileRenameWarning =
-                            $"Original file '{document.FilePath}' could not be deleted: {ex.Message}. " +
-                            $"The renamed source was written to '{renamedFile}'; delete the original manually.";
-                    }
-                }
-            }
-            else if (File.Exists(document.FilePath))
-            {
-                // Defensive fallback: the commit produced no write for this document, so
-                // move the original into place instead.
-                try
-                {
-                    File.Move(document.FilePath, renamedFile);
-                    fileRenameSucceeded = true;
-                }
-                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-                {
-                    fileRenameWarning =
-                        $"File rename failed: {ex.Message}. Code references were updated but file was not renamed.";
-                    renamedFile = null; // Clear to indicate file was not actually renamed
-                }
-            }
+            fileRenameSucceeded = false;
+            fileRenameWarning =
+                $"Original file '{document.FilePath}' could not be deleted: {notDeleted}. " +
+                $"The renamed source was written to '{renamedFile}'; delete the original manually.";
         }
 
         var renameMovedFile = fileRenameSucceeded && !caseOnlyFileRename;

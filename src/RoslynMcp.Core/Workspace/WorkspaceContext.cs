@@ -1661,7 +1661,7 @@ public sealed class WorkspaceContext : IDisposable
                         await _s.FileWriter.WriteAsync(operation.FilePath, operation.Content, operation.Encoding!, cancellationToken);
                 }
 
-                DeleteMovedFrom(plan, newSolution);
+                await DeleteMovedFromAsync(plan, newSolution);
             }
 
             var committed = await LabelEncodingsAsync(newSolution, plan.Written);
@@ -1675,7 +1675,8 @@ public sealed class WorkspaceContext : IDisposable
                 FilesModified = plan.FilesModified,
                 FilesCreated = plan.FilesCreated,
                 FilesDeleted = plan.FilesDeleted,
-                Warnings = plan.Warnings
+                Warnings = plan.Warnings,
+                OldFilesNotDeleted = plan.OldFilesNotDeleted
             };
         }
         catch (Exception ex) when (!writing && ex is OperationCanceledException or RefactoringException)
@@ -1763,6 +1764,9 @@ public sealed class WorkspaceContext : IDisposable
 
         /// <summary>The old files of documents moved to a new path, deleted once everything is written.</summary>
         public List<string> MovedFrom { get; } = [];
+
+        /// <summary>Of <see cref="MovedFrom"/>, the files that could not be deleted, with the reason.</summary>
+        public Dictionary<string, string> OldFilesNotDeleted { get; } = new(PathResolver.PathComparer);
 
         /// <summary>
         /// Every file the commit writes, deletes, creates or moves a document away from (by
@@ -2045,26 +2049,41 @@ public sealed class WorkspaceContext : IDisposable
     /// <summary>
     /// Deletes the old files of the documents the commit moved to a new path, now that their new
     /// files are written, unless a document of <paramref name="committed"/> still has the path.
-    /// Best effort: a file that cannot be deleted stays, and the operation that moved the
-    /// document reports it.
+    /// A file someone holds open is tried again for a moment, as a write is (see
+    /// <see cref="AtomicFileWriter"/>); one that still cannot be deleted stays, and is reported in
+    /// <see cref="CommitPlan.OldFilesNotDeleted"/>. Runs under the commit's lock, like the writes, and is
+    /// not cancelled: the new files are written already.
     /// </summary>
-    private void DeleteMovedFrom(CommitPlan plan, Solution committed)
+    private async Task DeleteMovedFromAsync(CommitPlan plan, Solution committed)
     {
         foreach (var path in plan.MovedFrom.Distinct(PathResolver.PathComparer))
         {
             if (!committed.GetDocumentIdsWithFilePath(path).IsEmpty)
                 continue;
 
-            try
+            for (var attempt = 0; ; attempt++)
             {
-                _s.FileWriter.Delete(path);
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-            {
-                // Left for the operation, which retries and reports it.
+                try
+                {
+                    _s.FileWriter.Delete(path);
+                    break;
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    if (attempt == OldFileDeleteRetryDelaysMs.Length)
+                    {
+                        plan.OldFilesNotDeleted[path] = ex.Message;
+                        break;
+                    }
+
+                    await Task.Delay(OldFileDeleteRetryDelaysMs[attempt], CancellationToken.None).ConfigureAwait(false);
+                }
             }
         }
     }
+
+    // The pauses before the second and later attempts to delete a moved document's old file.
+    private static readonly int[] OldFileDeleteRetryDelaysMs = [10, 25, 50, 100, 200];
 
     /// <summary>
     /// The encoding <paramref name="filePath"/> is kept in when rewritten, judged from its
@@ -2346,6 +2365,13 @@ public sealed class CommitResult
     /// them over so the change can be computed again.
     /// </summary>
     public IReadOnlyList<DiskConflict> Conflicts { get; init; } = [];
+
+    /// <summary>
+    /// The old files of documents the commit moved to a new path (a file renamed with its type)
+    /// that it could not delete after writing the new ones, with the reason; empty normally.
+    /// Keyed by path, compared like <c>PathResolver.PathsEqual</c>.
+    /// </summary>
+    public IReadOnlyDictionary<string, string> OldFilesNotDeleted { get; init; } = new Dictionary<string, string>();
 
     /// <summary>
     /// Error message if commit failed.

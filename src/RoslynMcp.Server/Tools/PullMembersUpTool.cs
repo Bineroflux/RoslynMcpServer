@@ -31,8 +31,10 @@ public sealed class PullMembersUpTool : IToolHandler
     public string Description =>
         "Move members of a type into its base class, or add their signatures to an interface it implements " +
         "(targetType; static members as static abstract, C# 11+), into the part of a partial target in targetFile or " +
-        "else its first part. Declarations move with their doc comments and attributes; private members become " +
-        "protected. With makeAbstract, methods, properties, " +
+        "else its first part. Operators go into an interface only, written with its self type parameter " +
+        "(IAddable<TSelf> where TSelf : IAddable<TSelf>) for the type; pairs the compiler requires (== and !=, a checked " +
+        "operator and its unchecked one) are pulled together. Declarations move with their doc comments and attributes; " +
+        "private members become protected. With makeAbstract, methods, properties, " +
         "indexers and events are declared abstract in the base class (made abstract if nothing instantiates it) and " +
         "stay in the type as overrides. Refused when a member uses members that stay behind (they are listed), when the " +
         "target already declares it, or when its types can't be written in the target's type parameters. Adds the " +
@@ -66,7 +68,7 @@ public sealed class PullMembersUpTool : IToolHandler
             {
                 type = "array",
                 items = new { type = "string" },
-                description = "Names of the members to move: fields, methods (every overload), properties, events; 'this' for indexers"
+                description = "Names of the members to move: fields, methods (every overload), properties, events; 'this' for indexers; operators as written ('operator +', 'operator checked +', 'explicit operator Money') or by metadata name ('op_Addition')"
             },
             line = new
             {

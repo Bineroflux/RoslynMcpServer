@@ -41,6 +41,14 @@ namespace RoslynMcp.Core.Refactoring.Hierarchy;
 /// than made public or explicit, which would change who can call them.
 /// </para>
 /// <para>
+/// Operators go into an interface as <c>static abstract</c> (C# 14 instance operators as
+/// abstract) declarations that take the interface's self type parameter where the type's take
+/// the type (<see cref="MovedOperators"/>), together with the operators the compiler requires
+/// with them; code whose operator now binds to the interface's is noted. A static operator can't
+/// move into a base class (it must take the class that declares it and can't be abstract or
+/// virtual); an instance operator moves there like a method.
+/// </para>
+/// <para>
 /// The members go into the target's part in <c>targetFile</c>, or else its first part in a file
 /// that isn't generated. Usings the moved code needs are added to that file: namespaces, a
 /// <c>using static</c> for static members named without their type, and the aliases it uses; a
@@ -128,13 +136,20 @@ public sealed class PullMembersUpOperation : RefactoringOperationBase<PullMember
         var sameAssembly = type.ContainingAssembly.Name == target.ContainingAssembly.Name;
         var nullable = targetModel.GetNullableContext(targetDeclaration.OpenBraceToken.Span.End).AnnotationsEnabled();
         var typeMap = TypeMap(type, view);
-
-        var selected = MovedMembers.Select(type, @params.Members, cancellationToken);
-        var moved = selected.SelectMany(s => s.Symbols).ToList();
-        CheckMembers(selected, target, isInterface, makeAbstract, targetModel.Compilation);
-        CheckConflicts(moved, target, typeMap, model.Compilation);
-
+        // An interface's operators take its self type parameter where the type's take the type.
+        var self = isInterface ? MovedOperators.SelfTypeParameter(type, view) : null;
         var notes = new List<string>();
+
+        var selected = MovedOperators.WithPartners(
+            MovedMembers.Select(type, @params.Members, cancellationToken, operators: true),
+            type,
+            op => Existing(op, target, typeMap, type, self, model.Compilation) != null,
+            notes,
+            cancellationToken);
+        var moved = selected.SelectMany(s => s.Symbols).ToList();
+        CheckMembers(selected, type, view, isInterface, makeAbstract, typeMap, self, model.Compilation, targetModel.Compilation);
+        CheckConflicts(moved, target, typeMap, type, self, model.Compilation);
+
         var newMembers = new List<MemberDeclarationSyntax>();
         var usings = new HashSet<UsingDirectives.NewUsing>();
         var edits = new SyntaxEdits();
@@ -148,6 +163,7 @@ public sealed class PullMembersUpOperation : RefactoringOperationBase<PullMember
             var abstractMember = makeAbstract && declaration.Declaration is not FieldDeclarationSyntax;
             var signatureOnly = isInterface || abstractMember;
             var movedNodes = signatureOnly ? Signature(declaration.Declaration) : MovedNodes(declaration);
+            var operatorSelf = MovedOperators.IsOperator(declaration.Symbols[0]) ? self : null;
 
             dependencies.AddRange(MovedMembers.Dependencies(movedNodes, type, moved, declaringModel, cancellationToken)
                 .Where(d => !dependencies.Contains(d, SymbolEqualityComparer.Default)));
@@ -155,9 +171,10 @@ public sealed class PullMembersUpOperation : RefactoringOperationBase<PullMember
                 CheckBaseAccess(movedNodes, target, declaringModel, cancellationToken);
             var qualified = new Dictionary<SyntaxNode, SyntaxNode>();
             usings.UnionWith(MovedCodeUsings.Needed(
-                movedNodes, type, sourceMoves: false, declaringModel, targetModel, targetDeclaration.OpenBraceToken.Span.End, nullable, qualified, cancellationToken));
+                movedNodes, type, sourceMoves: false, declaringModel, targetModel, targetDeclaration.OpenBraceToken.Span.End, nullable, qualified, cancellationToken,
+                replacedType: operatorSelf != null ? type : null));
 
-            var translated = Translate(declaration.Declaration, type, typeMap, qualified, declaringModel, nullable);
+            var translated = Translate(declaration.Declaration, type, typeMap, operatorSelf, qualified, declaringModel, nullable);
             var member = declaration.Chosen(translated);
             MemberDeclarationSyntax forTarget;
             if (isInterface)
@@ -188,7 +205,7 @@ public sealed class PullMembersUpOperation : RefactoringOperationBase<PullMember
             var inserted = forTarget
                 .WithLeadingTrivia(MovedMembers.Comments(declaration.Declaration).Insert(0, SyntaxFactory.ElasticCarriageReturnLineFeed))
                 .WithTrailingTrivia(SyntaxFactory.ElasticCarriageReturnLineFeed)
-                .WithAdditionalAnnotations(Formatter.Annotation, new SyntaxAnnotation(InsertedAnnotationKind, declaration.Symbols[0].Name));
+                .WithAdditionalAnnotations(Formatter.Annotation, new SyntaxAnnotation(InsertedAnnotationKind, DisplayName(declaration.Symbols[0], cancellationToken)));
 
             // A member moved whole keeps the layout it is written with (only re-indented); a
             // signature made for an interface or an abstract member is laid out like generated code.
@@ -240,6 +257,9 @@ public sealed class PullMembersUpOperation : RefactoringOperationBase<PullMember
         }
 
         affected = affected.Distinct().ToList();
+        if (isInterface && moved.Any(MovedOperators.IsOperator))
+            notes.AddRange(await MovedOperators.NowCalledAsync(target, moved.Where(MovedOperators.IsOperator), solution, newSolution, affected, cancellationToken));
+
         var warnings = notes.Concat(await IntroducedErrors.FindInProjectsAsync(solution, newSolution, affected, cancellationToken) ?? []).ToList();
 
         if (@params.Preview)
@@ -384,23 +404,39 @@ public sealed class PullMembersUpOperation : RefactoringOperationBase<PullMember
     }
 
     /// <summary>
-    /// Refuses members the target can't declare: into an interface fields, non-public members, and
+    /// Refuses members the target can't declare: into an interface fields, non-public members,
     /// static members where the target's project can't declare static abstract members (before
-    /// C# 11, or on a runtime without static virtual members in interfaces); into a base class
-    /// overrides of the base's own members, and what <c>makeAbstract</c> can't make abstract.
+    /// C# 11, or on a runtime without static virtual members in interfaces), and operators it
+    /// can't declare in the type's place (<see cref="MovedOperators.CheckForInterface"/>); into a
+    /// base class static operators, overrides of the base's own members, and what
+    /// <c>makeAbstract</c> can't make abstract. Instance operators (<c>+=</c>, <c>++</c>) need
+    /// C# 14 in the target's project.
     /// </summary>
     private static void CheckMembers(
         List<SelectedDeclaration> selected,
-        INamedTypeSymbol target,
+        INamedTypeSymbol type,
+        INamedTypeSymbol view,
         bool isInterface,
         bool makeAbstract,
+        Dictionary<ITypeParameterSymbol, ITypeSymbol> typeMap,
+        ITypeParameterSymbol? self,
+        Compilation compilation,
         Compilation targetCompilation)
     {
+        var target = view.OriginalDefinition;
         foreach (var declaration in selected)
         {
             foreach (var symbol in declaration.Symbols)
             {
                 var name = symbol.ToDisplayString();
+                if (symbol is IMethodSymbol { IsStatic: false } instanceOperator && MovedOperators.IsOperator(instanceOperator) &&
+                    targetCompilation is not CSharpCompilation { LanguageVersion: >= LanguageVersion.CSharp14 })
+                {
+                    throw new RefactoringException(
+                        ErrorCodes.MemberNotMoveable,
+                        $"'{name}' is an instance operator, which needs C# 14, and '{targetCompilation.AssemblyName}' uses an earlier version.");
+                }
+
                 if (isInterface)
                 {
                     if (symbol is IFieldSymbol)
@@ -419,9 +455,14 @@ public sealed class PullMembersUpOperation : RefactoringOperationBase<PullMember
                             $"'{name}' is not public, so it can't implement a member of '{target.ToDisplayString()}'. " +
                             "Make it public first (an explicit implementation would hide it from its type's own callers).");
                     }
+                    if (MovedOperators.IsOperator(symbol))
+                        MovedOperators.CheckForInterface((IMethodSymbol)symbol, type, view, self, typeMap, compilation);
 
                     continue;
                 }
+
+                if (symbol is IMethodSymbol { IsStatic: true } staticOperator && MovedOperators.IsOperator(staticOperator))
+                    throw MovedOperators.IntoClass(staticOperator, target);
 
                 if (symbol.IsOverride && Overridden(symbol) is { } overridden &&
                     SymbolEqualityComparer.Default.Equals(overridden.ContainingType.OriginalDefinition, target))
@@ -455,28 +496,46 @@ public sealed class PullMembersUpOperation : RefactoringOperationBase<PullMember
     }
 
     /// <summary>Refuses members whose name (and, for methods and indexers, signature) the target already declares.</summary>
-    private static void CheckConflicts(List<ISymbol> moved, INamedTypeSymbol target, Dictionary<ITypeParameterSymbol, ITypeSymbol> typeMap, Compilation compilation)
+    private static void CheckConflicts(
+        List<ISymbol> moved,
+        INamedTypeSymbol target,
+        Dictionary<ITypeParameterSymbol, ITypeSymbol> typeMap,
+        INamedTypeSymbol type,
+        ITypeParameterSymbol? self,
+        Compilation compilation)
     {
         foreach (var symbol in moved)
         {
-            var existing = symbol is IPropertySymbol { IsIndexer: true }
-                ? target.GetMembers().Where(m => m is IPropertySymbol { IsIndexer: true })
-                : target.GetMembers(symbol.Name).Where(m => !m.IsImplicitlyDeclared);
-
-            foreach (var member in existing)
+            if (Existing(symbol, target, typeMap, type, self, compilation) is { } member)
             {
-                var parameters = Parameters(symbol);
-                var conflicts = parameters == null || Parameters(member) is not { } other
-                    ? true
-                    : SameSignature(parameters, other, symbol, member, typeMap, compilation);
-                if (conflicts)
-                {
-                    throw new RefactoringException(
-                        ErrorCodes.MemberConflict,
-                        $"'{target.ToDisplayString()}' already declares '{member.ToDisplayString()}'.");
-                }
+                throw new RefactoringException(
+                    ErrorCodes.MemberConflict,
+                    $"'{target.ToDisplayString()}' already declares '{member.ToDisplayString()}'.");
             }
         }
+    }
+
+    /// <summary>
+    /// The member of <paramref name="target"/> that <paramref name="symbol"/> would clash with:
+    /// one of its name (any indexer for an indexer) and, for methods, operators and indexers, its
+    /// signature in the target's terms (an operator's type as the interface's
+    /// <paramref name="self"/> type parameter; a conversion's return type too). Null when none.
+    /// </summary>
+    private static ISymbol? Existing(
+        ISymbol symbol,
+        INamedTypeSymbol target,
+        Dictionary<ITypeParameterSymbol, ITypeSymbol> typeMap,
+        INamedTypeSymbol type,
+        ITypeParameterSymbol? self,
+        Compilation compilation)
+    {
+        var existing = symbol is IPropertySymbol { IsIndexer: true }
+            ? target.GetMembers().Where(m => m is IPropertySymbol { IsIndexer: true })
+            : target.GetMembers(symbol.Name).Where(m => !m.IsImplicitlyDeclared);
+
+        var parameters = Parameters(symbol);
+        return existing.FirstOrDefault(member =>
+            parameters == null || Parameters(member) is not { } other || SameSignature(parameters, other, member));
 
         static IReadOnlyList<IParameterSymbol>? Parameters(ISymbol symbol) => symbol switch
         {
@@ -485,33 +544,39 @@ public sealed class PullMembersUpOperation : RefactoringOperationBase<PullMember
             _ => null
         };
 
-        static bool SameSignature(
-            IReadOnlyList<IParameterSymbol> moved,
-            IReadOnlyList<IParameterSymbol> existing,
-            ISymbol movedSymbol,
-            ISymbol existingSymbol,
-            Dictionary<ITypeParameterSymbol, ITypeSymbol> typeMap,
-            Compilation compilation)
+        bool SameSignature(IReadOnlyList<IParameterSymbol> moved, IReadOnlyList<IParameterSymbol> existing, ISymbol existingSymbol)
         {
             if (moved.Count != existing.Count ||
-                (movedSymbol as IMethodSymbol)?.TypeParameters.Length != (existingSymbol as IMethodSymbol)?.TypeParameters.Length)
+                (symbol as IMethodSymbol)?.TypeParameters.Length != (existingSymbol as IMethodSymbol)?.TypeParameters.Length)
             {
                 return false;
             }
 
             var map = new Dictionary<ITypeParameterSymbol, ITypeSymbol>(typeMap, SymbolEqualityComparer.Default);
-            if (movedSymbol is IMethodSymbol movedMethod && existingSymbol is IMethodSymbol existingMethod)
+            if (symbol is IMethodSymbol movedMethod && existingSymbol is IMethodSymbol existingMethod)
             {
                 foreach (var (from, to) in movedMethod.TypeParameters.Zip(existingMethod.TypeParameters))
                     map[from] = to;
             }
 
-            return moved.Zip(existing).All(pair =>
-                pair.First.RefKind == pair.Second.RefKind &&
-                MemberFamily.Substitute(pair.First.Type, map, compilation) is { } translated &&
-                SymbolEqualityComparer.Default.Equals(translated, pair.Second.Type));
+            var operatorSelf = MovedOperators.IsOperator(symbol) ? self : null;
+            if (operatorSelf != null)
+                map[operatorSelf] = operatorSelf;
+
+            bool Same(ITypeSymbol from, ITypeSymbol to) =>
+                (operatorSelf == null ? from : MovedOperators.ReplaceSelf(from, type, operatorSelf, compilation)) is { } replaced &&
+                MemberFamily.Substitute(replaced, map, compilation) is { } translated &&
+                SymbolEqualityComparer.Default.Equals(translated, to);
+
+            return moved.Zip(existing).All(pair => pair.First.RefKind == pair.Second.RefKind && Same(pair.First.Type, pair.Second.Type)) &&
+                (symbol is not IMethodSymbol { MethodKind: MethodKind.Conversion } conversion ||
+                 (existingSymbol is IMethodSymbol existingConversion && Same(conversion.ReturnType, existingConversion.ReturnType)));
         }
     }
+
+    /// <summary>How the result names a member: an operator as written (<c>operator +</c>), anything else by its name.</summary>
+    private static string DisplayName(ISymbol symbol, CancellationToken cancellationToken) =>
+        MovedOperators.IsOperator(symbol) ? MovedOperators.WrittenName((IMethodSymbol)symbol, cancellationToken) : symbol.Name;
 
     private static ISymbol? Overridden(ISymbol symbol) => symbol switch
     {
@@ -531,6 +596,8 @@ public sealed class PullMembersUpOperation : RefactoringOperationBase<PullMember
     private static IEnumerable<SyntaxNode> Signature(MemberDeclarationSyntax declaration) => declaration switch
     {
         MethodDeclarationSyntax method => new SyntaxNode?[] { method.ReturnType, method.TypeParameterList, method.ParameterList }.OfType<SyntaxNode>().Concat(method.ConstraintClauses),
+        OperatorDeclarationSyntax op => [op.ReturnType, op.ParameterList],
+        ConversionOperatorDeclarationSyntax conversion => [conversion.Type, conversion.ParameterList],
         PropertyDeclarationSyntax property => [property.Type],
         IndexerDeclarationSyntax indexer => [indexer.Type, indexer.ParameterList],
         EventDeclarationSyntax @event => [@event.Type],
@@ -572,20 +639,22 @@ public sealed class PullMembersUpOperation : RefactoringOperationBase<PullMember
 
     /// <summary>
     /// The declaration with <paramref name="qualified"/>'s names replaced and the types that
-    /// mention the type's own type parameters written in the target's terms.
+    /// mention the type's own type parameters written in the target's terms; with
+    /// <paramref name="self"/>, the type itself written as that type parameter of the interface.
     /// </summary>
     private static MemberDeclarationSyntax Translate(
         MemberDeclarationSyntax declaration,
         INamedTypeSymbol type,
         Dictionary<ITypeParameterSymbol, ITypeSymbol> typeMap,
+        ITypeParameterSymbol? self,
         Dictionary<SyntaxNode, SyntaxNode> qualified,
         SemanticModel model,
         bool nullable)
     {
-        if (type.TypeParameters.Length == 0 && qualified.Count == 0)
+        if (type.TypeParameters.Length == 0 && qualified.Count == 0 && self == null)
             return declaration;
 
-        var translator = new TypeTranslator(model, type, typeMap, qualified, nullable);
+        var translator = new TypeTranslator(model, type, typeMap, self, qualified, nullable);
         var translated = (MemberDeclarationSyntax)translator.Visit(declaration)!;
         if (translator.Failure != null)
         {
@@ -668,6 +737,20 @@ public sealed class PullMembersUpOperation : RefactoringOperationBase<PullMember
         {
             case MethodDeclarationSyntax method:
                 return method
+                    .WithAttributeLists(default)
+                    .WithModifiers(modifiers)
+                    .WithBody(null)
+                    .WithExpressionBody(null)
+                    .WithSemicolonToken(semicolon);
+            case OperatorDeclarationSyntax op:
+                return op
+                    .WithAttributeLists(default)
+                    .WithModifiers(modifiers)
+                    .WithBody(null)
+                    .WithExpressionBody(null)
+                    .WithSemicolonToken(semicolon);
+            case ConversionOperatorDeclarationSyntax conversion:
+                return conversion
                     .WithAttributeLists(default)
                     .WithModifiers(modifiers)
                     .WithBody(null)
@@ -978,7 +1061,7 @@ public sealed class PullMembersUpOperation : RefactoringOperationBase<PullMember
                 var same = other.GetMembers(symbol.Name).FirstOrDefault(m => !m.IsImplicitlyDeclared && m.Kind == symbol.Kind && !m.IsOverride);
                 if (same != null)
                 {
-                    notes.Add($"'{same.ToDisplayString()}' has the name of the pulled-up '{symbol.Name}' and now hides it (CS0108); " +
+                    notes.Add($"'{same.ToDisplayString()}' has the name of the pulled-up '{DisplayName(symbol, cancellationToken)}' and now hides it (CS0108); " +
                         "make it 'new', an override, or pull it up as well.");
                 }
             }
@@ -1041,7 +1124,7 @@ public sealed class PullMembersUpOperation : RefactoringOperationBase<PullMember
                 {
                     File = line.Path,
                     ChangeType = ChangeKind.Modify,
-                    Description = $"Make '{declaration.Symbols[0].Name}' an override",
+                    Description = $"Make '{DisplayName(declaration.Symbols[0], cancellationToken)}' an override",
                     StartLine = line.StartLinePosition.Line + 1,
                     EndLine = line.StartLinePosition.Line + 1
                 });
@@ -1054,13 +1137,15 @@ public sealed class PullMembersUpOperation : RefactoringOperationBase<PullMember
 
     /// <summary>
     /// Rewrites the types in a declaration that mention its type's type parameters into the
-    /// target's terms, and replaces the names in <paramref name="qualified"/>; <see cref="Failure"/>
-    /// names a type that can't be translated.
+    /// target's terms, the type itself into <paramref name="self"/> when given, and replaces the
+    /// names in <paramref name="qualified"/>; <see cref="Failure"/> names a type that can't be
+    /// translated.
     /// </summary>
     private sealed class TypeTranslator(
         SemanticModel model,
         INamedTypeSymbol type,
         Dictionary<ITypeParameterSymbol, ITypeSymbol> map,
+        ITypeParameterSymbol? self,
         Dictionary<SyntaxNode, SyntaxNode> qualified,
         bool nullable) : CSharpSyntaxRewriter
     {
@@ -1072,9 +1157,15 @@ public sealed class PullMembersUpOperation : RefactoringOperationBase<PullMember
                 return replacement;
 
             // Names only: a nullable, array or tuple type keeps its shape around the translated names.
-            if (node is NameSyntax syntax && !syntax.IsVar && IsTypePosition(syntax) &&
-                model.GetTypeInfo(syntax).Type is { } bound && Mentions(bound))
+            if (node is NameSyntax syntax && !syntax.IsVar && IsTypePosition(syntax) && model.GetTypeInfo(syntax).Type is { } bound)
             {
+                if (self != null && SymbolEqualityComparer.Default.Equals(bound, type))
+                    return SyntaxFactory.IdentifierName(self.Name).WithTriviaFrom(node);
+
+                // List<Money>: the type arguments are translated one by one.
+                if ((self != null && MovedOperators.Mentions(bound, type)) || !Mentions(bound))
+                    return base.Visit(node);
+
                 var substituted = MemberFamily.Substitute(bound, map, model.Compilation);
                 if (substituted == null)
                 {

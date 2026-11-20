@@ -32,6 +32,10 @@ internal static class MovedCodeUsings
     /// <param name="nullable">Whether nullable annotations are enabled there, for the qualified names.</param>
     /// <param name="qualified">Receives the names to write qualified, with their replacements.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
+    /// <param name="replacedType">
+    /// A type the moved code won't name in the target (an operator's type, written as the
+    /// interface's self type parameter there): its names need nothing.
+    /// </param>
     public static List<UsingDirectives.NewUsing> Needed(
         IEnumerable<SyntaxNode> nodes,
         INamedTypeSymbol source,
@@ -41,14 +45,16 @@ internal static class MovedCodeUsings
         int position,
         bool nullable,
         Dictionary<SyntaxNode, SyntaxNode> qualified,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        INamedTypeSymbol? replacedType = null)
     {
         var needed = new List<UsingDirectives.NewUsing>();
         foreach (var name in nodes.SelectMany(n => n.DescendantNodesAndSelf()).OfType<SimpleNameSyntax>())
         {
             if (name is IdentifierNameSyntax identifier && model.GetAliasInfo(identifier, cancellationToken) is { } alias)
             {
-                AliasUsing(identifier, alias);
+                if (replacedType == null || !SymbolEqualityComparer.Default.Equals(alias.Target, replacedType))
+                    AliasUsing(identifier, alias);
                 continue;
             }
 
@@ -59,6 +65,8 @@ internal static class MovedCodeUsings
 
             switch (symbol)
             {
+                case INamedTypeSymbol named when replacedType != null && SymbolEqualityComparer.Default.Equals(named, replacedType):
+                    break;
                 case INamedTypeSymbol named when !IsQualified(name) && WrittenFor(name, named):
                     TypeUsing(name, named);
                     break;

@@ -14,12 +14,19 @@ internal static class MovedMembers
     /// <summary>
     /// The declarations of <paramref name="type"/>'s members named <paramref name="names"/>: every
     /// overload of a method, a property, an indexer (<c>this</c>), an event (field-like or with
-    /// accessors) and a field. Variables declared together (<c>int a, b;</c>) form one declaration
-    /// with only the named ones selected. Fails with <see cref="ErrorCodes.MemberNotFound"/> for
-    /// a name that matches none, and <see cref="ErrorCodes.MemberNotMoveable"/> for constructors,
-    /// operators, nested types and members declared outside the type's source.
+    /// accessors) and a field; with <paramref name="operators"/>, user-defined operators and
+    /// conversions too, by their metadata name or as written (<see cref="MovedOperators.Named"/>).
+    /// Variables declared together (<c>int a, b;</c>) form one declaration with only the named
+    /// ones selected. Fails with <see cref="ErrorCodes.MemberNotFound"/> for a name that matches
+    /// none, and <see cref="ErrorCodes.MemberNotMoveable"/> for constructors, finalizers,
+    /// operators (unless <paramref name="operators"/>), nested types and members declared
+    /// outside the type's source.
     /// </summary>
-    public static List<SelectedDeclaration> Select(INamedTypeSymbol type, IReadOnlyList<string> names, CancellationToken cancellationToken)
+    public static List<SelectedDeclaration> Select(
+        INamedTypeSymbol type,
+        IReadOnlyList<string> names,
+        CancellationToken cancellationToken,
+        bool operators = false)
     {
         var missing = new List<string>();
         var symbols = new List<ISymbol>();
@@ -27,7 +34,7 @@ internal static class MovedMembers
         {
             var members = name is "this" or "this[]"
                 ? type.GetMembers().Where(m => m is IPropertySymbol { IsIndexer: true }).ToList()
-                : type.GetMembers(name).Where(m => !m.IsImplicitlyDeclared).ToList();
+                : type.GetMembers(name).Where(m => !m.IsImplicitlyDeclared).Union(MovedOperators.Named(type, name, cancellationToken), SymbolEqualityComparer.Default).ToList();
             members = members.Where(m => m is not IMethodSymbol { ExplicitInterfaceImplementations.Length: > 0 }
                 and not IPropertySymbol { ExplicitInterfaceImplementations.Length: > 0 }
                 and not IEventSymbol { ExplicitInterfaceImplementations.Length: > 0 }).ToList();
@@ -43,7 +50,8 @@ internal static class MovedMembers
                 var reason = member switch
                 {
                     INamedTypeSymbol => "nested types are not moved",
-                    IMethodSymbol { MethodKind: not MethodKind.Ordinary } => "constructors, operators and finalizers are not moved",
+                    IMethodSymbol { MethodKind: not MethodKind.Ordinary } when !(operators && MovedOperators.IsOperator(member)) =>
+                        "constructors, operators and finalizers are not moved",
                     IMethodSymbol { PartialDefinitionPart: not null } or IMethodSymbol { PartialImplementationPart: not null } => "it is partial",
                     IPropertySymbol { PartialDefinitionPart: not null } or IPropertySymbol { PartialImplementationPart: not null } => "it is partial",
                     _ when member.DeclaringSyntaxReferences.Length == 0 => "it is not declared in source",
@@ -63,6 +71,9 @@ internal static class MovedMembers
             var available = type.GetMembers()
                 .Where(m => !m.IsImplicitlyDeclared && m is IFieldSymbol or IPropertySymbol or IEventSymbol or IMethodSymbol { MethodKind: MethodKind.Ordinary })
                 .Select(m => m is IPropertySymbol { IsIndexer: true } ? "this" : m.Name)
+                .Concat(operators
+                    ? type.GetMembers().Where(m => !m.IsImplicitlyDeclared && MovedOperators.IsOperator(m)).Select(m => MovedOperators.WrittenName((IMethodSymbol)m, cancellationToken))
+                    : [])
                 .Distinct()
                 .Order(StringComparer.Ordinal);
             throw new RefactoringException(
@@ -80,11 +91,19 @@ internal static class MovedMembers
             selected.Add(new SelectedDeclaration(group.Key, group.ToList(), variables));
         }
 
-        return selected
+        return InSourceOrder(selected);
+    }
+
+    /// <summary>The declaration of a member that is declared on its own (a method, an operator), selected whole.</summary>
+    public static SelectedDeclaration Whole(ISymbol member, CancellationToken cancellationToken) =>
+        new(Declaration(member, cancellationToken), [member], []);
+
+    /// <summary>Declarations ordered by file, then by position in it.</summary>
+    public static List<SelectedDeclaration> InSourceOrder(IEnumerable<SelectedDeclaration> declarations) =>
+        declarations
             .OrderBy(s => s.Declaration.SyntaxTree.FilePath, StringComparer.OrdinalIgnoreCase)
             .ThenBy(s => s.Declaration.SpanStart)
             .ToList();
-    }
 
     private static MemberDeclarationSyntax Declaration(ISymbol symbol, CancellationToken cancellationToken)
     {

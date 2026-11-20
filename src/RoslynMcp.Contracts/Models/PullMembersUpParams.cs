@@ -16,8 +16,9 @@ public sealed class PullMembersUpParams
     public required string TypeName { get; init; }
 
     /// <summary>
-    /// Names of the members to move: fields, methods (every overload), properties, events, and
-    /// indexers as <c>this</c>.
+    /// Names of the members to move: fields, methods (every overload), properties, events,
+    /// indexers as <c>this</c>, and operators as written (<c>operator +</c>, <c>+</c>,
+    /// <c>explicit operator Money</c>) or by metadata name (<c>op_Addition</c>).
     /// </summary>
     public required IReadOnlyList<string> Members { get; init; }
 

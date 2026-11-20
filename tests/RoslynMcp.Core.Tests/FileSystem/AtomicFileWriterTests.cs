@@ -196,6 +196,109 @@ public class AtomicFileWriterTests : IDisposable
     }
 
     [Fact]
+    public async Task WriteAsync_ReplacingAFile_NeverLeavesItMissing()
+    {
+        // Deleting the file and then moving the temp file in left a moment without it, in which
+        // another server, an editor or a file watcher found it gone.
+        var ct = TestContext.Current.CancellationToken;
+        var filePath = Path.Combine(_tempDir, "watched.cs");
+        await File.WriteAllTextAsync(filePath, "class A { }\n", ct);
+
+        using var done = new CancellationTokenSource();
+        var missing = 0;
+        var looks = 0;
+        var watcher = Task.Run(() =>
+        {
+            while (!done.IsCancellationRequested)
+            {
+                looks++;
+                if (!File.Exists(filePath))
+                    missing++;
+            }
+        }, ct);
+
+        for (var i = 0; i < 200; i++)
+            await _writer.WriteAsync(filePath, $"class A{i} {{ }}\n", ct);
+
+        await done.CancelAsync();
+        await watcher;
+        Assert.True(looks > 0);
+        Assert.Equal(0, missing);
+        Assert.Equal("class A199 { }\n", await File.ReadAllTextAsync(filePath, ct));
+        Assert.Single(Directory.GetFiles(_tempDir));
+    }
+
+    [Fact]
+    public async Task WriteAsync_FileHeldOpenByAnotherReader_IsReplacedOnceItIsReleased()
+    {
+        // On Windows a replace fails while anyone has the target open, even sharing delete (a
+        // file watcher of another server reading it); the write tries again.
+        var ct = TestContext.Current.CancellationToken;
+        var filePath = Path.Combine(_tempDir, "held.cs");
+        await File.WriteAllTextAsync(filePath, "class Old { }\n", ct);
+        var reader = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        var retries = new List<Exception>();
+        var writer = new AtomicFileWriter
+        {
+            ReplaceRetried = ex =>
+            {
+                retries.Add(ex);
+                reader.Dispose();
+            },
+        };
+
+        try
+        {
+            await writer.WriteAsync(filePath, "class New { }\n", ct);
+        }
+        finally
+        {
+            reader.Dispose();
+        }
+
+        Assert.Equal("class New { }\n", await File.ReadAllTextAsync(filePath, ct));
+        Assert.Single(Directory.GetFiles(_tempDir));
+        if (OperatingSystem.IsWindows())
+            Assert.IsType<UnauthorizedAccessException>(Assert.Single(retries));
+    }
+
+    [Fact]
+    public async Task WriteAsync_FileHeldOpenLongerThanTheRetries_ThrowsAndLeavesTheFile()
+    {
+        if (!OperatingSystem.IsWindows())
+            Assert.Skip("Only Windows refuses to replace a file someone holds open.");
+
+        var ct = TestContext.Current.CancellationToken;
+        var filePath = Path.Combine(_tempDir, "locked.cs");
+        await File.WriteAllTextAsync(filePath, "class Old { }\n", ct);
+        var retries = 0;
+        var writer = new AtomicFileWriter { ReplaceRetried = _ => retries++ };
+
+        using (new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read))
+            await Assert.ThrowsAsync<UnauthorizedAccessException>(() => writer.WriteAsync(filePath, "class New { }\n", ct));
+
+        Assert.Equal(5, retries);
+        Assert.Equal("class Old { }\n", await File.ReadAllTextAsync(filePath, ct));
+        Assert.Single(Directory.GetFiles(_tempDir)); // the temp file is gone
+    }
+
+    [Fact]
+    public async Task WriteAsync_NewSpellingOfAnExistingFile_RenamesIt()
+    {
+        if (!OperatingSystem.IsWindows())
+            Assert.Skip("A case-insensitive file system is needed.");
+
+        // A replace keeps the name on disk; a type renamed only in case must rename its file.
+        var ct = TestContext.Current.CancellationToken;
+        await File.WriteAllTextAsync(Path.Combine(_tempDir, "Widget.cs"), "class Widget { }\n", ct);
+
+        await _writer.WriteAsync(Path.Combine(_tempDir, "widget.cs"), "class widget { }\n", ct);
+
+        Assert.Equal(new[] { "widget.cs" }, Directory.GetFiles(_tempDir).Select(Path.GetFileName));
+        Assert.Equal("class widget { }\n", await File.ReadAllTextAsync(Path.Combine(_tempDir, "widget.cs"), ct));
+    }
+
+    [Fact]
     public void Delete_RemovesExistingFile()
     {
         // Arrange

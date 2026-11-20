@@ -645,8 +645,8 @@ public sealed class WorkspaceCache : IDisposable
 
                 // C# source change. Reconcile against the in-memory solution instead of
                 // blanket-invalidating. A content change to a file the workspace already
-                // tracks — which is what BOTH our own atomic commit (delete + rename +
-                // changed, per the FileSystemWatcher) AND a follow-up external edit look
+                // tracks — which is what BOTH our own commit (a temp file replacing it: deleted
+                // + renamed, per the FileSystemWatcher) AND a follow-up external edit look
                 // like — is applied incrementally with no reload. Only a genuinely new
                 // file forces a reload, so MSBuild can determine its project membership.
                 if (IsCSharpExt(ext))
@@ -696,8 +696,9 @@ public sealed class WorkspaceCache : IDisposable
                 var outcome = await Context.SyncDocumentFromDiskAsync(filePath).ConfigureAwait(false);
                 if (outcome == DiskSyncOutcome.Missing)
                 {
-                    // Not readable right now. An atomic save deletes then renames into place,
-                    // so confirm the file is really gone before treating it as a deletion.
+                    // Not readable right now. An editor's atomic save may delete the file and
+                    // then rename a temp file into place (this server's own writes replace it in
+                    // one step), so confirm it is really gone before treating it as a deletion.
                     if (await StillMissingAsync(filePath).ConfigureAwait(false))
                     {
                         if (IsTombstoned(Volatile.Read(ref _state))) return;

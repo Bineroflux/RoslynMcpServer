@@ -161,8 +161,9 @@ public sealed class WorkspaceCacheBehaviorTests
         Assert.True(File.Exists(modelsPath), $"Models.cs not found at {modelsPath}.");
 
         // First load (cache miss). Commit a marker class through the cached context, the
-        // way a refactoring does — this writes Models.cs via the atomic temp+delete+rename
-        // path, which is exactly what used to make the watcher invalidate the entry.
+        // way a refactoring does — this writes Models.cs via a temp file that replaces it, whose
+        // events (deleted, renamed, changed) are exactly what used to make the watcher
+        // invalidate the entry.
         const string markerClassName = "SelfWriteCommitMarker";
         Microsoft.CodeAnalysis.Workspace first;
         using (var ctx = await provider.CreateContextAsync(working.SolutionPath, ct))
@@ -390,6 +391,71 @@ public sealed class WorkspaceCacheBehaviorTests
         Assert.False(stillTracked, "A deleted .cs file must be removed from the in-memory solution.");
         Assert.Equal(1, missCount);          // removed incrementally — never reloaded
         Assert.Same(first, last);     // same cached workspace throughout
+    }
+
+    [Fact]
+    public async Task EditorSaveThatDeletesThenRenames_IsReflectedAsAnEdit_AndDoesNotReload()
+    {
+        if (!ModuleInitializer.MsBuildAvailable)
+        {
+            Assert.Skip($"MSBuild not available: {ModuleInitializer.MsBuildError}");
+        }
+
+        // The server's own writes replace a file in one step, but editors may still save by
+        // deleting the file and renaming a temp file into place: the watcher must wait out the
+        // moment without the file instead of treating it as a deletion.
+        using var working = TempSolutionCopy.Create();
+        var ct = TestContext.Current.CancellationToken;
+
+        var missCount = 0;
+        var cache = new WorkspaceCache(
+            idleTtl: TimeSpan.FromHours(1),
+            sweepInterval: TimeSpan.FromHours(1))
+        {
+            LogCallback = msg =>
+            {
+                if (msg.StartsWith("Cache miss", StringComparison.Ordinal))
+                    Interlocked.Increment(ref missCount);
+            }
+        };
+        using var provider = new MSBuildWorkspaceProvider(cache: cache);
+
+        var modelsPath = Path.Combine(working.ProjectDir, "Models.cs");
+        Microsoft.CodeAnalysis.Workspace first;
+        using (var ctx = await provider.CreateContextAsync(working.SolutionPath, ct))
+            first = ctx.Workspace;
+
+        const string editorMarker = "EditorSaveMarker";
+        var temp = Path.Combine(working.ProjectDir, "Models.cs~");
+        await File.WriteAllTextAsync(
+            temp,
+            await File.ReadAllTextAsync(modelsPath, ct) + $"\n\nnamespace TestProject.Models {{ public class {editorMarker} {{ }} }}\n",
+            ct);
+        File.Delete(modelsPath);
+        await Task.Delay(100, ct); // the editor's gap, shorter than the watcher's grace period
+        File.Move(temp, modelsPath);
+
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(15);
+        var visible = false;
+        var last = first;
+        while (DateTime.UtcNow < deadline)
+        {
+            using (var ctx = await provider.CreateContextAsync(working.SolutionPath, ct))
+            {
+                last = ctx.Workspace;
+                if (await TypeExistsInWorkspaceAsync(ctx, editorMarker, ct))
+                {
+                    visible = true;
+                    Assert.NotNull(ctx.GetDocumentByPath(modelsPath));
+                    break;
+                }
+            }
+            await Task.Delay(100, ct);
+        }
+
+        Assert.True(visible, "An editor's delete-then-rename save must be reflected as an edit.");
+        Assert.Equal(1, missCount);
+        Assert.Same(first, last);
     }
 
     [Fact]

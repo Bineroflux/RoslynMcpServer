@@ -21,17 +21,18 @@ public sealed record DiskConflict(string FilePath, DiskConflictKind Kind)
 
     /// <summary>
     /// The warning of a refactoring that found this conflict at its commit, took the file over
-    /// and was computed again.
+    /// and was computed again, as attempt <paramref name="attempt"/> of at most
+    /// <paramref name="maxAttempts"/>.
     /// </summary>
-    internal string RecomputedWarning => Kind switch
+    internal string RecomputedWarning(int attempt, int maxAttempts) => Kind switch
     {
         DiskConflictKind.Changed =>
-            $"'{FilePath}' changed on disk while the refactoring ran (another program wrote it); it was computed again on the new text.",
+            $"'{FilePath}' changed on disk while the refactoring ran (another program wrote it); it was computed again on the new text",
         DiskConflictKind.Deleted =>
-            $"'{FilePath}' was deleted on disk while the refactoring ran (another program deleted it); it was computed again without it.",
+            $"'{FilePath}' was deleted on disk while the refactoring ran (another program deleted it); it was computed again without it",
         _ =>
-            $"'{FilePath}' was created on disk while the refactoring ran (another program created it); it was computed again with it.",
-    };
+            $"'{FilePath}' was created on disk while the refactoring ran (another program created it); it was computed again with it",
+    } + $" (attempt {attempt} of {maxAttempts}).";
 
     /// <summary>The warning of a preview computed on a snapshot that is behind the disk for this file.</summary>
     internal string PreviewWarning =>

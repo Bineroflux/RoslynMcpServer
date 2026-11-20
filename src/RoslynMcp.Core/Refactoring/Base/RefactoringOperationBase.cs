@@ -94,47 +94,56 @@ public abstract class RefactoringOperationBase<TParams> : IRefactoringOperation<
     }
 
     /// <summary>
+    /// How often a refactoring is computed at most when its commit keeps finding files changed
+    /// on disk: the first attempt and two recomputations. Two servers refactoring one file back
+    /// to back can each write it while the other computes, more than once in a row.
+    /// </summary>
+    internal const int MaxAttempts = 3;
+
+    /// <summary>
     /// Runs <see cref="ExecuteCoreAsync"/> inside the writer section. When its commit finds a
     /// file it would write, delete or create changed on disk — another program (an IDE, another
     /// RoslynMcp server) wrote it after the workspace read it — the commit has written nothing:
-    /// the files are taken over from disk and the refactoring is computed once more from the
-    /// start on them, and the result says so in its warnings. That is safe because an operation
-    /// computes its change from <see cref="Context"/>'s solution and touches the disk only in and
-    /// after its commit. If the second commit finds files changed again, the refactoring fails
-    /// with <see cref="ErrorCodes.WorkspaceBusy"/>, nothing written.
+    /// the files are taken over from disk and the refactoring is computed again from the start
+    /// on them, up to <see cref="MaxAttempts"/> times in all, and the result's warnings name each
+    /// file and attempt. That is safe because an operation computes its change from
+    /// <see cref="Context"/>'s solution and touches the disk only in and after its commit. If the
+    /// last attempt's commit finds files changed again, the refactoring fails with
+    /// <see cref="ErrorCodes.WorkspaceBusy"/>, nothing written.
     /// </summary>
     private async Task<RefactoringResult> ExecuteOnDiskStateAsync(
         Guid operationId, TParams @params, CancellationToken cancellationToken)
     {
-        IReadOnlyList<DiskConflict> conflicts;
-        try
+        var recomputed = new List<string>();
+        for (var attempt = 1; ; attempt++)
         {
+            IReadOnlyList<DiskConflict> conflicts;
             _commitsMade = 0;
-            return await ExecuteCoreAsync(operationId, @params, cancellationToken);
-        }
-        catch (DiskConflictException changed)
-        {
-            conflicts = changed.Conflicts;
-        }
+            try
+            {
+                var result = await ExecuteCoreAsync(operationId, @params, cancellationToken);
+                _commitWarnings.InsertRange(0, recomputed);
+                return result;
+            }
+            catch (DiskConflictException changed)
+            {
+                conflicts = changed.Conflicts;
+            }
 
-        await Context.TakeOverDiskConflictsAsync(conflicts, cancellationToken);
+            if (attempt == MaxAttempts)
+            {
+                throw new RefactoringException(
+                    ErrorCodes.WorkspaceBusy,
+                    $"Files changed on disk while the refactoring ran, each of the {MaxAttempts} times it was computed " +
+                    $"(another program is writing them): {DiskConflict.Describe(conflicts)}. " +
+                    "Nothing was written; run it again once the other program is done.");
+            }
 
-        // The first attempt's warnings come again with the second.
-        _commitWarnings.Clear();
-        _commitsMade = 0;
-        try
-        {
-            var result = await ExecuteCoreAsync(operationId, @params, cancellationToken);
-            _commitWarnings.InsertRange(0, conflicts.Select(c => c.RecomputedWarning));
-            return result;
-        }
-        catch (DiskConflictException again)
-        {
-            throw new RefactoringException(
-                ErrorCodes.WorkspaceBusy,
-                "Files changed on disk while the refactoring ran, and again while it was computed a second time " +
-                $"(another program is writing them): {DiskConflict.Describe(again.Conflicts)}. " +
-                "Nothing was written; run it again once the other program is done.");
+            await Context.TakeOverDiskConflictsAsync(conflicts, cancellationToken);
+
+            // This attempt's warnings come again with the next one.
+            _commitWarnings.Clear();
+            recomputed.AddRange(conflicts.Select(c => c.RecomputedWarning(attempt + 1, MaxAttempts)));
         }
     }
 

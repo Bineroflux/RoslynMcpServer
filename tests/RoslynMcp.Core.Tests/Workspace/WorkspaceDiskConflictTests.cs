@@ -31,6 +31,9 @@ public sealed class WorkspaceDiskConflictTests
     private const string WidgetWithDelta =
         "namespace App;\n\ninternal sealed class Widget\n{\n    public int Alpha() => 1;\n\n    public int Beta() => Alpha() + 1;\n\n    public int Delta() => 4;\n}\n";
 
+    private const string WidgetWithEpsilon =
+        "namespace App;\n\ninternal sealed class Widget\n{\n    public int Alpha() => 1;\n\n    public int Beta() => Alpha() + 1;\n\n    public int Epsilon() => 5;\n}\n";
+
     [Fact]
     public async Task Rename_FileWrittenByAnotherProgramBeforeTheCommit_IsComputedAgain_AndBothEditsSurvive()
     {
@@ -53,33 +56,69 @@ public sealed class WorkspaceDiskConflictTests
         Assert.Equal(expected, ws.ReadFile("Widget.cs"));
         Assert.Equal(expected, (await ws.Context.GetDocumentByPath(path)!.GetTextAsync(ct)).ToString());
         Assert.Contains(
-            $"'{path}' changed on disk while the refactoring ran (another program wrote it); it was computed again on the new text.",
+            $"'{path}' changed on disk while the refactoring ran (another program wrote it); it was computed again on the new text (attempt 2 of 3).",
             result.Warnings ?? []);
         Assert.Empty(ws.GetDiskCompilationErrors());
     }
 
     [Fact]
-    public async Task Rename_FileWrittenAgainWhileComputedTheSecondTime_FailsWithWorkspaceBusy_AndWritesNothing()
+    public async Task Rename_FileWrittenAgainWhileComputedTheSecondTime_IsComputedAThirdTime_AndAllEditsSurvive()
+    {
+        // Two servers refactoring one file back to back can each write it while the other
+        // computes, more than once in a row.
+        var ct = TestContext.Current.CancellationToken;
+        var withGammaAndDelta = WidgetWithGamma.Replace(
+            "    public int Gamma() => 3;\n", "    public int Gamma() => 3;\n\n    public int Delta() => 4;\n", StringComparison.Ordinal);
+        using var ws = TestWorkspace.Create(("Widget.cs", Widget));
+        var path = ws.PathOf("Widget.cs");
+        string[] writes = [WidgetWithGamma, withGammaAndDelta];
+        var commits = 0;
+        ws.Context.BeforeCommitReadsDisk = async c =>
+        {
+            if (commits < writes.Length)
+                await File.WriteAllTextAsync(path, writes[commits], c);
+            commits++;
+        };
+
+        var result = await new RenameSymbolOperation(ws.Context).ExecuteAsync(
+            new RenameSymbolParams { SourceFile = path, SymbolName = "Beta", NewName = "Bravo" }, ct);
+
+        Assert.True(result.Success, result.Error?.Message);
+        Assert.Equal(3, commits);
+        Assert.Equal(withGammaAndDelta.Replace("Beta", "Bravo", StringComparison.Ordinal), ws.ReadFile("Widget.cs"));
+        Assert.Equal(
+            new[]
+            {
+                $"'{path}' changed on disk while the refactoring ran (another program wrote it); it was computed again on the new text (attempt 2 of 3).",
+                $"'{path}' changed on disk while the refactoring ran (another program wrote it); it was computed again on the new text (attempt 3 of 3).",
+            },
+            result.Warnings ?? []);
+        Assert.Empty(ws.GetDiskCompilationErrors());
+    }
+
+    [Fact]
+    public async Task Rename_FileWrittenAgainEachTimeItIsComputed_FailsWithWorkspaceBusy_AndWritesNothing()
     {
         var ct = TestContext.Current.CancellationToken;
         using var ws = TestWorkspace.Create(("Widget.cs", Widget));
         var path = ws.PathOf("Widget.cs");
+        string[] writes = [WidgetWithGamma, WidgetWithDelta, WidgetWithEpsilon];
         var commits = 0;
-        ws.Context.BeforeCommitReadsDisk = async c =>
-            await File.WriteAllTextAsync(path, ++commits == 1 ? WidgetWithGamma : WidgetWithDelta, c);
+        ws.Context.BeforeCommitReadsDisk = async c => await File.WriteAllTextAsync(path, writes[commits++], c);
 
         var failed = await Assert.ThrowsAsync<RefactoringException>(() => new RenameSymbolOperation(ws.Context).ExecuteAsync(
             new RenameSymbolParams { SourceFile = path, SymbolName = "Beta", NewName = "Bravo" }, ct));
 
         Assert.Equal(ErrorCodes.WorkspaceBusy, failed.ErrorCode);
+        Assert.Contains("each of the 3 times it was computed", failed.Message, StringComparison.Ordinal);
         Assert.Contains($"'{path}' changed on disk", failed.Message, StringComparison.Ordinal);
         Assert.Contains("Nothing was written", failed.Message, StringComparison.Ordinal);
-        Assert.Equal(2, commits);
+        Assert.Equal(3, commits);
 
         // The other program's last write stands; the solution holds no trace of the rename (it
-        // took over the first write, which it computed the second attempt on).
-        Assert.Equal(WidgetWithDelta, ws.ReadFile("Widget.cs"));
-        Assert.Equal(WidgetWithGamma, (await ws.Context.GetDocumentByPath(path)!.GetTextAsync(ct)).ToString());
+        // took over the writes it computed the second and third attempts on).
+        Assert.Equal(WidgetWithEpsilon, ws.ReadFile("Widget.cs"));
+        Assert.Equal(WidgetWithDelta, (await ws.Context.GetDocumentByPath(path)!.GetTextAsync(ct)).ToString());
     }
 
     [Fact]
@@ -263,7 +302,7 @@ public sealed class WorkspaceDiskConflictTests
         Assert.Contains("public class Address", onDisk, StringComparison.Ordinal);
         Assert.DoesNotContain("class Address\n", File.ReadAllText(models), StringComparison.Ordinal);
         Assert.Contains(
-            $"'{target}' was created on disk while the refactoring ran (another program created it); it was computed again with it.",
+            $"'{target}' was created on disk while the refactoring ran (another program created it); it was computed again with it (attempt 2 of 3).",
             result.Warnings ?? []);
         Assert.Equal(onDisk, (await ctx.GetDocumentByPath(target)!.GetTextAsync(ct)).ToString());
     }
@@ -297,7 +336,7 @@ public sealed class WorkspaceDiskConflictTests
         Assert.Null(ctx.GetDocumentByPath(orderService));
         Assert.Contains("public class Member", File.ReadAllText(models), StringComparison.Ordinal);
         Assert.Contains(
-            $"'{orderService}' was deleted on disk while the refactoring ran (another program deleted it); it was computed again without it.",
+            $"'{orderService}' was deleted on disk while the refactoring ran (another program deleted it); it was computed again without it (attempt 2 of 3).",
             result.Warnings ?? []);
     }
 

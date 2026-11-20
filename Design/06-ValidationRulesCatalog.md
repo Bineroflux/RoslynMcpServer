@@ -131,7 +131,7 @@
 | EV-W01 | Workspace must be in Ready state for refactoring | 2005 |
 | EV-W02 | No concurrent operation in progress | 4001 |
 | EV-W03 | Solution must be loaded | 2005 |
-| EV-W04 | Files a commit writes, deletes or creates are on disk what the refactoring read (else they are read again and the refactoring is computed once more) | 4001 |
+| EV-W04 | Files a commit writes, deletes or creates are on disk what the refactoring read (else they are read again and the refactoring is computed again, up to three attempts in all) | 4001 |
 
 ---
 

@@ -368,6 +368,112 @@ public sealed class PullMembersUpTargetTests
         Assert.Equal(source, ws.ReadFile("Shapes.cs"));
     }
 
+    [Fact]
+    public async Task MembersIntoASelfTypedInterface_NameTheSelfTypeParameter_AndTheTypeStillImplementsThem()
+    {
+        using var ws = TestWorkspace.Create(
+            ("IAddable.cs", Lf("""
+                namespace Core;
+
+                public interface IAddable<TSelf> where TSelf : IAddable<TSelf>
+                {
+                }
+                """)),
+            ("Money.cs", Lf("""
+                using System;
+                using System.Collections.Generic;
+                using Core;
+
+                namespace App;
+
+                public class Money : IAddable<Money>
+                {
+                    public static Money Zero => new();
+
+                    public static Money Create(List<Money> parts) => new();
+
+                    public Money Add(Money other) => this;
+
+                    public Money Next => this;
+
+                    public Money this[Money key] => key;
+
+                    public event EventHandler<Money>? Changed;
+
+                    public string Describe(Money? other = null) => other == null ? "" : "x";
+
+                    public void Merge<T>(T item) where T : Money => Changed?.Invoke(this, item);
+                }
+
+                public sealed class Points : IAddable<Points>
+                {
+                }
+                """)));
+
+        var result = await PullAsync(
+            ws, ["Zero", "Create", "Add", "Next", "this", "Changed", "Describe", "Merge"], file: "Money.cs", type: "Money", targetType: "IAddable");
+
+        Assert.True(result.Success, result.Error?.Message);
+        Assert.Equal(Lf("""
+            using System;
+            using System.Collections.Generic;
+
+            namespace Core;
+
+            public interface IAddable<TSelf> where TSelf : IAddable<TSelf>
+            {
+                static abstract TSelf Zero { get; }
+
+                static abstract TSelf Create(List<TSelf> parts);
+
+                TSelf Add(TSelf other);
+
+                TSelf Next { get; }
+
+                TSelf this[TSelf key] { get; }
+
+                event EventHandler<TSelf>? Changed;
+
+                string Describe(TSelf? other = default);
+
+                void Merge<T>(T item) where T : TSelf;
+            }
+            """), ws.ReadFile("IAddable.cs"));
+        Assert.Contains("    public Money Add(Money other) => this;\n", ws.ReadFile("Money.cs"));
+        // Money implements every member; only Points, which has none of them, lacks them.
+        var errors = result.Warnings!.Where(w => w.Contains(": error ", StringComparison.Ordinal)).ToList();
+        Assert.Equal(8, errors.Count);
+        Assert.All(errors, e => Assert.Contains("error CS0535: 'Points' does not implement interface member 'IAddable<Points>.", e));
+        Assert.Contains(errors, e => e.EndsWith("'IAddable<Points>.Add(Points)'", StringComparison.Ordinal));
+        Assert.Contains(errors, e => e.EndsWith("'IAddable<Points>.Zero'", StringComparison.Ordinal));
+        WarningAssert.AreTheCompilerErrors(ws, result.Warnings);
+    }
+
+    [Fact]
+    public async Task AStructsNullableSelf_InAMembersSignature_IsRefusedForASelfTypedInterface()
+    {
+        var source = Lf("""
+            public interface IFindable<TSelf> where TSelf : IFindable<TSelf>
+            {
+            }
+
+            public struct Money : IFindable<Money>
+            {
+                public static Money? Find(int id) => null;
+            }
+            """);
+        using var ws = TestWorkspace.Create(("Money.cs", source));
+
+        var ex = await Assert.ThrowsAsync<RefactoringException>(() => PullAsync(ws, ["Find"], file: "Money.cs", type: "Money", targetType: "IFindable"));
+
+        Assert.Equal(ErrorCodes.MemberNotMoveable, ex.ErrorCode);
+        Assert.Equal(
+            "'Money.Find(int)' uses 'Money?', which 'IFindable<TSelf>' would have to write 'TSelf?'; for a type parameter that is not " +
+            "Nullable<TSelf>, so 'Money' would not implement the member.",
+            ex.Message);
+        Assert.Equal(source, ws.ReadFile("Money.cs"));
+    }
+
     private static string Lf(string text) => text.ReplaceLineEndings("\n") + "\n";
 
     private static Task<RefactoringResult> PullAsync(

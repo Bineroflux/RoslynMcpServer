@@ -1,4 +1,3 @@
-using System.Collections.Immutable;
 using System.Text.RegularExpressions;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
@@ -13,8 +12,8 @@ namespace RoslynMcp.Core.Refactoring.Hierarchy;
 
 /// <summary>
 /// User-defined operators and conversions moved out of a type: how they are named, the operators
-/// the compiler wants declared together, and what an interface needs to declare them in the
-/// type's place (a self type parameter: <c>interface IAddable&lt;TSelf&gt; where TSelf : IAddable&lt;TSelf&gt;</c>).
+/// the compiler wants declared together, and whether an interface can declare them in the type's
+/// place (with its self type parameter, <see cref="SelfType"/>: <c>interface IAddable&lt;TSelf&gt; where TSelf : IAddable&lt;TSelf&gt;</c>).
 /// </summary>
 internal static partial class MovedOperators
 {
@@ -112,60 +111,10 @@ internal static partial class MovedOperators
     }
 
     /// <summary>
-    /// The type parameter of the interface <paramref name="view"/> that <paramref name="type"/>
-    /// passes itself as (<c>IAddable&lt;TSelf&gt;</c> implemented as <c>IAddable&lt;Money&gt;</c>) and
-    /// that is constrained to the interface itself (<c>where TSelf : IAddable&lt;TSelf&gt;</c>): what
-    /// the interface's operators take in the type's place. Null when there is none.
-    /// </summary>
-    public static ITypeParameterSymbol? SelfTypeParameter(INamedTypeSymbol type, INamedTypeSymbol view) =>
-        PassedAs(type, view).FirstOrDefault(p => p.ConstraintTypes.Any(c => SymbolEqualityComparer.Default.Equals(c, p.ContainingType)));
-
-    /// <summary>
-    /// <paramref name="symbol"/> with <paramref name="type"/> replaced by <paramref name="self"/>,
-    /// also as a type argument or array element; null where it is <c>Nullable&lt;type&gt;</c>,
-    /// which a type parameter can't stand for. Other types are returned as they are.
-    /// </summary>
-    public static ITypeSymbol? ReplaceSelf(ITypeSymbol symbol, INamedTypeSymbol type, ITypeParameterSymbol self, Compilation compilation)
-    {
-        if (SymbolEqualityComparer.Default.Equals(symbol, type))
-            return self.WithNullableAnnotation(symbol.NullableAnnotation);
-
-        switch (symbol)
-        {
-            case INamedTypeSymbol { OriginalDefinition.SpecialType: SpecialType.System_Nullable_T } nullable
-                when SymbolEqualityComparer.Default.Equals(nullable.TypeArguments[0], type):
-                return null;
-            case IArrayTypeSymbol array:
-                return ReplaceSelf(array.ElementType, type, self, compilation) is { } element
-                    ? compilation.CreateArrayTypeSymbol(element, array.Rank, element.NullableAnnotation).WithNullableAnnotation(array.NullableAnnotation)
-                    : null;
-            case INamedTypeSymbol { IsGenericType: true } generic when generic.TypeArguments.Any(a => Mentions(a, type)):
-                var arguments = generic.TypeArguments.Select(a => ReplaceSelf(a, type, self, compilation)).ToList();
-                return arguments.Any(a => a == null)
-                    ? null
-                    : generic.ConstructedFrom.Construct(arguments.ToImmutableArray()!, arguments.Select(a => a!.NullableAnnotation).ToImmutableArray())
-                        .WithNullableAnnotation(generic.NullableAnnotation);
-            default:
-                return symbol;
-        }
-    }
-
-    /// <summary>Whether a type is <paramref name="type"/> or names it in its type arguments or element type.</summary>
-    public static bool Mentions(ITypeSymbol symbol, INamedTypeSymbol type) => symbol switch
-    {
-        _ when SymbolEqualityComparer.Default.Equals(symbol, type) => true,
-        IArrayTypeSymbol array => Mentions(array.ElementType, type),
-        IPointerTypeSymbol pointer => Mentions(pointer.PointedAtType, type),
-        INamedTypeSymbol named => named.TypeArguments.Any(a => Mentions(a, type)) || (named.ContainingType != null && Mentions(named.ContainingType, type)),
-        _ => false
-    };
-
-    /// <summary>
-    /// Refuses an operator of <paramref name="type"/> that the interface <paramref name="view"/>
-    /// can't declare: one that uses <c>Nullable&lt;type&gt;</c> where the interface would write its
-    /// self type parameter <c>TSelf?</c> (which is not <c>Nullable&lt;TSelf&gt;</c>); and a static
-    /// one none of whose operands (for a conversion: source or target; for a shift: the first)
-    /// is, once translated, the interface or its self type parameter.
+    /// Refuses a static operator of <paramref name="type"/> that the interface <paramref name="view"/>
+    /// can't declare: one none of whose operands (for a conversion: source or target; for a
+    /// shift: the first) is, once translated, the interface or its <paramref name="self"/> type
+    /// parameter (<see cref="SelfType"/>).
     /// </summary>
     public static void CheckForInterface(
         IMethodSymbol op,
@@ -177,13 +126,6 @@ internal static partial class MovedOperators
     {
         var target = view.OriginalDefinition;
         var name = op.ToDisplayString();
-        if (self != null && op.Parameters.Select(p => p.Type).Prepend(op.ReturnType).FirstOrDefault(t => ReplaceSelf(t, type, self, compilation) == null) is { } nullable)
-        {
-            throw new RefactoringException(
-                ErrorCodes.MemberNotMoveable,
-                $"'{name}' uses '{nullable.ToDisplayString()}', which '{target.ToDisplayString()}' would have to write '{self.Name}?'; for a type parameter " +
-                $"that is not Nullable<{self.Name}>, so '{type.Name}' would not implement the operator.");
-        }
 
         // An instance operator (C# 14 +=, ++) operates on the interface itself.
         if (!op.IsStatic)
@@ -198,7 +140,7 @@ internal static partial class MovedOperators
             return;
 
         var position = conversion ? "its source or target type" : shift ? "its first operand" : "an operand";
-        var passedAs = PassedAs(type, view).FirstOrDefault();
+        var passedAs = SelfType.PassedAs(type, view).FirstOrDefault();
         var why = passedAs != null
             ? $"'{type.Name}' implements it as '{view.ToDisplayString()}', but '{passedAs.Name}' is not constrained to the interface " +
               $"(where {passedAs.Name} : {target.ToDisplayString()}), so the operator can't take it in place of '{type.Name}'."
@@ -315,12 +257,6 @@ internal static partial class MovedOperators
 
         return position - delta;
     }
-
-    /// <summary>The interface's type parameters <paramref name="type"/> passes itself as.</summary>
-    private static IEnumerable<ITypeParameterSymbol> PassedAs(INamedTypeSymbol type, INamedTypeSymbol view) =>
-        view.OriginalDefinition.TypeParameters.Zip(view.TypeArguments)
-            .Where(pair => SymbolEqualityComparer.Default.Equals(pair.Second, type))
-            .Select(pair => pair.First);
 
     private enum PartnerKind
     {

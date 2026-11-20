@@ -312,7 +312,7 @@ public sealed class PullMembersUpOperatorTests
         Assert.Equal(ErrorCodes.MemberNotMoveable, nullable.ErrorCode);
         Assert.Equal(
             "'Money.operator -(Money?, Money)' uses 'Money?', which 'ISummable<TSelf>' would have to write 'TSelf?'; for a type parameter that is not " +
-            "Nullable<TSelf>, so 'Money' would not implement the operator.",
+            "Nullable<TSelf>, so 'Money' would not implement the member.",
             nullable.Message);
         Assert.Equal(source, ws.ReadFile("Money.cs"));
     }

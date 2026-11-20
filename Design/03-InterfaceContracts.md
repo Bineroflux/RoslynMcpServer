@@ -349,7 +349,7 @@
 
 | Code | Name | Description | HTTP Analog |
 |------|------|-------------|-------------|
-| 4001 | WORKSPACE_BUSY | Another operation in progress | 503 |
+| 4001 | WORKSPACE_BUSY | Another operation in progress, or the files to write kept changing on disk | 503 |
 | 4002 | FILESYSTEM_ERROR | Cannot read/write files | 500 |
 | 4003 | ROSLYN_ERROR | Roslyn operation failed unexpectedly | 500 |
 | 4004 | COMPILATION_ERROR | Changes would break compilation | 500 |

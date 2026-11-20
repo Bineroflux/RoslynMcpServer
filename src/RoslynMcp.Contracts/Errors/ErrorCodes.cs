@@ -431,7 +431,10 @@ public static class ErrorCodes
     // System Errors (4xxx)
     // ============================================
 
-    /// <summary>Another operation in progress.</summary>
+    /// <summary>
+    /// Another operation in progress, or the files a refactoring would write kept changing on
+    /// disk (another program wrote them) while it was computed; nothing was written.
+    /// </summary>
     public const string WorkspaceBusy = "4001";
 
     /// <summary>Cannot read/write files.</summary>

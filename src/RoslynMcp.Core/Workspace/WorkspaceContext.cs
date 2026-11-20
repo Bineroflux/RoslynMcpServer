@@ -94,6 +94,17 @@ public sealed class WorkspaceContext : IDisposable
         issue.Contains($"project '{projectName}'", StringComparison.Ordinal);
 
     /// <summary>
+    /// For tests: awaited by every commit (and commit preview) of this workspace right before it
+    /// reads the files it is about to write, delete or create to check them against the snapshot
+    /// the refactoring was computed on — e.g. to write a file there as another program would.
+    /// </summary>
+    internal Func<CancellationToken, Task>? BeforeCommitReadsDisk
+    {
+        get => _s.BeforeCommitReadsDisk;
+        set => _s.BeforeCommitReadsDisk = value;
+    }
+
+    /// <summary>
     /// Diagnostics the workspace reported while loading (and while re-evaluating projects
     /// since). Empty for workspaces not loaded through MSBuild.
     /// </summary>
@@ -199,6 +210,10 @@ public sealed class WorkspaceContext : IDisposable
         // while it is set, so neither a caller outside one, nor work an earlier section left
         // behind, nor a section of another context can race it. Touched only by that section.
         public Solution? WriterBase;
+
+        // For tests: awaited by every commit and commit preview right before it reads the files
+        // it is about to touch (see BeforeCommitReadsDisk). Null otherwise.
+        public Func<CancellationToken, Task>? BeforeCommitReadsDisk;
 
         public Solution Solution = solution;
         public WorkspaceState State = WorkspaceState.Ready;
@@ -310,7 +325,9 @@ public sealed class WorkspaceContext : IDisposable
     /// for a file created, deleted or moved, the project's evaluated documents (see
     /// <see cref="WorkspaceWriteCoordinator"/>). The body thus never computes on text another
     /// context has replaced, though this context's file watcher may not have caught up yet. When
-    /// nothing was written elsewhere, that costs nothing.
+    /// nothing was written elsewhere, that costs nothing. Other programs are not kept out: a
+    /// commit compares the files it writes with the disk instead, and writes nothing when another
+    /// program changed one (see <see cref="CommitChangesAsync(Solution, string?, CancellationToken)"/>).
     /// </para>
     /// <para>
     /// A cached context's caller holds an operation lease while it waits here, which keeps
@@ -430,24 +447,65 @@ public sealed class WorkspaceContext : IDisposable
     /// <paramref name="writers"/> wrote since this session last looked: a tracked file gets the
     /// text on disk; a file created, deleted or moved has its project re-evaluated with MSBuild,
     /// whose documents are then added and removed as <see cref="ReconcileProjectDocumentsAsync"/>
-    /// does. Runs at the start of a section: the section's lock keeps every other writer out, and
-    /// a cached context's operation lease keeps its file updates out, so the disk read here is
-    /// the disk the section computes on. Changes nothing (and keeps <see cref="Session.WritesSeen"/>)
-    /// when it fails.
+    /// does (see <see cref="TakeOverFromDiskAsync"/>). Runs at the start of a section: the
+    /// section's lock keeps every other writer of this process out, and a cached context's
+    /// operation lease keeps its file updates out, so the disk read here is the disk the section
+    /// computes on — unless another program writes meanwhile, which the commit's check finds.
+    /// Changes nothing (and keeps <see cref="Session.WritesSeen"/>) when it fails.
     /// </summary>
     private async Task TakeOverOtherWritesAsync(WorkspaceWriteCoordinator writers, CancellationToken cancellationToken)
     {
         var (through, written) = writers.GetWrittenSince(_s.WritesSeen);
-        if (written.Count == 0)
+        if (written.Count > 0)
         {
-            _s.WritesSeen = through;
-            return;
+            await TakeOverFromDiskAsync(written, "A refactoring through another workspace over the same files", cancellationToken)
+                .ConfigureAwait(false);
         }
 
+        _s.WritesSeen = through;
+    }
+
+    /// <summary>
+    /// Takes over from disk the files a commit of the running section found changed there (see
+    /// <see cref="CommitResult.Conflicts"/>), as a section takes over what other contexts wrote:
+    /// a changed file's text is read again; for a file created or deleted, its project is
+    /// re-evaluated with MSBuild. The section's snapshot moves on to the result, so the
+    /// refactoring can be computed again on it and committed. Changes nothing when it fails.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">Called outside a writer section.</exception>
+    /// <exception cref="RefactoringException">
+    /// <see cref="ErrorCodes.WorkspaceBusy"/>: the solution changed since the section started, or
+    /// a project of a created or deleted file could not be re-evaluated.
+    /// </exception>
+    internal async Task TakeOverDiskConflictsAsync(
+        IReadOnlyCollection<DiskConflict> conflicts, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(conflicts);
+        ThrowIfDisposed();
+        EnsureWriterBaseIsCurrent(nameof(TakeOverDiskConflictsAsync));
+
+        var files = conflicts
+            .Select(c => (Path: PathResolver.NormalizePath(c.FilePath), Structural: c.Kind != DiskConflictKind.Changed))
+            .ToList();
+        await TakeOverFromDiskAsync(files, "Another program", cancellationToken).ConfigureAwait(false);
+        _s.WriterBase = _s.Solution;
+    }
+
+    /// <summary>
+    /// Brings the solution in line with the disk for <paramref name="files"/> (normalized paths)
+    /// that <paramref name="writer"/> wrote: a tracked file gets the text on disk; a file created,
+    /// deleted or moved (<c>Structural</c>) has its project re-evaluated with MSBuild, whose
+    /// documents are then added and removed as <see cref="ReconcileProjectDocumentsAsync"/> does.
+    /// Only inside a writer section, which keeps the other writers of this process out, while a
+    /// cached context's operation lease keeps its file updates out. Changes nothing when it fails.
+    /// </summary>
+    private async Task TakeOverFromDiskAsync(
+        IReadOnlyCollection<(string Path, bool Structural)> files, string writer, CancellationToken cancellationToken)
+    {
         var sol = _s.Solution;
         var documentsByPath = IndexDocumentsByPath(sol);
         var toEvaluate = new List<string>();
-        foreach (var (path, structural) in written)
+        foreach (var (path, structural) in files)
         {
             documentsByPath.TryGetValue(path, out var tracked);
             var bytes = await TryReadFileAsync(path, cancellationToken).ConfigureAwait(false);
@@ -494,16 +552,14 @@ public sealed class WorkspaceContext : IDisposable
             {
                 throw new RefactoringException(
                     ErrorCodes.WorkspaceBusy,
-                    $"A refactoring through another workspace over the same files created or deleted files of " +
-                    $"'{projectFile}', and MSBuild could not re-evaluate it to take that over ({ex.Message}). " +
-                    "Nothing was written; run it again.",
+                    $"{writer} created or deleted files of '{projectFile}', and MSBuild could not re-evaluate it " +
+                    $"to take that over ({ex.Message}). Nothing was written; run it again.",
                     ex);
             }
         }
 
         _s.Solution = sol;
         _s.DeclaredEncodings = declared;
-        _s.WritesSeen = through;
     }
 
     /// <summary>
@@ -1458,7 +1514,8 @@ public sealed class WorkspaceContext : IDisposable
     /// <returns>List of files that were written.</returns>
     /// <remarks>
     /// Only inside <see cref="RunWriterAsync{T}"/>, which serializes commits; see the other
-    /// overload. Files are written sequentially to avoid file locking issues.
+    /// overload, also for the check against files other programs changed. Files are written
+    /// sequentially to avoid file locking issues.
     /// </remarks>
     public Task<CommitResult> CommitChangesAsync(
         Solution newSolution,
@@ -1469,11 +1526,11 @@ public sealed class WorkspaceContext : IDisposable
     /// Commits all pending changes to the filesystem. A file is written in the encoding its
     /// text was decoded with (see <see cref="SourceFileEncoding.ForRewrite"/>), so the bytes
     /// of the text a change leaves alone stay as they were — a windows-1252 file stays
-    /// windows-1252. A document moved to a new path keeps the encoding of its old file. An
-    /// added document takes the <c>.editorconfig</c> <c>charset</c> of its path, else the
-    /// encoding of <paramref name="newFilesEncodingFrom"/> (e.g. the file a type was split off
-    /// from), else the encoding most of its project's files are in, else UTF-8 with BOM (see
-    /// <see cref="NewFileEncodings"/>).
+    /// windows-1252. A document moved to a new path keeps the encoding of its old file, which
+    /// is deleted once everything is written. An added document takes the <c>.editorconfig</c>
+    /// <c>charset</c> of its path, else the encoding of <paramref name="newFilesEncodingFrom"/>
+    /// (e.g. the file a type was split off from), else the encoding most of its project's files
+    /// are in, else UTF-8 with BOM (see <see cref="NewFileEncodings"/>).
     /// Text a file's code page cannot represent is saved as UTF-8 with BOM instead, which
     /// <see cref="CommitResult.Warnings"/> reports. Encodings are read before anything is
     /// written or deleted; a file whose bytes are not valid in its own encoding fails the
@@ -1488,11 +1545,24 @@ public sealed class WorkspaceContext : IDisposable
     /// </param>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <remarks>
+    /// <para>
     /// The change is everything that differs between <paramref name="newSolution"/> and the
     /// current solution, so it must be computed from the current solution: built on an older
     /// snapshot, it would write that snapshot's text over every edit committed since. Hence
     /// commits run only inside <see cref="RunWriterAsync{T}"/>, and one is refused when the
     /// solution is no longer the snapshot its section builds on.
+    /// </para>
+    /// <para>
+    /// The section keeps out the other writers of this process, not other programs: an IDE
+    /// saving a file, or another RoslynMcp server, may have written one of the files after this
+    /// workspace read it, and its file watcher may not have caught up. So before anything is
+    /// written, every file the commit writes, deletes, creates or moves a document away from is
+    /// read once and compared with what the snapshot has for it, decoded as the file watcher
+    /// decodes it. A file whose text differs, a tracked file that is gone, or a file where the
+    /// snapshot has none fails the commit with <see cref="CommitResult.Conflicts"/> and nothing
+    /// written; <see cref="TakeOverDiskConflictsAsync"/> then takes the files over, so the change
+    /// can be computed again. The same bytes decide the encodings, so no file is read twice.
+    /// </para>
     /// </remarks>
     /// <exception cref="InvalidOperationException">Called outside a writer section.</exception>
     /// <exception cref="RefactoringException">
@@ -1514,11 +1584,33 @@ public sealed class WorkspaceContext : IDisposable
         {
             State = WorkspaceState.Operating;
 
-            // Everything is decided first — contents and encodings, so every encoding is read
-            // before anything is written or deleted — then the files are written one after
+            // Everything is decided first — the contents; then, from the files' bytes, whether
+            // they are still what the change was computed on, and their encodings — so nothing
+            // is written or deleted unless all of it can be. Then the files are written one after
             // another, which prevents interleaved writes to the same file from different
             // documents.
-            plan = await PlanCommitAsync(newSolution, newFilesEncodingFrom, preview: false, cancellationToken);
+            plan = await PlanCommitAsync(newSolution, newFilesEncodingFrom, cancellationToken);
+            if (_s.BeforeCommitReadsDisk is { } beforeCommitReadsDisk)
+                await beforeCommitReadsDisk(cancellationToken);
+
+            var disk = await ReadCheckedFilesAsync(plan, cancellationToken);
+            var conflicts = await FindDiskConflictsAsync(plan, disk, cancellationToken);
+            if (conflicts.Count > 0)
+            {
+                State = WorkspaceState.Ready;
+                return new CommitResult
+                {
+                    Success = false,
+                    FilesModified = plan.FilesModified,
+                    FilesCreated = plan.FilesCreated,
+                    FilesDeleted = plan.FilesDeleted,
+                    Conflicts = conflicts,
+                    Error = "Files changed on disk since the refactoring read them, so nothing was written: " +
+                        $"{DiskConflict.Describe(conflicts)}."
+                };
+            }
+
+            ChooseEncodings(plan, disk, preview: false);
 
             // Recorded first, so a commit that fails halfway is taken over as far as it got.
             _s.Writers.RecordWrites(plan.Files);
@@ -1530,6 +1622,8 @@ public sealed class WorkspaceContext : IDisposable
                 else
                     await _s.FileWriter.WriteAsync(operation.FilePath, operation.Content, operation.Encoding!, cancellationToken);
             }
+
+            DeleteMovedFrom(plan, newSolution);
 
             var committed = await LabelEncodingsAsync(newSolution, plan.Written);
             _s.Solution = committed;
@@ -1564,11 +1658,13 @@ public sealed class WorkspaceContext : IDisposable
     /// <summary>
     /// What committing <paramref name="newSolution"/> would report, decided as
     /// <see cref="CommitChangesAsync(Solution, string?, CancellationToken)"/> decides it but
-    /// without writing anything, for a preview: the files that would be saved as UTF-8 with
-    /// BOM because their code page cannot represent the new text, and the reason the commit
-    /// would fail with <see cref="ErrorCodes.FilesystemError"/> before writing anything (a file
-    /// whose bytes are not valid in its own encoding). Empty when the commit would report
-    /// nothing. Only inside <see cref="RunWriterAsync{T}"/>, like a commit.
+    /// without writing anything, for a preview: the files the workspace is behind the disk for
+    /// (another program changed them, so applying would read them again and compute the change
+    /// anew), the files that would be saved as UTF-8 with BOM because their code page cannot
+    /// represent the new text, and the reason the commit would fail with
+    /// <see cref="ErrorCodes.FilesystemError"/> before writing anything (a file whose bytes are
+    /// not valid in its own encoding). Empty when the commit would report nothing. Only inside
+    /// <see cref="RunWriterAsync{T}"/>, like a commit.
     /// </summary>
     /// <param name="newSolution">
     /// Solution with the changes a commit would write, derived from <see cref="Solution"/> as
@@ -1588,23 +1684,48 @@ public sealed class WorkspaceContext : IDisposable
         ThrowIfDisposed();
         EnsureWriterBaseIsCurrent(nameof(GetCommitWarningsAsync));
 
+        var warnings = new List<string>();
         try
         {
-            var plan = await PlanCommitAsync(newSolution, newFilesEncodingFrom, preview: true, cancellationToken);
-            return plan.Warnings;
+            var plan = await PlanCommitAsync(newSolution, newFilesEncodingFrom, cancellationToken);
+            if (_s.BeforeCommitReadsDisk is { } beforeCommitReadsDisk)
+                await beforeCommitReadsDisk(cancellationToken);
+
+            var disk = await ReadCheckedFilesAsync(plan, cancellationToken);
+            warnings.AddRange((await FindDiskConflictsAsync(plan, disk, cancellationToken)).Select(c => c.PreviewWarning));
+            ChooseEncodings(plan, disk, preview: true);
+            warnings.AddRange(plan.Warnings);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            return [$"Applying this would fail with FilesystemError ({ErrorCodes.FilesystemError}) and write nothing: {ex.Message}"];
+            warnings.Add($"Applying this would fail with FilesystemError ({ErrorCodes.FilesystemError}) and write nothing: {ex.Message}");
         }
+
+        return warnings;
     }
 
     /// <summary>
-    /// The file writes and deletions of a commit, sorted by path, with what the commit reports.
+    /// The files a commit writes and deletes, and what it reports; the encodings and the
+    /// operations in path order once the files' bytes are read (<see cref="ChooseEncodings"/>).
     /// </summary>
     private sealed class CommitPlan
     {
-        /// <summary>The files to write (<c>Content</c> in <c>Encoding</c>) or, without content, delete.</summary>
+        /// <summary>The documents' texts to write.</summary>
+        public List<PlannedWrite> Writes { get; } = [];
+
+        /// <summary>The files of removed documents, to delete.</summary>
+        public List<string> Deletes { get; } = [];
+
+        /// <summary>The old files of documents moved to a new path, deleted once everything is written.</summary>
+        public List<string> MovedFrom { get; } = [];
+
+        /// <summary>
+        /// Every file the commit writes, deletes, creates or moves a document away from (by
+        /// normalized path), with what the snapshot the change was computed on has there.
+        /// </summary>
+        public Dictionary<string, CheckedFile> Checked { get; } = new(PathResolver.PathComparer);
+
+        /// <summary>The files to write (<c>Content</c> in <c>Encoding</c>) or, without content, delete, in path order.</summary>
         public List<(string FilePath, string? Content, Encoding? Encoding)> Operations { get; } = [];
 
         /// <summary>The documents written, with the encoding their file is written in.</summary>
@@ -1625,21 +1746,45 @@ public sealed class WorkspaceContext : IDisposable
         public List<string> Warnings { get; } = [];
     }
 
+    /// <summary>A document's text a commit writes to <paramref name="FilePath"/>.</summary>
+    /// <param name="DocumentId">The document, labelled with the encoding written once committed.</param>
+    /// <param name="FilePath">The file to write.</param>
+    /// <param name="Content">The text to write.</param>
+    /// <param name="EncodingFrom">
+    /// The file whose bytes decide the encoding: <paramref name="FilePath"/>, or the old file of a
+    /// moved document.
+    /// </param>
+    /// <param name="DecodedWith">The encoding the document's text was decoded with, if known.</param>
+    /// <param name="NewFileEncoding">
+    /// For an added document, the encoding it gets as a new file (<see cref="NewFileEncodings"/>);
+    /// null for the others.
+    /// </param>
+    private sealed record PlannedWrite(
+        DocumentId DocumentId,
+        string FilePath,
+        string Content,
+        string EncodingFrom,
+        Encoding? DecodedWith,
+        Encoding? NewFileEncoding);
+
+    /// <summary>
+    /// A file a commit touches, and the documents the snapshot the change was computed on has at
+    /// its path: their text must be on disk, or, when there are none, no file may be.
+    /// </summary>
+    private sealed record CheckedFile(string FilePath, List<TextDocument> Snapshot);
+
     /// <summary>
     /// Decides what committing <paramref name="newSolution"/> writes: every changed, added and
-    /// removed document's file, its content and its encoding (see
-    /// <see cref="CommitChangesAsync(Solution, string?, CancellationToken)"/>), reading the
-    /// files' current bytes but writing nothing. <paramref name="preview"/> words the warnings
-    /// for a preview.
+    /// removed document's file and its content, and which files to check against the disk (see
+    /// <see cref="CommitChangesAsync(Solution, string?, CancellationToken)"/>). Reads none of
+    /// those files; <see cref="ReadCheckedFilesAsync"/> does, once each.
     /// </summary>
-    /// <exception cref="InvalidDataException">
-    /// A file to rewrite has bytes that are not valid in its encoding.
-    /// </exception>
     private async Task<CommitPlan> PlanCommitAsync(
-        Solution newSolution, string? newFilesEncodingFrom, bool preview, CancellationToken cancellationToken)
+        Solution newSolution, string? newFilesEncodingFrom, CancellationToken cancellationToken)
     {
         var plan = new CommitPlan();
-        var changes = newSolution.GetChanges(_s.Solution);
+        var snapshot = _s.Solution;
+        var changes = newSolution.GetChanges(snapshot);
         var newFileEncodings = new NewFileEncodings(this, newFilesEncodingFrom);
 
         foreach (var projectChanges in changes.GetProjectChanges())
@@ -1653,14 +1798,9 @@ public sealed class WorkspaceContext : IDisposable
 
                 var filePath = doc.FilePath;
                 var content = (await doc.GetTextAsync(cancellationToken)).ToString();
-                var encoding = Representable(
-                    filePath,
-                    content,
-                    GetEncodingOfReplacedFile(filePath) ?? await newFileEncodings.GetAsync(doc, cancellationToken),
-                    plan.Warnings,
-                    preview);
-                plan.Operations.Add((filePath, content, encoding));
-                plan.Written.Add((docId, encoding));
+                var newFileEncoding = await newFileEncodings.GetAsync(doc, cancellationToken);
+                plan.Writes.Add(new PlannedWrite(docId, filePath, content, filePath, DecodedWith: null, newFileEncoding));
+                Check(filePath, known: null);
                 plan.Files.Add((filePath, true));
                 plan.FilesCreated.Add(filePath);
             }
@@ -1668,7 +1808,7 @@ public sealed class WorkspaceContext : IDisposable
             // Changed documents: each is written in the encoding its text was decoded with, so
             // the bytes of the text it did not change stay as they were. One repointed at a new
             // path (a renamed file) is written there as a new file, in the encoding of the file
-            // at its old path.
+            // at its old path, which goes once everything is written.
             foreach (var docId in projectChanges.GetChangedDocuments())
             {
                 var doc = newSolution.GetDocument(docId);
@@ -1676,25 +1816,25 @@ public sealed class WorkspaceContext : IDisposable
 
                 var filePath = doc.FilePath;
                 var text = await doc.GetTextAsync(cancellationToken);
-                var content = text.ToString();
-                var oldDoc = _s.Solution.GetDocument(docId);
+                var oldDoc = snapshot.GetDocument(docId);
                 var decodedWith = (oldDoc == null ? null : (await oldDoc.GetTextAsync(cancellationToken)).Encoding)
                     ?? text.Encoding;
                 var oldPath = oldDoc?.FilePath;
                 var moved = oldPath != null && !PathResolver.PathsEqual(oldPath, filePath);
-                var encodingFrom = moved ? oldPath! : filePath;
 
-                var encoding = Representable(
-                    filePath,
-                    content,
-                    _s.FileWriter.GetEncoding(encodingFrom, decodedWith) ?? decodedWith ?? SourceFileEncoding.Utf8WithBom,
-                    plan.Warnings,
-                    preview);
-                plan.Operations.Add((filePath, content, encoding));
-                plan.Written.Add((docId, encoding));
+                plan.Writes.Add(new PlannedWrite(docId, filePath, text.ToString(), moved ? oldPath! : filePath, decodedWith, NewFileEncoding: null));
                 plan.Files.Add((filePath, moved));
                 if (moved)
-                    plan.Files.Add((oldPath!, true)); // the operation deletes the old file afterwards
+                {
+                    Check(filePath, known: null);
+                    Check(oldPath!, oldDoc);
+                    plan.MovedFrom.Add(oldPath!);
+                    plan.Files.Add((oldPath!, true));
+                }
+                else
+                {
+                    Check(filePath, oldDoc);
+                }
 
                 plan.FilesModified.Add(filePath);
             }
@@ -1704,7 +1844,7 @@ public sealed class WorkspaceContext : IDisposable
             foreach (var docId in projectChanges.GetChangedAdditionalDocuments())
             {
                 var doc = newSolution.GetAdditionalDocument(docId);
-                var oldDoc = _s.Solution.GetAdditionalDocument(docId);
+                var oldDoc = snapshot.GetAdditionalDocument(docId);
                 if (doc?.FilePath == null || oldDoc == null || !PathResolver.PathsEqual(oldDoc.FilePath, doc.FilePath))
                     continue;
 
@@ -1714,16 +1854,8 @@ public sealed class WorkspaceContext : IDisposable
                 if (oldText.ContentEquals(text))
                     continue;
 
-                var content = text.ToString();
-                var decodedWith = oldText.Encoding ?? text.Encoding;
-                var encoding = Representable(
-                    filePath,
-                    content,
-                    _s.FileWriter.GetEncoding(filePath, decodedWith) ?? decodedWith ?? SourceFileEncoding.Utf8WithBom,
-                    plan.Warnings,
-                    preview);
-                plan.Operations.Add((filePath, content, encoding));
-                plan.Written.Add((docId, encoding));
+                plan.Writes.Add(new PlannedWrite(docId, filePath, text.ToString(), filePath, oldText.Encoding ?? text.Encoding, NewFileEncoding: null));
+                Check(filePath, oldDoc);
                 plan.Files.Add((filePath, false));
                 plan.FilesModified.Add(filePath);
             }
@@ -1731,19 +1863,162 @@ public sealed class WorkspaceContext : IDisposable
             // Removed documents.
             foreach (var docId in projectChanges.GetRemovedDocuments())
             {
-                var doc = _s.Solution.GetDocument(docId);
+                var doc = snapshot.GetDocument(docId);
                 if (doc?.FilePath == null) continue;
 
-                plan.Operations.Add((doc.FilePath, null, null));
+                plan.Deletes.Add(doc.FilePath);
+                Check(doc.FilePath, doc);
                 plan.Files.Add((doc.FilePath, true));
                 plan.FilesDeleted.Add(doc.FilePath);
             }
         }
 
+        return plan;
+
+        // Every document the snapshot has at the path (a linked or multi-targeted file has
+        // several), plus the one the change was computed from, whose path may be spelled
+        // differently (a rename that only changes the file name's casing).
+        void Check(string filePath, TextDocument? known)
+        {
+            var key = PathResolver.NormalizePath(filePath);
+            if (!plan.Checked.TryGetValue(key, out var check))
+            {
+                var tracked = snapshot.GetDocumentIdsWithFilePath(filePath)
+                    .Select(id => (TextDocument?)snapshot.GetDocument(id) ?? snapshot.GetAdditionalDocument(id))
+                    .OfType<TextDocument>()
+                    .ToList();
+                plan.Checked[key] = check = new CheckedFile(filePath, tracked);
+            }
+
+            if (known != null && !check.Snapshot.Any(d => d.Id == known.Id))
+                check.Snapshot.Add(known);
+        }
+    }
+
+    /// <summary>
+    /// The bytes of every file <paramref name="plan"/> checks, by normalized path (null when
+    /// there is no such file), each read once: they decide both whether the file is still what
+    /// the change was computed on and the encoding to rewrite it in.
+    /// </summary>
+    private static async Task<Dictionary<string, byte[]?>> ReadCheckedFilesAsync(CommitPlan plan, CancellationToken cancellationToken)
+    {
+        var disk = new Dictionary<string, byte[]?>(PathResolver.PathComparer);
+        foreach (var (key, check) in plan.Checked)
+            disk[key] = await TryReadFileAsync(check.FilePath, cancellationToken).ConfigureAwait(false);
+
+        return disk;
+    }
+
+    /// <summary>
+    /// The files of <paramref name="plan"/> that are not on disk what the snapshot the change was
+    /// computed on has for them, in path order: a file whose text differs (decoded as the file
+    /// watcher decodes it, see <see cref="DecodeFromDiskAsync"/>; an encoding that changed alone
+    /// is no conflict), a tracked file that is gone, or a file where the snapshot has none.
+    /// </summary>
+    private async Task<List<DiskConflict>> FindDiskConflictsAsync(
+        CommitPlan plan, Dictionary<string, byte[]?> disk, CancellationToken cancellationToken)
+    {
+        var conflicts = new List<DiskConflict>();
+        foreach (var (key, check) in plan.Checked)
+        {
+            var bytes = disk[key];
+            if (check.Snapshot.Count == 0)
+            {
+                if (bytes != null)
+                    conflicts.Add(new DiskConflict(check.FilePath, DiskConflictKind.Created));
+            }
+            else if (bytes == null)
+            {
+                conflicts.Add(new DiskConflict(check.FilePath, DiskConflictKind.Deleted));
+            }
+            else if (!await HoldsDiskTextAsync(check.Snapshot, bytes, cancellationToken).ConfigureAwait(false))
+            {
+                conflicts.Add(new DiskConflict(check.FilePath, DiskConflictKind.Changed));
+            }
+        }
+
+        conflicts.Sort((a, b) => string.Compare(a.FilePath, b.FilePath, StringComparison.OrdinalIgnoreCase));
+        return conflicts;
+    }
+
+    /// <summary>
+    /// Whether every document of <paramref name="documents"/> (all at one path) holds the text
+    /// of <paramref name="bytes"/>, decoded as the file watcher would decode the file for it.
+    /// </summary>
+    private async Task<bool> HoldsDiskTextAsync(
+        IReadOnlyList<TextDocument> documents, byte[] bytes, CancellationToken cancellationToken)
+    {
+        var sources = documents.OfType<Document>().ToList();
+        var decoded = sources.Count > 0
+            ? await DecodeFromDiskAsync(sources, bytes, cancellationToken).ConfigureAwait(false)
+            : null;
+        foreach (var document in documents)
+        {
+            var current = await document.GetTextAsync(cancellationToken).ConfigureAwait(false);
+
+            // An additional document (a Razor file) is read in the encoding it was read in before.
+            var onDisk = document is Document ? decoded! : SourceFileEncoding.Decode(bytes, fallbackEncoding: current.Encoding);
+            if (!current.ContentEquals(onDisk))
+                return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Decides the encoding of every file <paramref name="plan"/> writes from the bytes in
+    /// <paramref name="disk"/> (see <see cref="CommitChangesAsync(Solution, string?, CancellationToken)"/>),
+    /// and fills <see cref="CommitPlan.Operations"/> (in path order) and
+    /// <see cref="CommitPlan.Written"/>; <paramref name="preview"/> words the warnings for a
+    /// preview.
+    /// </summary>
+    /// <exception cref="InvalidDataException">
+    /// A file to rewrite has bytes that are not valid in its encoding.
+    /// </exception>
+    private static void ChooseEncodings(CommitPlan plan, Dictionary<string, byte[]?> disk, bool preview)
+    {
+        foreach (var write in plan.Writes)
+        {
+            var bytes = disk[PathResolver.NormalizePath(write.EncodingFrom)];
+            var encoding = write.NewFileEncoding is { } newFileEncoding
+                ? (bytes == null ? null : EncodingOfReplacedFile(bytes, write.FilePath)) ?? newFileEncoding
+                : (bytes == null ? null : SourceFileEncoding.ForRewrite(bytes, write.DecodedWith, write.EncodingFrom))
+                    ?? write.DecodedWith ?? SourceFileEncoding.Utf8WithBom;
+            encoding = Representable(write.FilePath, write.Content, encoding, plan.Warnings, preview);
+            plan.Operations.Add((write.FilePath, write.Content, encoding));
+            plan.Written.Add((write.DocumentId, encoding));
+        }
+
+        foreach (var path in plan.Deletes)
+            plan.Operations.Add((path, null, null));
+
         // Sorted by file path for a consistent order, which also prevents deadlocks with
         // external file locks.
         plan.Operations.Sort((a, b) => string.Compare(a.FilePath, b.FilePath, StringComparison.OrdinalIgnoreCase));
-        return plan;
+    }
+
+    /// <summary>
+    /// Deletes the old files of the documents the commit moved to a new path, now that their new
+    /// files are written, unless a document of <paramref name="committed"/> still has the path.
+    /// Best effort: a file that cannot be deleted stays, and the operation that moved the
+    /// document reports it.
+    /// </summary>
+    private void DeleteMovedFrom(CommitPlan plan, Solution committed)
+    {
+        foreach (var path in plan.MovedFrom.Distinct(PathResolver.PathComparer))
+        {
+            if (!committed.GetDocumentIdsWithFilePath(path).IsEmpty)
+                continue;
+
+            try
+            {
+                _s.FileWriter.Delete(path);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // Left for the operation, which retries and reports it.
+            }
+        }
     }
 
     /// <summary>
@@ -1811,14 +2086,15 @@ public sealed class WorkspaceContext : IDisposable
     }
 
     /// <summary>
-    /// The encoding of an existing file an added document replaces, if any. Its text is
-    /// replaced as a whole, so bytes that are invalid in its encoding don't stop the write.
+    /// The encoding of an existing file, read as <paramref name="bytes"/>, that an added document
+    /// replaces. Its text is replaced as a whole, so bytes that are invalid in its encoding don't
+    /// stop the write.
     /// </summary>
-    private Encoding? GetEncodingOfReplacedFile(string filePath)
+    private static Encoding? EncodingOfReplacedFile(byte[] bytes, string filePath)
     {
         try
         {
-            return _s.FileWriter.GetEncoding(filePath);
+            return SourceFileEncoding.ForRewrite(bytes, decodedWith: null, filePath);
         }
         catch (InvalidDataException)
         {
@@ -2017,6 +2293,14 @@ public sealed class CommitResult
     /// because its code page cannot represent the new text.
     /// </summary>
     public IReadOnlyList<string> Warnings { get; init; } = [];
+
+    /// <summary>
+    /// The files the commit would have written, deleted or created that another program changed
+    /// on disk after the workspace read them. When there are any, <see cref="Success"/> is false
+    /// and nothing was written; <see cref="WorkspaceContext.TakeOverDiskConflictsAsync"/> takes
+    /// them over so the change can be computed again.
+    /// </summary>
+    public IReadOnlyList<DiskConflict> Conflicts { get; init; } = [];
 
     /// <summary>
     /// Error message if commit failed.

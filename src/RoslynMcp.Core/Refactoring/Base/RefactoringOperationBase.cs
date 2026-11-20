@@ -32,6 +32,10 @@ public abstract class RefactoringOperationBase<TParams> : IRefactoringOperation<
     // reported with AddWarnings, added to its result's own.
     private readonly List<string> _commitWarnings = [];
 
+    // The commits the running attempt of ExecuteCoreAsync has made. One that finds files changed
+    // on disk is computed again from the start only while this is 0: nothing is written then.
+    private int _commitsMade;
+
     /// <summary>
     /// Adds warnings to this execution's result, preview or not, e.g. what laying out code
     /// moved into another file reported (<see cref="Utilities.LineEndings.KeptLiteralsWarning"/>).
@@ -68,7 +72,7 @@ public abstract class RefactoringOperationBase<TParams> : IRefactoringOperation<
             // build on a snapshot this one replaces nor commit over it. Previews take the writer
             // too: they compute against the snapshot a commit would build on.
             var result = await Context.RunWriterAsync(
-                ct => ExecuteCoreAsync(operationId, @params, ct), cancellationToken);
+                ct => ExecuteOnDiskStateAsync(operationId, @params, ct), cancellationToken);
             stopwatch.Stop();
             return WithTiming(result, stopwatch.ElapsedMilliseconds, workspaceLoadMs, _commitWarnings);
         }
@@ -87,6 +91,61 @@ public abstract class RefactoringOperationBase<TParams> : IRefactoringOperation<
                 $"Unexpected error: {ex.Message}",
                 ex);
         }
+    }
+
+    /// <summary>
+    /// Runs <see cref="ExecuteCoreAsync"/> inside the writer section. When its commit finds a
+    /// file it would write, delete or create changed on disk — another program (an IDE, another
+    /// RoslynMcp server) wrote it after the workspace read it — the commit has written nothing:
+    /// the files are taken over from disk and the refactoring is computed once more from the
+    /// start on them, and the result says so in its warnings. That is safe because an operation
+    /// computes its change from <see cref="Context"/>'s solution and touches the disk only in and
+    /// after its commit. If the second commit finds files changed again, the refactoring fails
+    /// with <see cref="ErrorCodes.WorkspaceBusy"/>, nothing written.
+    /// </summary>
+    private async Task<RefactoringResult> ExecuteOnDiskStateAsync(
+        Guid operationId, TParams @params, CancellationToken cancellationToken)
+    {
+        IReadOnlyList<DiskConflict> conflicts;
+        try
+        {
+            _commitsMade = 0;
+            return await ExecuteCoreAsync(operationId, @params, cancellationToken);
+        }
+        catch (DiskConflictException changed)
+        {
+            conflicts = changed.Conflicts;
+        }
+
+        await Context.TakeOverDiskConflictsAsync(conflicts, cancellationToken);
+
+        // The first attempt's warnings come again with the second.
+        _commitWarnings.Clear();
+        _commitsMade = 0;
+        try
+        {
+            var result = await ExecuteCoreAsync(operationId, @params, cancellationToken);
+            _commitWarnings.InsertRange(0, conflicts.Select(c => c.RecomputedWarning));
+            return result;
+        }
+        catch (DiskConflictException again)
+        {
+            throw new RefactoringException(
+                ErrorCodes.WorkspaceBusy,
+                "Files changed on disk while the refactoring ran, and again while it was computed a second time " +
+                $"(another program is writing them): {DiskConflict.Describe(again.Conflicts)}. " +
+                "Nothing was written; run it again once the other program is done.");
+        }
+    }
+
+    /// <summary>
+    /// Unwinds an execution whose commit found files changed on disk (and wrote nothing) to
+    /// <see cref="ExecuteOnDiskStateAsync"/>, which computes it again.
+    /// </summary>
+    private sealed class DiskConflictException(IReadOnlyList<DiskConflict> conflicts)
+        : Exception("Files changed on disk since the refactoring read them; nothing was written.")
+    {
+        public IReadOnlyList<DiskConflict> Conflicts { get; } = conflicts;
     }
 
     /// <summary>
@@ -122,7 +181,10 @@ public abstract class RefactoringOperationBase<TParams> : IRefactoringOperation<
     /// Commits solution changes to the filesystem; a file the commit creates takes the
     /// encoding of <paramref name="newFilesEncodingFrom"/> unless an <c>.editorconfig</c> names
     /// one (see <see cref="WorkspaceContext.CommitChangesAsync(Solution, string?, CancellationToken)"/>).
-    /// The commit's warnings are added to the operation's result.
+    /// The commit's warnings are added to the operation's result. When the commit finds files
+    /// changed on disk since the workspace read them, it writes nothing and this does not return:
+    /// the operation is computed again on them (see <see cref="ExecuteOnDiskStateAsync"/>), so
+    /// nothing may be written to disk before the commit.
     /// </summary>
     /// <param name="newSolution">Solution with changes.</param>
     /// <param name="newFilesEncodingFrom">File the content of added documents comes from.</param>
@@ -132,6 +194,21 @@ public abstract class RefactoringOperationBase<TParams> : IRefactoringOperation<
         Solution newSolution, string? newFilesEncodingFrom, CancellationToken cancellationToken)
     {
         var result = await Context.CommitChangesAsync(newSolution, newFilesEncodingFrom, cancellationToken);
+        if (result.Conflicts.Count > 0)
+        {
+            // Nothing of this commit was written. An earlier one of the same execution was, so
+            // the execution cannot simply run again.
+            if (_commitsMade > 0)
+            {
+                throw new RefactoringException(
+                    ErrorCodes.WorkspaceBusy,
+                    $"Files changed on disk while the refactoring was being written (another program wrote them): " +
+                    $"{DiskConflict.Describe(result.Conflicts)}. Its earlier part was written, the rest was not.");
+            }
+
+            throw new DiskConflictException(result.Conflicts);
+        }
+
         if (!result.Success)
         {
             throw new RefactoringException(
@@ -139,6 +216,7 @@ public abstract class RefactoringOperationBase<TParams> : IRefactoringOperation<
                 $"Failed to write files: {result.Error}");
         }
 
+        _commitsMade++;
         _commitWarnings.AddRange(result.Warnings);
         return result;
     }

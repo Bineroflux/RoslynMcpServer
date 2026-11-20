@@ -133,7 +133,7 @@
 
 | Code | Constant | Message |
 |------|----------|---------|
-| 4001 | WORKSPACE_BUSY | Operation in progress |
+| 4001 | WORKSPACE_BUSY | Operation in progress, or the files to write kept changing on disk |
 | 4002 | FILESYSTEM_ERROR | Filesystem error |
 | 4003 | ROSLYN_ERROR | Roslyn error |
 | 4004 | COMPILATION_ERROR | Would break compilation |

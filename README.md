@@ -22,6 +22,7 @@ Roslyn MCP Server is a [Model Context Protocol (MCP)](https://modelcontextprotoc
 - [Available Tools](#available-tools)
 - [Preview Mode](#preview-mode)
 - [File Encodings and Line Endings](#file-encodings-and-line-endings)
+- [Several Servers and Editors](#several-servers-and-editors)
 - [Analyzer Shadow Copying](#analyzer-shadow-copying)
 - [Troubleshooting](#troubleshooting)
 - [NuGet Libraries](#nuget-libraries)
@@ -321,7 +322,7 @@ These tools generate new code members for existing types.
 
 ## Preview Mode
 
-Every refactoring tool supports a `preview` parameter. When set to `true`, the tool computes and returns the changes that would be made without writing anything to disk. This lets you review diffs before committing to a refactoring. A preview's `warnings` also say what writing the change would do to the files' encodings: a file that would be saved as UTF-8 with BOM because its code page cannot hold the new text, and a file whose bytes are not valid in its own encoding, which makes the refactoring fail (see [File Encodings and Line Endings](#file-encodings-and-line-endings)); the preview itself succeeds, so the changes are still shown.
+Every refactoring tool supports a `preview` parameter. When set to `true`, the tool computes and returns the changes that would be made without writing anything to disk. This lets you review diffs before committing to a refactoring. A preview's `warnings` also say what writing the change would do to the files' encodings: a file that would be saved as UTF-8 with BOM because its code page cannot hold the new text, and a file whose bytes are not valid in its own encoding, which makes the refactoring fail (see [File Encodings and Line Endings](#file-encodings-and-line-endings)); the preview itself succeeds, so the changes are still shown. When another program changed a file the refactoring would write and the server has not caught up yet, the preview's `warnings` say so; applying it reads the file again first (see [Several Servers and Editors](#several-servers-and-editors)).
 
 Example (as a natural language prompt to Claude):
 
@@ -338,6 +339,12 @@ Files are read the way the compiler reads them (byte order mark, else the projec
 A file a refactoring creates (`move_type_to_file`, `extract_interface` / `extract_base_class` with a new `targetFile`) is written in the `.editorconfig` `charset` that applies to its path; else in the encoding of the file its content comes from (`move_type_to_file`); else in the encoding most of the project's files are in; else as UTF-8 with BOM. Generated text uses the file's line ending; a new file's comes from `end_of_line`, else from the file its content comes from (`move_type_to_file`), else from most of the project's files. Code moved into another file (a member pulled up, a type moved, a method body inlined) takes that file's line ending, except inside a verbatim or raw string literal, whose line breaks are part of its value: such a literal is kept as it is and reported in `warnings`.
 
 When a file's code page cannot hold the new text (a `→` in a windows-1252 file), the file is saved as UTF-8 with BOM instead and the result's `warnings` say so. A file whose bytes are not valid in its own encoding is not rewritten: the refactoring fails with `FilesystemError` (4002) before writing anything.
+
+---
+
+## Several Servers and Editors
+
+Refactorings of one server run one after another, each on what the one before wrote; queries run in parallel. Other programs may write the same files at any time: an IDE saving a file, a second `roslyn-mcp` (another Claude session) or `roslyn-cli` on the same repository. The server learns of their edits from its file watcher, a moment later. So before a refactoring writes anything, it compares every file it is about to write, delete or create with the text it computed the change from. If another program changed, deleted or created one in between, nothing is written: the server takes the files over from disk, computes the refactoring once more and says so in the result's `warnings`. If they change again during that second attempt, the refactoring fails with `WorkspaceBusy` (4001) and writes nothing. A file that exists where a refactoring would create one but is not part of the workspace is never overwritten. A preview computed while the server was behind the disk says so in its `warnings`.
 
 ---
 

@@ -466,6 +466,26 @@ public sealed class WorkspaceContext : IDisposable
     }
 
     /// <summary>
+    /// Takes the lock all RoslynMcp processes share for writing files (see
+    /// <see cref="WorkspaceWriteCoordinator.DiskLock"/>), for an operation that moves or deletes
+    /// files itself after its commit; dispose the result as soon as the files are written. Only
+    /// inside the running writer section, which is taken first.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">Called outside a writer section.</exception>
+    /// <exception cref="RefactoringException">
+    /// <see cref="ErrorCodes.WorkspaceBusy"/>: another process kept the lock longer than its timeout.
+    /// </exception>
+    internal Task<IDisposable> LockFilesForWritingAsync(CancellationToken cancellationToken)
+    {
+        ThrowIfDisposed();
+        if (!_s.Writers.FlowRunsSection())
+            throw new InvalidOperationException(
+                "Files are locked for writing only inside the workspace's writer section (RunWriterAsync).");
+
+        return _s.Writers.DiskLock.AcquireAsync(cancellationToken);
+    }
+
+    /// <summary>
     /// Takes over from disk the files a commit of the running section found changed there (see
     /// <see cref="CommitResult.Conflicts"/>), as a section takes over what other contexts wrote:
     /// a changed file's text is read again; for a file created or deleted, its project is
@@ -1563,11 +1583,23 @@ public sealed class WorkspaceContext : IDisposable
     /// written; <see cref="TakeOverDiskConflictsAsync"/> then takes the files over, so the change
     /// can be computed again. The same bytes decide the encodings, so no file is read twice.
     /// </para>
+    /// <para>
+    /// The check and the writes hold the lock all RoslynMcp processes share for writing
+    /// (<see cref="WorkspaceWriteCoordinator.DiskLock"/>), so another server or the CLI cannot
+    /// write a file between this commit's check and its write; it is held for milliseconds, not
+    /// while the change is computed. Editors don't take it: one saving a file within those
+    /// milliseconds is not noticed.
+    /// </para>
     /// </remarks>
     /// <exception cref="InvalidOperationException">Called outside a writer section.</exception>
     /// <exception cref="RefactoringException">
     /// <see cref="ErrorCodes.WorkspaceBusy"/>: the solution changed since the section started
-    /// (or last committed); nothing was written.
+    /// (or last committed), or another RoslynMcp process kept the lock for writing longer than
+    /// its timeout; nothing was written.
+    /// </exception>
+    /// <exception cref="OperationCanceledException">
+    /// Cancelled before anything was written (once writing has started, a cancellation fails the
+    /// commit as far as it got, like any error).
     /// </exception>
     public async Task<CommitResult> CommitChangesAsync(
         Solution newSolution,
@@ -1590,40 +1622,47 @@ public sealed class WorkspaceContext : IDisposable
             // another, which prevents interleaved writes to the same file from different
             // documents.
             plan = await PlanCommitAsync(newSolution, newFilesEncodingFrom, cancellationToken);
-            if (_s.BeforeCommitReadsDisk is { } beforeCommitReadsDisk)
-                await beforeCommitReadsDisk(cancellationToken);
 
-            var disk = await ReadCheckedFilesAsync(plan, cancellationToken);
-            var conflicts = await FindDiskConflictsAsync(plan, disk, cancellationToken);
-            if (conflicts.Count > 0)
+            // The check and the writes hold the lock all RoslynMcp processes share, so none of
+            // them writes a file between this one's check and its write. Milliseconds: the plan
+            // is made, and only the files, the check and the writes are left.
+            using (plan.Checked.Count == 0 ? null : await _s.Writers.DiskLock.AcquireAsync(cancellationToken))
             {
-                State = WorkspaceState.Ready;
-                return new CommitResult
+                if (_s.BeforeCommitReadsDisk is { } beforeCommitReadsDisk)
+                    await beforeCommitReadsDisk(cancellationToken);
+
+                var disk = await ReadCheckedFilesAsync(plan, cancellationToken);
+                var conflicts = await FindDiskConflictsAsync(plan, disk, cancellationToken);
+                if (conflicts.Count > 0)
                 {
-                    Success = false,
-                    FilesModified = plan.FilesModified,
-                    FilesCreated = plan.FilesCreated,
-                    FilesDeleted = plan.FilesDeleted,
-                    Conflicts = conflicts,
-                    Error = "Files changed on disk since the refactoring read them, so nothing was written: " +
-                        $"{DiskConflict.Describe(conflicts)}."
-                };
+                    State = WorkspaceState.Ready;
+                    return new CommitResult
+                    {
+                        Success = false,
+                        FilesModified = plan.FilesModified,
+                        FilesCreated = plan.FilesCreated,
+                        FilesDeleted = plan.FilesDeleted,
+                        Conflicts = conflicts,
+                        Error = "Files changed on disk since the refactoring read them, so nothing was written: " +
+                            $"{DiskConflict.Describe(conflicts)}."
+                    };
+                }
+
+                ChooseEncodings(plan, disk, preview: false);
+
+                // Recorded first, so a commit that fails halfway is taken over as far as it got.
+                _s.Writers.RecordWrites(plan.Files);
+                writing = true;
+                foreach (var operation in plan.Operations)
+                {
+                    if (operation.Content == null)
+                        _s.FileWriter.Delete(operation.FilePath);
+                    else
+                        await _s.FileWriter.WriteAsync(operation.FilePath, operation.Content, operation.Encoding!, cancellationToken);
+                }
+
+                DeleteMovedFrom(plan, newSolution);
             }
-
-            ChooseEncodings(plan, disk, preview: false);
-
-            // Recorded first, so a commit that fails halfway is taken over as far as it got.
-            _s.Writers.RecordWrites(plan.Files);
-            writing = true;
-            foreach (var operation in plan.Operations)
-            {
-                if (operation.Content == null)
-                    _s.FileWriter.Delete(operation.FilePath);
-                else
-                    await _s.FileWriter.WriteAsync(operation.FilePath, operation.Content, operation.Encoding!, cancellationToken);
-            }
-
-            DeleteMovedFrom(plan, newSolution);
 
             var committed = await LabelEncodingsAsync(newSolution, plan.Written);
             _s.Solution = committed;
@@ -1638,6 +1677,12 @@ public sealed class WorkspaceContext : IDisposable
                 FilesDeleted = plan.FilesDeleted,
                 Warnings = plan.Warnings
             };
+        }
+        catch (Exception ex) when (!writing && ex is OperationCanceledException or RefactoringException)
+        {
+            // Cancelled, or another process kept the lock for writing: nothing was written.
+            State = WorkspaceState.Ready;
+            throw;
         }
         catch (Exception ex)
         {

@@ -156,32 +156,50 @@ internal sealed record NamespaceFolderMove(string? TargetPath, IReadOnlyList<str
         var unmoved = context.Solution;
         var solution = unmoved;
 
-        for (var i = 0; i < moves.Count; i++)
+        // Under the lock all RoslynMcp processes share for writing, so another server's commit
+        // cannot find a file still in place and write it back there after it moved. Not
+        // cancellable, like the moves: the namespace change is committed already.
+        IDisposable held;
+        try
         {
-            var (_, sourcePath, move) = moves[i];
-            var targetPath = move.TargetPath!;
-            createdDirectories[i] = [];
-            for (var dir = Path.GetDirectoryName(targetPath); dir != null && !Directory.Exists(dir); dir = Path.GetDirectoryName(dir))
-                createdDirectories[i].Add(dir);
+            held = await context.LockFilesForWritingAsync(CancellationToken.None);
+        }
+        catch (RefactoringException)
+        {
+            for (var i = 0; i < moves.Count; i++)
+                outcomes[i] = new MoveOutcome(moves[i].SourcePath, null, NotMoved("another RoslynMcp process kept the lock for writing files too long"));
+            return outcomes;
+        }
 
-            try
+        using (held)
+        {
+            for (var i = 0; i < moves.Count; i++)
             {
-                Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
-                File.Move(sourcePath, targetPath);
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-            {
-                DeleteEmptyDirectories(createdDirectories[i]);
-                outcomes[i] = new MoveOutcome(sourcePath, null, NotMoved($"moving it to '{targetPath}' failed: {ex.Message}"));
-                continue;
-            }
+                var (_, sourcePath, move) = moves[i];
+                var targetPath = move.TargetPath!;
+                createdDirectories[i] = [];
+                for (var dir = Path.GetDirectoryName(targetPath); dir != null && !Directory.Exists(dir); dir = Path.GetDirectoryName(dir))
+                    createdDirectories[i].Add(dir);
 
-            // Repoint the cached document, so the solution matches disk without waiting for the
-            // file watcher (which then finds the document already in place). A multi-targeted
-            // project holds the file once per target framework.
-            foreach (var documentId in solution.GetDocumentIdsWithFilePath(sourcePath))
-                solution = solution.WithDocumentFilePath(documentId, targetPath).WithDocumentFolders(documentId, move.Folders);
-            moved.Add(i);
+                try
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
+                    File.Move(sourcePath, targetPath);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    DeleteEmptyDirectories(createdDirectories[i]);
+                    outcomes[i] = new MoveOutcome(sourcePath, null, NotMoved($"moving it to '{targetPath}' failed: {ex.Message}"));
+                    continue;
+                }
+
+                // Repoint the cached document, so the solution matches disk without waiting for the
+                // file watcher (which then finds the document already in place). A multi-targeted
+                // project holds the file once per target framework.
+                foreach (var documentId in solution.GetDocumentIdsWithFilePath(sourcePath))
+                    solution = solution.WithDocumentFilePath(documentId, targetPath).WithDocumentFolders(documentId, move.Folders);
+                moved.Add(i);
+            }
         }
 
         context.UpdateSolution(solution);
@@ -199,7 +217,7 @@ internal sealed record NamespaceFolderMove(string? TargetPath, IReadOnlyList<str
             catch (OperationCanceledException)
             {
                 foreach (var i in project)
-                    Undo(i, "the operation was cancelled");
+                    await UndoAsync(i, "the operation was cancelled");
                 throw;
             }
             catch (Exception ex)
@@ -213,21 +231,24 @@ internal sealed record NamespaceFolderMove(string? TargetPath, IReadOnlyList<str
                 var targetPath = moves[i].Move.TargetPath!;
                 outcomes[i] = compiled == null || compiled.Contains(PathResolver.NormalizePath(targetPath))
                     ? new MoveOutcome(moves[i].SourcePath, targetPath, null)
-                    : Undo(i, cause ?? $"MSBuild does not compile '{targetPath}' (the project's items exclude it)");
+                    : await UndoAsync(i, cause ?? $"MSBuild does not compile '{targetPath}' (the project's items exclude it)");
             }
         }
 
         return outcomes;
 
-        MoveOutcome Undo(int i, string cause)
+        async Task<MoveOutcome> UndoAsync(int i, string cause)
         {
             var (_, sourcePath, move) = moves[i];
             var targetPath = move.TargetPath!;
             try
             {
-                File.Move(targetPath, sourcePath);
+                // Not cancellable: a move that is not undone leaves the file where MSBuild does
+                // not compile it. The wait for the lock is bounded by its timeout.
+                using (await context.LockFilesForWritingAsync(CancellationToken.None))
+                    File.Move(targetPath, sourcePath);
             }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or RefactoringException)
             {
                 // The file stays at the target, where the cached solution already has it.
                 return new MoveOutcome(sourcePath, targetPath,

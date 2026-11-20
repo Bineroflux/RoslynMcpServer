@@ -23,6 +23,12 @@ namespace RoslynMcp.Core.Workspace;
 /// known only once it has computed its change, and refactorings of unrelated workspaces at the
 /// same time in one server are rare. Queries are not affected; they never enter a section.
 /// </para>
+/// <para>
+/// Other RoslynMcp processes have sections of their own. Against them a commit holds
+/// <see cref="DiskLock"/>, shared by all of them, while it checks its files against the disk and
+/// writes them (lock order: this section first, then <see cref="DiskLock"/>; never the other way
+/// round).
+/// </para>
 /// </remarks>
 internal sealed class WorkspaceWriteCoordinator
 {
@@ -41,6 +47,21 @@ internal sealed class WorkspaceWriteCoordinator
     // latest write that created, deleted or moved it. Touched only by the running section, which
     // holds _gate. Grows with the files written while the server runs (one entry per file).
     private readonly Dictionary<string, (long Written, long Structural)> _written = new(PathResolver.PathComparer);
+
+    /// <summary>
+    /// Creates a coordinator whose commits take <paramref name="diskLock"/> (default: the lock
+    /// file all RoslynMcp processes of the user share, <see cref="CrossProcessWriteLock.DefaultPath"/>).
+    /// </summary>
+    public WorkspaceWriteCoordinator(CrossProcessWriteLock? diskLock = null)
+    {
+        DiskLock = diskLock ?? new CrossProcessWriteLock();
+    }
+
+    /// <summary>
+    /// The lock all RoslynMcp processes share for writing files, taken inside a section (after
+    /// <see cref="RunSectionAsync{T}"/>'s own lock) for the check and the writes of a commit.
+    /// </summary>
+    public CrossProcessWriteLock DiskLock { get; }
 
     /// <summary>
     /// The sequence number of the latest recorded write; a context that has taken over every

@@ -474,6 +474,81 @@ public sealed class PullMembersUpTargetTests
         Assert.Equal(source, ws.ReadFile("Money.cs"));
     }
 
+    [Fact]
+    public async Task IntoAFileWithNullableAnnotationsDisabled_ReferenceTypesLoseTheirQuestionMark()
+    {
+        var files = new[]
+        {
+            ("Base.cs", Lf("""
+                #nullable disable
+                using System.Collections.Generic;
+
+                namespace App;
+
+                public interface INamed
+                {
+                }
+
+                public class Base
+                {
+                }
+                """)),
+            ("Derived.cs", Lf("""
+                using System.Collections.Generic;
+
+                namespace App;
+
+                public class Derived : Base, INamed
+                {
+                    public string? Name { get; set; }
+
+                    public List<string?> Items(string?[] values, int? count)
+                    {
+                        string? first = values.Length > 0 ? values[0] : null;
+                        return new List<string?> { first };
+                    }
+
+                    public T? Pick<T>(T? value) => value;
+                }
+                """))
+        };
+        using var ws = TestWorkspace.Create(files);
+        using var other = TestWorkspace.Create(files);
+
+        var intoClass = await PullAsync(ws, ["Items", "Pick"]);
+        var intoInterface = await PullAsync(other, ["Name", "Items", "Pick"], targetType: "INamed");
+
+        Assert.True(intoClass.Success, intoClass.Error?.Message);
+        Assert.Contains(Lf("""
+            public class Base
+            {
+                public List<string> Items(string[] values, int? count)
+                {
+                    string first = values.Length > 0 ? values[0] : null;
+                    return new List<string> { first };
+                }
+
+                public T Pick<T>(T value) => value;
+            }
+            """), ws.ReadFile("Base.cs"));
+        Assert.DoesNotContain(ws.GetDiskCompilationWarningsAndErrors(), d => d.Contains("CS8632", StringComparison.Ordinal));
+        Assert.Empty(ws.GetDiskCompilationErrors());
+
+        Assert.True(intoInterface.Success, intoInterface.Error?.Message);
+        Assert.Contains(Lf("""
+            public interface INamed
+            {
+                string Name { get; set; }
+
+                List<string> Items(string[] values, int? count);
+
+                T Pick<T>(T value);
+            }
+            """), other.ReadFile("Base.cs"));
+        Assert.DoesNotContain(other.GetDiskCompilationWarningsAndErrors(), d => d.Contains("CS8632", StringComparison.Ordinal));
+        Assert.Empty(other.GetDiskCompilationErrors());
+    }
+
     private static string Lf(string text) => text.ReplaceLineEndings("\n") + "\n";
 
     private static Task<RefactoringResult> PullAsync(

@@ -51,7 +51,8 @@ namespace RoslynMcp.Core.Refactoring.Hierarchy;
 /// </para>
 /// <para>
 /// The members go into the target's part in <c>targetFile</c>, or else its first part in a file
-/// that isn't generated. Usings the moved code needs are added to that file: namespaces, a
+/// that isn't generated, written without the <c>?</c> of reference types where that part has
+/// nullable annotations disabled. Usings the moved code needs are added to that file: namespaces, a
 /// <c>using static</c> for static members named without their type, and the aliases it uses; a
 /// name the target uses for something else is written qualified instead. Usings only the moved
 /// code used are removed from the files it leaves. Compiler errors introduced in the
@@ -641,7 +642,9 @@ public sealed class PullMembersUpOperation : RefactoringOperationBase<PullMember
     /// <summary>
     /// The declaration with <paramref name="qualified"/>'s names replaced and the types that
     /// mention the type's own type parameters written in the target's terms; with
-    /// <paramref name="self"/>, the type itself written as that type parameter of the interface.
+    /// <paramref name="self"/>, the type itself written as that type parameter of the interface;
+    /// where the target has nullable annotations disabled (<paramref name="nullable"/> false),
+    /// reference types without their <c>?</c>.
     /// </summary>
     private static MemberDeclarationSyntax Translate(
         MemberDeclarationSyntax declaration,
@@ -652,8 +655,11 @@ public sealed class PullMembersUpOperation : RefactoringOperationBase<PullMember
         SemanticModel model,
         bool nullable)
     {
-        if (type.TypeParameters.Length == 0 && qualified.Count == 0 && self == null)
+        if (type.TypeParameters.Length == 0 && qualified.Count == 0 && self == null &&
+            (nullable || !declaration.DescendantNodes().OfType<NullableTypeSyntax>().Any()))
+        {
             return declaration;
+        }
 
         var translator = new TypeTranslator(model, type, typeMap, self, qualified, nullable);
         var translated = (MemberDeclarationSyntax)translator.Visit(declaration)!;
@@ -1138,7 +1144,8 @@ public sealed class PullMembersUpOperation : RefactoringOperationBase<PullMember
 
     /// <summary>
     /// Rewrites the types in a declaration that mention its type's type parameters into the
-    /// target's terms, the type itself into <paramref name="self"/> when given, and replaces the
+    /// target's terms, the type itself into <paramref name="self"/> when given, drops the
+    /// <c>?</c> of reference types where <paramref name="nullable"/> is false, and replaces the
     /// names in <paramref name="qualified"/>; <see cref="Failure"/> names a type that can't be
     /// translated.
     /// </summary>
@@ -1180,6 +1187,16 @@ public sealed class PullMembersUpOperation : RefactoringOperationBase<PullMember
             return base.Visit(node);
         }
 
+        public override SyntaxNode? VisitNullableType(NullableTypeSyntax node)
+        {
+            // Where the target has nullable annotations disabled, a nullable reference type (or
+            // unconstrained type parameter) is written without its ? (CS8632); a value type's stays.
+            if (!nullable && !IsValueType(node.ElementType))
+                return Visit(node.ElementType)?.WithTriviaFrom(node);
+
+            return base.VisitNullableType(node);
+        }
+
         public override SyntaxNode? VisitParameter(ParameterSyntax node)
         {
             // A type parameter has no conversion from null (CS1750): Money? other = null becomes
@@ -1197,6 +1214,10 @@ public sealed class PullMembersUpOperation : RefactoringOperationBase<PullMember
 
         /// <summary>Whether a name names a type (rather than a value).</summary>
         private bool IsTypePosition(NameSyntax syntax) => model.GetSymbolInfo(syntax).Symbol is ITypeSymbol;
+
+        /// <summary>Whether a type written in the declaration is a value type once written in the target's terms.</summary>
+        private bool IsValueType(TypeSyntax syntax) =>
+            model.GetTypeInfo(syntax).Type is not { } symbol || (MemberFamily.Substitute(symbol, map, model.Compilation) ?? symbol).IsValueType;
 
         private bool Mentions(ITypeSymbol symbol) => symbol switch
         {

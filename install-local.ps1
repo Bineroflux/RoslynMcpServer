@@ -5,6 +5,11 @@
 # appends a '-local' suffix so locally-installed dev builds are clearly distinguishable
 # from released packages — e.g. base 0.6.0 -> installed 0.6.0-local. A normal
 # `dotnet pack` (no suffix) still produces the clean release version.
+#
+# The packages are Orca.RoslynMcp.Server / Orca.RoslynMcp.Cli, not upstream's ids: nuget.org
+# carries RoslynMcp.Server / RoslynMcp.Cli in higher versions, and tools that update global .NET
+# tools (e.g. UniGetUI) would offer those as an update. The upstream packages install the same
+# commands, so they are uninstalled first.
 
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
@@ -20,8 +25,8 @@ $suffix = 'local'
 $version = "$prefix-$suffix"
 
 $tools = @(
-    @{ PackageId = 'RoslynMcp.Server'; Project = Join-Path $root 'src\RoslynMcp.Server\RoslynMcp.Server.csproj' }
-    @{ PackageId = 'RoslynMcp.Cli';    Project = Join-Path $root 'src\RoslynMcp.Cli\RoslynMcp.Cli.csproj' }
+    @{ PackageId = 'Orca.RoslynMcp.Server'; UpstreamId = 'RoslynMcp.Server'; Project = Join-Path $root 'src\RoslynMcp.Server\RoslynMcp.Server.csproj' }
+    @{ PackageId = 'Orca.RoslynMcp.Cli';    UpstreamId = 'RoslynMcp.Cli';    Project = Join-Path $root 'src\RoslynMcp.Cli\RoslynMcp.Cli.csproj' }
 )
 
 foreach ($tool in $tools) {
@@ -33,9 +38,10 @@ foreach ($tool in $tools) {
     dotnet pack $project -c Release -o $nupkgDir --version-suffix $suffix
     if ($LASTEXITCODE -ne 0) { Write-Error "Pack failed for $packageId."; exit 1 }
 
-    Write-Host "Uninstalling existing global tool $packageId..." -ForegroundColor Cyan
+    Write-Host "Uninstalling existing global tool $packageId and upstream $($tool.UpstreamId)..." -ForegroundColor Cyan
     dotnet tool uninstall -g $packageId 2>$null
-    # Ignore exit code — tool may not be installed
+    dotnet tool uninstall -g $tool.UpstreamId 2>$null
+    # Ignore exit codes — either tool may not be installed
 
     Write-Host "Installing $packageId $version from local package..." -ForegroundColor Cyan
     dotnet tool install -g $packageId --version $version --add-source $nupkgDir

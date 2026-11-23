@@ -8,6 +8,8 @@ on:
 jobs:
   publish:
     name: Build and Publish NuGet Packages
+    # Disabled: this fork packs Orca.RoslynMcp.* for local use (install-local.ps1) and must not publish to nuget.org.
+    if: false
     runs-on: windows-latest
 
     steps:

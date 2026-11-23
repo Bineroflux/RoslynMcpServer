@@ -2,9 +2,11 @@
 
 [![Build and Test](https://github.com/JoshuaRamirez/RoslynMcpServer/actions/workflows/build.yml/badge.svg)](https://github.com/JoshuaRamirez/RoslynMcpServer/actions/workflows/build.yml)
 [![Code Quality](https://github.com/JoshuaRamirez/RoslynMcpServer/actions/workflows/quality.yml/badge.svg)](https://github.com/JoshuaRamirez/RoslynMcpServer/actions/workflows/quality.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+<!-- This fork is not published to nuget.org; these badges show the upstream package.
 [![NuGet](https://img.shields.io/nuget/v/RoslynMcp.Server.svg)](https://www.nuget.org/packages/RoslynMcp.Server)
 [![NuGet Downloads](https://img.shields.io/nuget/dt/RoslynMcp.Server.svg)](https://www.nuget.org/packages/RoslynMcp.Server)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+-->
 
 Let AI assistants like Claude safely refactor your C# codebase using the same Roslyn compiler platform that powers Visual Studio.
 
@@ -25,7 +27,7 @@ Roslyn MCP Server is a [Model Context Protocol (MCP)](https://modelcontextprotoc
 - [Several Servers and Editors](#several-servers-and-editors)
 - [Analyzer Shadow Copying](#analyzer-shadow-copying)
 - [Troubleshooting](#troubleshooting)
-- [NuGet Libraries](#nuget-libraries)
+  <!-- - [NuGet Libraries](#nuget-libraries) -->
 - [Contributing](#contributing)
 - [License](#license)
 
@@ -37,7 +39,7 @@ Roslyn MCP Server is a [Model Context Protocol (MCP)](https://modelcontextprotoc
 - **Preview mode on every operation** -- see exactly what will change before applying
 - **Atomic file writes with rollback** -- if any file write fails, all changes are reverted
 - **Solution-wide reference updates** -- renames and moves propagate across your entire solution
-- **Single command install** -- `dotnet tool install -g RoslynMcp.Server`, no repo cloning needed
+  <!-- - **Single command install** -- `dotnet tool install -g RoslynMcp.Server`, no repo cloning needed -->
 - **Cross-platform** -- works on Windows, Linux, and macOS
 - **Build while it's connected** -- analyzers and source generators are [shadow-copied](#analyzer-shadow-copying), so a concurrent `dotnet build` never fails on a locked DLL
 
@@ -64,10 +66,19 @@ The output should be `11.0.x` or higher.
 
 ### 1. Install
 
+This fork is not published to nuget.org. Build and install it from source with `install-local.ps1`: it packs `Orca.RoslynMcp.Server` and `Orca.RoslynMcp.Cli` with a `-local` version suffix and installs both as global tools.
+
+```bash
+./install-local.ps1
+roslyn-mcp --version   # prints the installed version, e.g. 0.6.0-local
+```
+
+<!--
 ```bash
 dotnet tool install -g RoslynMcp.Server
 roslyn-mcp --version   # prints the installed version, e.g. 0.6.0
 ```
+-->
 
 ### 2. Configure
 
@@ -111,9 +122,13 @@ All 47 tools are also available as a standalone CLI for use in scripts, CI/CD pi
 
 ### Install
 
+`install-local.ps1` installs the CLI together with the server (see [Quick Start](#quick-start)).
+
+<!--
 ```bash
 dotnet tool install -g RoslynMcp.Cli
 ```
+-->
 
 ### Usage
 
@@ -378,7 +393,8 @@ If MSBuild cannot be located or your solution fails to load:
 
 ### Build fails: file "being used by another process (RoslynMcp.Server)"
 
-The running server predates [analyzer shadow copying](#analyzer-shadow-copying). Stop the server, run `dotnet tool update -g RoslynMcp.Server` (a running tool locks its own binaries), and reconnect.
+The running server predates [analyzer shadow copying](#analyzer-shadow-copying). Stop the server, rerun `install-local.ps1` (a running tool locks its own binaries), and reconnect.
+<!-- Stop the server, run `dotnet tool update -g RoslynMcp.Server` (a running tool locks its own binaries), and reconnect. -->
 
 ### Using the diagnose tool
 
@@ -399,6 +415,7 @@ Or without a solution path to check just the environment:
 
 ---
 
+<!-- This fork does not publish the libraries to nuget.org.
 ## NuGet Libraries
 
 In addition to the global tool, the project publishes libraries for building custom integrations:
@@ -412,6 +429,7 @@ dotnet add package RoslynMcp.Contracts
 ```
 
 ---
+-->
 
 ## Contributing
 
